@@ -1,26 +1,145 @@
 @import "tailwindcss";
 
+/* Autocut — black + electric yellow theme */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg-base:     #111111;
+  --bg-panel:    #171717;
+  --bg-elevated: #1e1e1e;
+  --bg-surface:  #252525;
+  --bg-hover:    #2e2e2e;
+
+  --accent:        #E8FF00;
+  --accent-dim:    rgba(232, 255, 0, 0.08);
+  --accent-border: rgba(232, 255, 0, 0.30);
+
+  /* Light blue track colors */
+  --blue-clip:   #3B7FC4;
+  --blue-clip-hi:#5299D9;
+  --audio-clip:  #3B7FC4;
+  --audio-clip-hi:#5299D9;
+
+  /* Caption / text overlay / speed track colors */
+  --caption-clip: #F59E0B;
+  --text-clip:    #8B5CF6;
+  --speed-clip:   #EF4444;
+
+  --fg-primary:   rgba(255, 255, 255, 0.95);
+  --fg-secondary: rgba(255, 255, 255, 0.52);
+  --fg-muted:     rgba(255, 255, 255, 0.28);
+  --fg-faint:     rgba(255, 255, 255, 0.07);
+
+  --border:       rgba(255, 255, 255, 0.07);
+  --border-mid:   rgba(255, 255, 255, 0.12);
+
+  --playhead:    #ffffff;
+  --selection:   rgba(0, 120, 212, 0.22);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-background: var(--bg-base);
+  --color-foreground: var(--fg-primary);
+  --font-sans: var(--font-serif);
+  --font-mono: var(--font-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg-base);
+  color: var(--fg-primary);
+  font-family: var(--font-serif), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+input, textarea { caret-color: var(--accent); outline: none; }
+
+/* No text selection on drag areas */
+.no-select { user-select: none; -webkit-user-select: none; }
+
+/* Video clip block */
+.clip-video {
+  background: linear-gradient(180deg, var(--blue-clip-hi) 0%, var(--blue-clip) 100%);
+}
+.clip-audio {
+  background: linear-gradient(180deg, var(--audio-clip-hi) 0%, var(--audio-clip) 100%);
+}
+.clip-caption {
+  background: linear-gradient(180deg, #FBBF24 0%, #D97706 100%);
+}
+.clip-textoverlay {
+  background: linear-gradient(180deg, #A78BFA 0%, #7C3AED 100%);
+}
+.clip-speed {
+  background: linear-gradient(180deg, #F87171 0%, #DC2626 100%);
+}
+
+/* Waveform bar */
+.waveform-bar {
+  background: rgba(255,255,255,0.50);
+  border-radius: 1px;
+}
+
+/* Playhead triangle cap */
+.playhead-cap {
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid var(--playhead);
+}
+
+/* Spinner dots */
+@keyframes dotPulse {
+  0%, 100% { opacity: 0.15; transform: scaleY(0.5); }
+  50%       { opacity: 0.9;  transform: scaleY(1); }
+}
+.dot-bar {
+  animation: dotPulse 1.2s ease-in-out infinite;
+}
+
+/* Shimmer progress bar */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-200%); width: 40%; }
+  50% { width: 60%; }
+  100% { transform: translateX(350%); width: 40%; }
+}
+
+/* Fade in */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fadeIn 0.15s ease-out; }
+
+/* Panel divider lines */
+.panel-divider-v {
+  width: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.panel-divider-h {
+  height: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* Drag-over highlight */
+.drop-active {
+  border-color: var(--accent) !important;
+  background: var(--accent-dim) !important;
 }
