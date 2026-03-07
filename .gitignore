@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# large ffmpeg binaries (>25MB, exceeds GitHub limit)
+public/ffmpeg/*.wasm
+public/ffmpeg/ffmpeg-core.js
+
+# ai-video-editor next build artifacts
+ai-video-editor/.next/
