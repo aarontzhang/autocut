@@ -92,6 +92,27 @@ export default function Timeline({ videoRef }: TimelineProps) {
     return () => ro.disconnect();
   }, []);
 
+  // Non-passive wheel: ctrl/meta = zoom, vertical = horizontal pan
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const cur = useEditorStore.getState().zoom;
+        const next = e.deltaY > 0 ? cur / 1.25 : cur * 1.25;
+        useEditorStore.getState().setZoom(Math.max(0.5, Math.round(next * 10) / 10));
+        return;
+      }
+      if (Math.abs(e.deltaX) < Math.abs(e.deltaY)) {
+        e.preventDefault();
+        el.scrollLeft += e.deltaY;
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   // Convert timeline time to pixel
   const tPx = useCallback((t: number) => {
     if (totalTimelineDuration <= 0) return 0;
@@ -299,6 +320,57 @@ export default function Timeline({ videoRef }: TimelineProps) {
     });
   }, [totalW, totalTimelineDuration, addClipToTrack]);
 
+  // Handle file drop onto the main timeline area → auto-create video+audio track pair
+  const [isMainDragOver, setIsMainDragOver] = useState(false);
+
+  const handleMainFileDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsMainDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.type.startsWith('video/')) return;
+
+    const sourceUrl = URL.createObjectURL(file);
+    const duration = await new Promise<number>((resolve) => {
+      const tmp = document.createElement('video');
+      tmp.src = sourceUrl;
+      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
+      tmp.onerror = () => { resolve(10); tmp.src = ''; };
+    });
+
+    const dropTime = useEditorStore.getState().currentTime;
+
+    // Add video track and get its ID
+    addTrack('video');
+    const videoTrack = useEditorStore.getState().extraTracks.slice().reverse().find(t => t.type === 'video');
+    if (videoTrack) {
+      addClipToTrack(videoTrack.id, {
+        sourceUrl,
+        sourceName: file.name,
+        sourceStart: 0,
+        sourceDuration: duration,
+        timelineStart: dropTime,
+        speed: 1,
+        volume: 1,
+      });
+    }
+
+    // Add matching audio track
+    addTrack('audio');
+    const audioTrack = useEditorStore.getState().extraTracks.slice().reverse().find(t => t.type === 'audio');
+    if (audioTrack) {
+      addClipToTrack(audioTrack.id, {
+        sourceUrl,
+        sourceName: file.name,
+        sourceStart: 0,
+        sourceDuration: duration,
+        timelineStart: dropTime,
+        speed: 1,
+        volume: 1,
+      });
+    }
+  }, [addTrack, addClipToTrack]);
+
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       // Playhead scrub drag
@@ -452,71 +524,38 @@ export default function Timeline({ videoRef }: TimelineProps) {
           </span>
         )}
 
-        {selectedItem && (
-          <span style={{
-            fontSize: 10, padding: '1px 7px', borderRadius: 3,
-            background: 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.12)',
-            color: 'rgba(255,255,255,0.5)',
-            fontFamily: 'var(--font-serif)',
-          }}>
-            {selectedItem.type} selected · ⌫ delete
-          </span>
-        )}
-
         <div style={{ flex: 1 }} />
 
-        {/* Add track buttons */}
-        <button
-          onClick={() => addTrack('video')}
-          title="Add video track"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 3,
-            background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(96,165,250,0.25)',
-            borderRadius: 4, padding: '2px 7px', cursor: 'pointer',
-            fontSize: 10, color: 'rgba(147,197,253,0.8)', fontFamily: 'var(--font-serif)',
-          }}
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Video
-        </button>
-        <button
-          onClick={() => addTrack('audio')}
-          title="Add audio track"
-          style={{
-            display: 'flex', alignItems: 'center', gap: 3,
-            background: 'rgba(52,211,153,0.08)', border: '1px solid rgba(52,211,153,0.2)',
-            borderRadius: 4, padding: '2px 7px', cursor: 'pointer',
-            fontSize: 10, color: 'rgba(110,231,183,0.8)', fontFamily: 'var(--font-serif)',
-          }}
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Audio
-        </button>
-
-        {/* Zoom */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            <line x1="8" y1="11" x2="14" y2="11"/>
-          </svg>
-          <input
-            type="range" min={1} max={20} step={0.5}
-            value={zoom}
-            onChange={e => setZoom(Number(e.target.value))}
-            style={{ width: 72, accentColor: 'var(--accent)', cursor: 'pointer' }}
-          />
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            <line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>
-          </svg>
+        {/* Zoom controls */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <button
+            onClick={() => setZoom(Math.max(0.5, Math.round(zoom / 1.25 * 10) / 10))}
+            style={{
+              width: 22, height: 22, borderRadius: 4, background: 'transparent',
+              border: '1px solid var(--border)', cursor: 'pointer',
+              color: 'var(--fg-muted)', fontSize: 14, lineHeight: 1,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >−</button>
+          <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', minWidth: 30, textAlign: 'center' }}>
+            {zoom}×
+          </span>
+          <button
+            onClick={() => setZoom(Math.round(zoom * 1.25 * 10) / 10)}
+            style={{
+              width: 22, height: 22, borderRadius: 4, background: 'transparent',
+              border: '1px solid var(--border)', cursor: 'pointer',
+              color: 'var(--fg-muted)', fontSize: 14, lineHeight: 1,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >+</button>
         </div>
       </div>
 
       {/* Scrollable area */}
       <div
         ref={scrollRef}
-        style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', display: 'flex', flexDirection: 'row', cursor: 'grab' }}
+        style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', display: 'flex', flexDirection: 'row', cursor: 'grab', position: 'relative' }}
         className="no-select"
         onMouseDown={e => {
           // Don't start a pan if clicking on a clip/effect block or playhead dot
@@ -524,7 +563,22 @@ export default function Timeline({ videoRef }: TimelineProps) {
           panRef.current = { startX: e.clientX, startScrollLeft: scrollRef.current?.scrollLeft ?? 0, moved: false };
           document.body.style.cursor = 'grabbing';
         }}
+        onDragOver={e => { e.preventDefault(); e.stopPropagation(); setIsMainDragOver(true); }}
+        onDragLeave={e => { if (!scrollRef.current?.contains(e.relatedTarget as Node)) setIsMainDragOver(false); }}
+        onDrop={handleMainFileDrop}
       >
+        {isMainDragOver && (
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 20, pointerEvents: 'none',
+            border: '2px dashed rgba(255,255,255,0.3)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(255,255,255,0.03)',
+          }}>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-serif)' }}>
+              Drop video — clips start at playhead
+            </span>
+          </div>
+        )}
         {/* Track headers */}
         <div style={{
           width: HEADER_W, flexShrink: 0,
@@ -621,7 +675,6 @@ export default function Timeline({ videoRef }: TimelineProps) {
               if (!clip) return null;
               const clipLeft = tPx(entry.timelineStart);
               const clipWidth = tPx(entry.timelineEnd) - clipLeft;
-              const isSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
               return (
                 <ClipBlock
                   key={clip.id}
@@ -629,9 +682,9 @@ export default function Timeline({ videoRef }: TimelineProps) {
                   left={clipLeft}
                   width={clipWidth}
                   height={TRACK_HEIGHT}
-                  isSelected={isSelected}
+                  isSelected={false}
                   index={i}
-                  onSelect={e => { e.stopPropagation(); setSelectedItem({ type: 'clip', id: clip.id }); }}
+                  onSelect={e => e.stopPropagation()}
                   onMouseDown={e => { e.stopPropagation(); }}
                   onTrimLeftStart={e => startClipTrimLeft(e, clip.id)}
                   onTrimRightStart={e => startClipTrimRight(e, clip.id)}
@@ -950,9 +1003,9 @@ function ExtraTrackRow({ height, track, totalW, totalTimelineDuration, tPx, play
         overflow: 'hidden',
         transition: 'background 0.1s',
       }}
-      onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+      onDragOver={e => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); }}
       onDragLeave={() => setIsDragOver(false)}
-      onDrop={e => { setIsDragOver(false); onDrop(e); }}
+      onDrop={e => { e.stopPropagation(); setIsDragOver(false); onDrop(e); }}
     >
       {isDragOver && (
         <div style={{

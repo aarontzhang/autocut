@@ -504,8 +504,14 @@ function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; index
       alignItems: 'center', justifyContent: 'center',
       padding: '32px 16px', gap: 8, textAlign: 'center',
     }}>
+      <img
+        src="/logo.png"
+        width={48} height={48}
+        style={{ display: 'block', marginBottom: 8, opacity: 0.9 }}
+        alt="Claude"
+      />
       <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg-primary)', margin: 0, fontFamily: 'var(--font-serif)' }}>
-        Ask Autocut to make edits
+        Ask Claude Cut to make edits
       </p>
       <p style={{ fontSize: 12, color: 'var(--fg-muted)', margin: 0, lineHeight: 1.6, fontFamily: 'var(--font-serif)' }}>
         Describe what you want — trim silence, add captions, adjust speed, and more.
@@ -872,13 +878,9 @@ export default function ChatSidebar() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <svg width="16" height="16" viewBox="0 0 18 18" fill="var(--accent)">
-            <path d="M 0,2.5 Q 0,0 2.236,1.118 L 6.764,3.382 Q 9,4.5 6.764,5.618 L 2.236,7.882 Q 0,9 0,6.5 Z"/>
-            <path d="M 9,7 Q 9,4.5 11.236,5.618 L 15.764,7.882 Q 18,9 15.764,10.118 L 11.236,12.382 Q 9,13.5 9,11 Z"/>
-            <path d="M 0,11.5 Q 0,9 2.236,10.118 L 6.764,12.382 Q 9,13.5 6.764,14.618 L 2.236,16.882 Q 0,18 0,15.5 Z"/>
-          </svg>
+          <img src="/logo.png" width={16} height={16} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-            Autocut
+            Claude Cut
           </span>
         </div>
 

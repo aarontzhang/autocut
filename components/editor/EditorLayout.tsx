@@ -10,8 +10,11 @@ import MediaPanel from './MediaPanel';
 import Timeline from './Timeline';
 import ChatSidebar from '../chat/ChatSidebar';
 import ExportProgress from './ExportProgress';
+import { useAutoSave } from '@/lib/useAutoSave';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { getSupabaseBrowser } from '@/lib/supabase/client';
 
-export default function EditorLayout() {
+export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
 
@@ -83,6 +86,12 @@ export default function EditorLayout() {
   const videoDuration = useEditorStore(s => s.videoDuration);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const loadProject = useEditorStore(s => s.loadProject);
+  const videoUrl = useEditorStore(s => s.videoUrl);
+  const setStoragePath = useEditorStore(s => s.setStoragePath);
+  const { user } = useAuth();
+
+  useAutoSave();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -144,10 +153,51 @@ export default function EditorLayout() {
     })();
   }, [videoFile, videoDuration, transcriptStatus, setBackgroundTranscript]);
 
+  // Load project from URL param
+  useEffect(() => {
+    if (!projectId) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.signedUrl) return;
+
+        const blobRes = await fetch(data.signedUrl);
+        const blob = await blobRes.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        loadProject(
+          data.edit_state ?? {},
+          blobUrl,
+          data.video_path,
+          projectId
+        );
+      } catch (e) {
+        console.error('Failed to load project', e);
+      }
+    })();
+  }, [projectId]);
+
   const importFile = useCallback((file: File) => {
     if (!file.type.startsWith('video/')) return;
     setVideoFile(file);
-  }, [setVideoFile]);
+
+    // Background upload to storage so the project persists on reload
+    const { currentProjectId, storagePath } = useEditorStore.getState();
+    if (!currentProjectId || !user || storagePath) return; // skip if already uploaded
+    const path = `${user.id}/${currentProjectId}/${file.name}`;
+    const supabase = getSupabaseBrowser();
+    supabase.storage.from('videos').upload(path, file, { upsert: true }).then(({ error }) => {
+      if (error) { console.warn('Background upload failed:', error.message); return; }
+      fetch(`/api/projects/${currentProjectId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_path: path, video_filename: file.name, video_size: file.size }),
+      });
+      setStoragePath(path);
+    });
+  }, [setVideoFile, user, setStoragePath]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -193,8 +243,8 @@ export default function EditorLayout() {
             </div>
 
             {/* Video preview */}
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#111' }}>
-              {videoFile
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
+              {(videoFile || videoUrl)
                 ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
                 : <EmptyDropZone importFile={importFile} />
               }
@@ -247,7 +297,7 @@ function EmptyDropZone({ importFile }: { importFile: (f: File) => void }) {
   const [isDragging, setIsDragging] = useState(false);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)' }}>
       <div
         onDragOver={e => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}

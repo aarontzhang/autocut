@@ -1,8 +1,100 @@
 'use client';
 
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useState, useEffect } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { exportClips } from '@/lib/ffmpegClient';
+import SaveIndicator from '@/components/editor/SaveIndicator';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { useRouter } from 'next/navigation';
+
+function UserMenu({ email }: { email: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const handleSignOut = async () => {
+    await getSupabaseBrowser().auth.signOut();
+    router.push('/auth/login');
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={email}
+        style={{
+          width: 28, height: 28, borderRadius: '50%',
+          background: 'var(--accent)', border: 'none', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, fontWeight: 600, color: '#fff', flexShrink: 0,
+        }}
+      >
+        {email[0]?.toUpperCase() ?? '?'}
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: 36, right: 0, zIndex: 100,
+          background: 'var(--bg-panel)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          minWidth: 200,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          overflow: 'hidden',
+        }}>
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+            <p style={{ fontSize: 11, color: 'var(--fg-muted)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {email}
+            </p>
+          </div>
+          <button
+            onClick={() => { setOpen(false); router.push('/projects'); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              width: '100%', padding: '9px 14px',
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: 'var(--fg-secondary)', textAlign: 'left',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-elevated)'; e.currentTarget.style.color = 'var(--fg-primary)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--fg-secondary)'; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+            My Projects
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '0 14px' }} />
+          <button
+            onClick={handleSignOut}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              width: '100%', padding: '9px 14px',
+              background: 'none', border: 'none', cursor: 'pointer',
+              fontSize: 12, color: 'var(--fg-secondary)', textAlign: 'left',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-elevated)'; e.currentTarget.style.color = '#f87171'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--fg-secondary)'; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
@@ -10,13 +102,14 @@ export default function TopBar() {
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
   const clips = useEditorStore(s => s.clips);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
-  const resetEditor = useEditorStore(s => s.resetEditor);
   const setVideoFile = useEditorStore(s => s.setVideoFile);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
   const canUndo = useEditorStore(s => s.history.length > 0);
   const canRedo = useEditorStore(s => s.future.length > 0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
+  const router = useRouter();
 
   const outputReady = ffmpegJob.status === 'done';
   const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && !!videoFile;
@@ -51,18 +144,14 @@ export default function TopBar() {
     }}>
       {/* Logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 4 }}>
-        <svg width="20" height="20" viewBox="0 0 18 18" fill="var(--accent)">
-          <path d="M 0,2.5 Q 0,0 2.236,1.118 L 6.764,3.382 Q 9,4.5 6.764,5.618 L 2.236,7.882 Q 0,9 0,6.5 Z"/>
-          <path d="M 9,7 Q 9,4.5 11.236,5.618 L 15.764,7.882 Q 18,9 15.764,10.118 L 11.236,12.382 Q 9,13.5 9,11 Z"/>
-          <path d="M 0,11.5 Q 0,9 2.236,10.118 L 6.764,12.382 Q 9,13.5 6.764,14.618 L 2.236,16.882 Q 0,18 0,15.5 Z"/>
-        </svg>
+        <img src="/logo.png" width={20} height={20} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
         <span style={{
           fontSize: 14, fontWeight: 600,
           color: 'var(--fg-primary)',
           letterSpacing: '-0.02em',
           fontFamily: 'var(--font-serif)',
         }}>
-          Autocut
+          Claude Cut
         </span>
       </div>
 
@@ -110,9 +199,9 @@ export default function TopBar() {
 
       <div style={{ width: 1, height: 16, background: 'var(--border-mid)' }} />
 
-      {/* New Project */}
+      {/* My Projects */}
       <button
-        onClick={resetEditor}
+        onClick={() => router.push('/projects')}
         style={{
           display: 'flex', alignItems: 'center', gap: 5,
           fontSize: 12, color: 'var(--fg-secondary)',
@@ -125,10 +214,9 @@ export default function TopBar() {
         onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--fg-secondary)'; }}
       >
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <line x1="12" y1="5" x2="12" y2="19"/>
-          <line x1="5" y1="12" x2="19" y2="12"/>
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
         </svg>
-        New
+        Projects
       </button>
 
       {/* Import video */}
@@ -170,6 +258,8 @@ export default function TopBar() {
 
       <div style={{ flex: 1 }} />
 
+      <SaveIndicator />
+
       {/* Export / Download */}
       {outputReady ? (
         <a
@@ -178,7 +268,7 @@ export default function TopBar() {
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 12, fontWeight: 500,
-            background: 'var(--accent)', color: '#000',
+            background: 'var(--accent)', color: '#fff',
             border: 'none', borderRadius: 5, cursor: 'pointer',
             padding: '5px 14px', textDecoration: 'none',
             fontFamily: 'var(--font-serif)',
@@ -199,7 +289,7 @@ export default function TopBar() {
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 12, fontWeight: 500,
             background: canExport ? 'var(--accent)' : 'var(--bg-elevated)',
-            color: canExport ? '#000' : 'var(--fg-muted)',
+            color: canExport ? '#fff' : 'var(--fg-muted)',
             border: `1px solid ${canExport ? 'transparent' : 'var(--border-mid)'}`,
             borderRadius: 5, cursor: canExport ? 'pointer' : 'default',
             padding: '5px 14px',
@@ -214,6 +304,13 @@ export default function TopBar() {
           </svg>
           Export
         </button>
+      )}
+
+      {user && (
+        <>
+          <div style={{ width: 1, height: 16, background: 'var(--border-mid)', marginLeft: 4 }} />
+          <UserMenu email={user.email ?? ''} />
+        </>
       )}
     </div>
   );

@@ -1,17 +1,49 @@
 'use client';
 
 import { useRef, useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useEditorStore } from '@/lib/useEditorStore';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { uploadVideoToSupabase } from '@/lib/uploadVideo';
+import { getSupabaseBrowser } from '@/lib/supabase/client';
 
 export default function UploadScreen() {
-  const setVideoFile = useEditorStore(s => s.setVideoFile);
+  const setVideoCloud = useEditorStore(s => s.setVideoCloud);
+  const setUploadProgress = useEditorStore(s => s.setUploadProgress);
+  const uploadProgress = useEditorStore(s => s.uploadProgress);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
+  const router = useRouter();
 
-  const handleFile = useCallback((file: File) => {
+  const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
-    setVideoFile(file);
-  }, [setVideoFile]);
+    if (file.size > 500 * 1024 * 1024) {
+      const ok = window.confirm(`This file is ${(file.size / 1e9).toFixed(1)} GB. Large uploads may take a while. Continue?`);
+      if (!ok) return;
+    }
+    if (!user) return;
+
+    setUploadError('');
+    setUploadProgress(0);
+
+    try {
+      const { projectId, storagePath } = await uploadVideoToSupabase(
+        file,
+        user.id,
+        (pct) => setUploadProgress(pct)
+      );
+      console.log('Upload success:', { projectId, storagePath });
+      const blobUrl = URL.createObjectURL(file);
+      setVideoCloud(file, blobUrl, storagePath, projectId);
+      router.push(`/?project=${projectId}`);
+    } catch (err) {
+      console.error('Upload error:', err);
+      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+      setUploadProgress(null);
+    }
+  }, [user, setVideoCloud, setUploadProgress]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -20,24 +52,29 @@ export default function UploadScreen() {
     if (file) handleFile(file);
   }, [handleFile]);
 
+  const handleSignOut = async () => {
+    await getSupabaseBrowser().auth.signOut();
+    router.push('/auth/login');
+  };
+
   return (
     <div
       className="h-screen flex flex-col items-center justify-center"
-      style={{ background: 'var(--bg-base)' }}
+      style={{ background: 'var(--bg-base)', position: 'relative' }}
     >
+      {/* User info top-right */}
+      <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{user?.email}</span>
+        <button onClick={handleSignOut} style={{ fontSize: 12, color: 'var(--fg-secondary)', background: 'none', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}>
+          Sign out
+        </button>
+      </div>
+
       {/* Logo */}
       <div className="flex items-center gap-2.5 mb-12">
-        <div style={{
-          width: 32, height: 32, borderRadius: 8,
-          background: 'linear-gradient(135deg, #00c4cc, #0094ff)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="white">
-            <path d="M8 5v14l11-7z"/>
-          </svg>
-        </div>
+        <img src="/logo.png" width={32} height={32} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
         <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>
-          CUT
+          Claude Cut
         </span>
       </div>
 
@@ -46,14 +83,14 @@ export default function UploadScreen() {
         onDrop={onDrop}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
-        onClick={() => inputRef.current?.click()}
+        onClick={() => uploadProgress === null && inputRef.current?.click()}
         style={{
           width: 480,
-          border: `1.5px dashed ${isDragging ? 'var(--teal)' : 'rgba(255,255,255,0.15)'}`,
+          border: `1.5px dashed ${isDragging ? 'var(--accent)' : 'rgba(255,255,255,0.15)'}`,
           borderRadius: 12,
           padding: '52px 32px',
-          background: isDragging ? 'var(--teal-dim)' : 'rgba(255,255,255,0.02)',
-          cursor: 'pointer',
+          background: isDragging ? 'var(--accent-dim)' : 'rgba(255,255,255,0.02)',
+          cursor: uploadProgress !== null ? 'default' : 'pointer',
           transition: 'all 0.2s ease',
           display: 'flex',
           flexDirection: 'column',
@@ -64,13 +101,13 @@ export default function UploadScreen() {
         {/* Upload icon */}
         <div style={{
           width: 56, height: 56, borderRadius: '50%',
-          background: isDragging ? 'var(--teal-dim)' : 'rgba(255,255,255,0.04)',
+          background: isDragging ? 'var(--accent-dim)' : 'rgba(255,255,255,0.04)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          border: `1px solid ${isDragging ? 'var(--teal-border)' : 'rgba(255,255,255,0.08)'}`,
+          border: `1px solid ${isDragging ? 'var(--accent-border)' : 'rgba(255,255,255,0.08)'}`,
           transition: 'all 0.2s ease',
         }}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-            stroke={isDragging ? 'var(--teal)' : 'rgba(255,255,255,0.4)'} strokeWidth="1.5">
+            stroke={isDragging ? 'var(--accent)' : 'rgba(255,255,255,0.4)'} strokeWidth="1.5">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="17 8 12 3 7 8"/>
             <line x1="12" y1="3" x2="12" y2="15"/>
@@ -86,9 +123,7 @@ export default function UploadScreen() {
           </p>
         </div>
 
-        <div style={{
-          display: 'flex', gap: 8, marginTop: 4,
-        }}>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
           {['MP4', 'MOV', 'AVI', 'WEBM', 'MKV'].map(fmt => (
             <span key={fmt} style={{
               fontSize: 11, fontFamily: 'var(--font-geist-mono)',
@@ -110,9 +145,26 @@ export default function UploadScreen() {
         />
       </div>
 
+      {/* Progress bar */}
+      {uploadProgress !== null && (
+        <div style={{ width: 480, marginTop: 16 }}>
+          <div style={{ height: 3, background: 'rgba(255,255,255,0.08)', borderRadius: 2 }}>
+            <div style={{ height: '100%', width: `${uploadProgress}%`, background: 'var(--accent)', borderRadius: 2, transition: 'width 0.3s' }} />
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--fg-muted)', marginTop: 6, textAlign: 'center' }}>
+            {uploadProgress < 100 ? `Uploading\u2026 ${uploadProgress}%` : 'Processing\u2026'}
+          </p>
+        </div>
+      )}
+
+      {/* Error */}
+      {uploadError && (
+        <p style={{ marginTop: 12, fontSize: 12, color: '#f87171' }}>{uploadError}</p>
+      )}
+
       {/* Bottom hint */}
       <p style={{ marginTop: 28, fontSize: 12, color: 'var(--fg-muted)' }}>
-        Powered by Claude AI · No file size limits
+        Powered by Claude AI · Max 500MB recommended
       </p>
     </div>
   );

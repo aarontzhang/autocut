@@ -84,6 +84,12 @@ interface EditorState {
   // FFmpeg
   ffmpegJob: FFmpegJob;
 
+  // Cloud / project persistence
+  currentProjectId: string | null;
+  storagePath: string | null;
+  uploadProgress: number | null;
+  saveStatus: 'idle' | 'saving' | 'saved' | 'error';
+
   // Timeline
   zoom: number;
 
@@ -127,6 +133,12 @@ interface EditorState {
 
   // FFmpeg
   setFFmpegJob: (job: FFmpegJob) => void;
+
+  setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[] }, blobUrl: string, storagePath: string, projectId: string, duration?: number) => void;
+  setUploadProgress: (pct: number | null) => void;
+  setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
+  setStoragePath: (path: string) => void;
 
   // Zoom
   setZoom: (zoom: number) => void;
@@ -173,6 +185,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   messages: [],
   isChatLoading: false,
   ffmpegJob: { status: 'idle' },
+  currentProjectId: null,
+  storagePath: null,
+  uploadProgress: null,
+  saveStatus: 'idle' as const,
   zoom: 1,
   backgroundTranscript: null,
   transcriptStatus: 'idle' as TranscriptStatus,
@@ -488,6 +504,38 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setFFmpegJob: (job) => set({ ffmpegJob: job }),
 
+  setVideoCloud: (file, blobUrl, storagePath, projectId) => {
+    set({
+      videoFile: file, videoUrl: blobUrl, videoData: null, videoDuration: 0, currentTime: 0,
+      pendingAction: null, clips: [],
+      captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      history: [], future: [],
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
+    });
+  },
+
+  loadProject: (editState, blobUrl, storagePath, projectId, duration) => {
+    set({
+      videoUrl: blobUrl, videoData: null, videoFile: null, videoDuration: duration ?? 0,
+      currentTime: 0, pendingAction: null,
+      clips: (editState.clips as VideoClip[] | undefined) ?? [],
+      captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
+      transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],
+      textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
+      extraTracks: (editState.extraTracks as MediaTrack[] | undefined) ?? [],
+      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      history: [], future: [],
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
+    });
+  },
+
+  setUploadProgress: (pct) => set({ uploadProgress: pct }),
+  setSaveStatus: (status) => set({ saveStatus: status }),
+  setStoragePath: (path) => set({ storagePath: path }),
+
   // ── Zoom ────────────────────────────────────────────────────────────────────
 
   setZoom: (zoom) => set({ zoom: Math.max(1, Math.min(20, zoom)) }),
@@ -505,6 +553,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
     });
   },
 

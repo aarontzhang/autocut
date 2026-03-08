@@ -4,6 +4,7 @@ import { forwardRef, useImperativeHandle, useCallback, useState, useRef, useEffe
 import { useEditorStore } from '@/lib/useEditorStore';
 import { formatTime, formatTimeDetailed } from '@/lib/timelineUtils';
 import { buildClipSchedule } from '@/lib/playbackEngine';
+import { TrackClip } from '@/lib/types';
 
 export interface VideoPlayerHandle {
   seekTo: (timelineTime: number) => void;
@@ -23,6 +24,13 @@ const CSS_FILTERS: Record<string, string> = {
   none: '',
 };
 
+function findActiveTrackClip(clips: TrackClip[], timelineTime: number): TrackClip | null {
+  return clips.find(c => {
+    const end = c.timelineStart + c.sourceDuration / c.speed;
+    return timelineTime >= c.timelineStart && timelineTime < end;
+  }) ?? null;
+}
+
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoDisplaySize, setVideoDisplaySize] = useState({ width: 0, height: 0 });
@@ -34,9 +42,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const clips = useEditorStore(s => s.clips);
   const captions = useEditorStore(s => s.captions);
   const textOverlays = useEditorStore(s => s.textOverlays);
+  const extraTracks = useEditorStore(s => s.extraTracks);
 
   const clipsRef = useRef(clips);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
+
+  const extraTracksRef = useRef(extraTracks);
+  useEffect(() => { extraTracksRef.current = extraTracks; }, [extraTracks]);
+
+  const extraVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const extraAudioRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const extraAudioNodes = useRef<Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>>(new Map());
 
   // Track the video element's actual rendered size so captions stay inside the frame
   useEffect(() => {
@@ -68,6 +84,31 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [videoRef]);
 
+  function ensureExtraAudioRouted(trackId: string, el: HTMLVideoElement) {
+    const ctx = audioCtxRef.current;
+    if (!ctx || extraAudioNodes.current.has(trackId)) return;
+    try {
+      const source = ctx.createMediaElementSource(el);
+      const gain = ctx.createGain();
+      gain.gain.value = 1.0;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      extraAudioNodes.current.set(trackId, { source, gain });
+    } catch {}
+  }
+
+  // Cleanup stale track audio nodes when tracks are removed
+  useEffect(() => {
+    const ids = new Set(extraTracks.map(t => t.id));
+    for (const [id, nodes] of extraAudioNodes.current) {
+      if (!ids.has(id)) {
+        nodes.source.disconnect();
+        nodes.gain.disconnect();
+        extraAudioNodes.current.delete(id);
+      }
+    }
+  }, [extraTracks]);
+
   // Find active caption and text overlay
   const activeCaption = captions.find(c => currentTime >= c.startTime && currentTime < c.endTime);
   const activeTextOverlays = textOverlays.filter(t => currentTime >= t.startTime && currentTime < t.endTime);
@@ -75,6 +116,23 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   // Build total timeline duration
   const schedule = buildClipSchedule(clips);
   const totalTimelineDuration = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
+
+  const syncExtraTracks = useCallback((timelineTime: number, mainPaused: boolean) => {
+    for (const track of extraTracksRef.current) {
+      const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
+      const el = map.get(track.id);
+      if (!el) continue;
+      const activeClip = findActiveTrackClip(track.clips, timelineTime);
+      if (!activeClip) {
+        if (!el.paused) el.pause();
+        continue;
+      }
+      const targetSrc = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
+      if (Math.abs(el.currentTime - targetSrc) > 0.15) el.currentTime = targetSrc;
+      el.playbackRate = activeClip.speed;
+      if (el.paused && !mainPaused) el.play().catch(() => {});
+    }
+  }, []);
 
   useImperativeHandle(ref, () => ({
     seekTo: (timelineTime: number) => {
@@ -86,6 +144,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const offsetInTimeline = timelineTime - targetEntry.timelineStart;
       const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
       videoRef.current.currentTime = Math.max(0, sourceTime);
+
+      // Seek extra tracks
+      for (const track of extraTracksRef.current) {
+        const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
+        const el = map.get(track.id);
+        if (!el) continue;
+        const activeClip = findActiveTrackClip(track.clips, timelineTime);
+        if (activeClip) {
+          el.currentTime = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
+        }
+      }
     },
     togglePlay: () => {
       if (!videoRef.current) return;
@@ -93,8 +162,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         setupAudio();
         if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
         videoRef.current.play();
+        for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
+          if (el.src) el.play().catch(() => {});
+        }
       } else {
         videoRef.current.pause();
+        for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
+          el.pause();
+        }
       }
     },
   }));
@@ -105,8 +180,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setupAudio();
       if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
       videoRef.current.play();
+      for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
+        if (el.src) el.play().catch(() => {});
+      }
     } else {
       videoRef.current.pause();
+      for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
+        el.pause();
+      }
     }
   }, [videoRef, setupAudio]);
 
@@ -179,6 +260,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             const curClips = clipsRef.current;
             if (curClips.length === 0) {
               setCurrentTime(sourceTime);
+              syncExtraTracks(sourceTime, videoRef.current.paused);
               return;
             }
 
@@ -218,7 +300,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               // Past all kept clips — end of timeline
               if (videoRef.current) {
                 videoRef.current.pause();
-                // Seek back to the last frame of the last kept clip
+                for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
+                  el.pause();
+                }
                 const lastClip = [...curClips].sort((a, b) => (a.sourceStart + a.sourceDuration) - (b.sourceStart + b.sourceDuration)).pop();
                 if (lastClip) {
                   videoRef.current.currentTime = lastClip.sourceStart + lastClip.sourceDuration - 0.001;
@@ -229,12 +313,66 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }
 
             setCurrentTime(timelineTime);
+            syncExtraTracks(timelineTime, videoRef.current.paused);
           }}
           onPlay={() => setIsPlaying(true)}
           onPause={() => setIsPlaying(false)}
           onClick={togglePlay}
           playsInline
         />
+
+        {/* Extra video track overlays */}
+        {extraTracks.filter(t => t.type === 'video').map(track => {
+          const activeClip = findActiveTrackClip(track.clips, currentTime);
+          return (
+            <video
+              key={track.id + '-' + (activeClip?.id ?? 'empty')}
+              ref={el => {
+                if (el) {
+                  extraVideoRefs.current.set(track.id, el);
+                  ensureExtraAudioRouted(track.id, el);
+                } else {
+                  extraVideoRefs.current.delete(track.id);
+                  extraAudioNodes.current.delete(track.id);
+                }
+              }}
+              src={activeClip?.sourceUrl ?? ''}
+              style={{
+                position: 'absolute', inset: 0, width: '100%', height: '100%',
+                objectFit: 'contain',
+                display: activeClip ? 'block' : 'none',
+                pointerEvents: 'none',
+              }}
+              muted={false}
+              playsInline
+              preload="auto"
+            />
+          );
+        })}
+
+        {/* Extra audio tracks (hidden video elements for audio mixing) */}
+        {extraTracks.filter(t => t.type === 'audio').map(track => {
+          const activeClip = findActiveTrackClip(track.clips, currentTime);
+          return (
+            <video
+              key={track.id + '-' + (activeClip?.id ?? 'empty')}
+              ref={el => {
+                if (el) {
+                  extraAudioRefs.current.set(track.id, el);
+                  ensureExtraAudioRouted(track.id, el);
+                } else {
+                  extraAudioRefs.current.delete(track.id);
+                  extraAudioNodes.current.delete(track.id);
+                }
+              }}
+              src={activeClip?.sourceUrl ?? ''}
+              style={{ display: 'none' }}
+              muted={false}
+              playsInline
+              preload="auto"
+            />
+          );
+        })}
 
         {/* Overlays anchored to the actual video frame */}
         {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0) && (
@@ -340,11 +478,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
           >
             {isPlaying ? (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="#000">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="#fff">
                 <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
               </svg>
             ) : (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="#000" style={{ marginLeft: 1 }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="#fff" style={{ marginLeft: 1 }}>
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
             )}
