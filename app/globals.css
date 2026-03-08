@@ -3,10 +3,10 @@
 /* Claude Cut — warm dark theme */
 :root {
   --bg-base:     #1C1917;
-  --bg-panel:    #201E1C;
-  --bg-elevated: #252321;
-  --bg-surface:  #2A2826;
-  --bg-hover:    #302E2C;
+  --bg-panel:    #1C1917;
+  --bg-elevated: #1C1917;
+  --bg-surface:  #1C1917;
+  --bg-hover:    #252321;
 
   --accent:        #D97757;
   --accent-dim:    rgba(217, 119, 87, 0.10);
