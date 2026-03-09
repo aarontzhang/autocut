@@ -4,8 +4,9 @@ import { useRef, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { useAuth } from '@/components/auth/AuthProvider';
+import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import { uploadVideoToSupabase } from '@/lib/uploadVideo';
-import { getSupabaseBrowser } from '@/lib/supabase/client';
+import AutocutMark from '@/components/branding/AutocutMark';
 
 export default function UploadScreen() {
   const setVideoCloud = useEditorStore(s => s.setVideoCloud);
@@ -19,11 +20,15 @@ export default function UploadScreen() {
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
-    if (file.size > 500 * 1024 * 1024) {
+    if (file.size > 2 * 1024 * 1024 * 1024) {
       const ok = window.confirm(`This file is ${(file.size / 1e9).toFixed(1)} GB. Large uploads may take a while. Continue?`);
       if (!ok) return;
     }
-    if (!user) return;
+    if (!user) {
+      setUploadError('You must be signed in before uploading to Supabase.');
+      setUploadProgress(null);
+      return;
+    }
 
     setUploadError('');
     setUploadProgress(0);
@@ -43,7 +48,7 @@ export default function UploadScreen() {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
       setUploadProgress(null);
     }
-  }, [user, setVideoCloud, setUploadProgress]);
+  }, [router, user, setVideoCloud, setUploadProgress]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -52,11 +57,6 @@ export default function UploadScreen() {
     if (file) handleFile(file);
   }, [handleFile]);
 
-  const handleSignOut = async () => {
-    await getSupabaseBrowser().auth.signOut();
-    router.push('/auth/login');
-  };
-
   return (
     <div
       className="h-screen flex flex-col items-center justify-center"
@@ -64,17 +64,14 @@ export default function UploadScreen() {
     >
       {/* User info top-right */}
       <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{user?.email}</span>
-        <button onClick={handleSignOut} style={{ fontSize: 12, color: 'var(--fg-secondary)', background: 'none', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}>
-          Sign out
-        </button>
+        {user && <UserProfileMenu user={user} dashboardLabel="Go to Dashboard" />}
       </div>
 
       {/* Logo */}
       <div className="flex items-center gap-2.5 mb-12">
-        <img src="/logo.png" width={32} height={32} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
+        <AutocutMark size={32} />
         <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>
-          Claude Cut
+          Autocut
         </span>
       </div>
 
@@ -164,7 +161,7 @@ export default function UploadScreen() {
 
       {/* Bottom hint */}
       <p style={{ marginTop: 28, fontSize: 12, color: 'var(--fg-muted)' }}>
-        Powered by Claude AI · Max 500MB recommended
+        Powered by Claude AI · Supports uploads up to 2 GB
       </p>
     </div>
   );

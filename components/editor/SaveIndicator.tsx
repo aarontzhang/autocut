@@ -9,7 +9,7 @@ export default function SaveIndicator() {
   if (!currentProjectId || saveStatus === 'idle') return null;
 
   const label = saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : 'Save failed';
-  const color = saveStatus === 'saving' ? 'var(--fg-muted)' : saveStatus === 'saved' ? 'var(--accent)' : '#f87171';
+  const color = saveStatus === 'saving' ? 'var(--fg-muted)' : saveStatus === 'saved' ? 'var(--accent-strong)' : '#f87171';
 
   return (
     <span style={{ fontSize: 11, color, transition: 'color 0.3s', display: 'flex', alignItems: 'center', gap: 4 }}>

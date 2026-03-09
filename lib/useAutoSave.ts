@@ -53,5 +53,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, textOverlays, extraTracks, currentProjectId]);
+  }, [clips, captions, transitions, textOverlays, extraTracks, currentProjectId, setSaveStatus]);
 }

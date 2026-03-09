@@ -1,10 +1,12 @@
 'use client';
 
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { ChatMessage as ChatMessageType, EditAction } from '@/lib/types';
 import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext } from '@/lib/timelineUtils';
 import { extractAudioSegment, extractVideoFrames } from '@/lib/ffmpegClient';
+import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
+import AutocutMark from '@/components/branding/AutocutMark';
 
 // ─── Action card config ────────────────────────────────────────────────────────
 function getActionMeta(action: EditAction): { label: string; color: string; summary: string } {
@@ -20,6 +22,14 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         label: `Delete clip ${(action.clipIndex ?? 0) + 1}`,
         color: '#ef4444',
         summary: '',
+      };
+    case 'delete_range':
+      return {
+        label: 'Cut range',
+        color: '#ef4444',
+        summary: action.deleteStartTime !== undefined && action.deleteEndTime !== undefined
+          ? `${formatTime(action.deleteStartTime)} → ${formatTime(action.deleteEndTime)}`
+          : '',
       };
     case 'delete_ranges':
       return {
@@ -123,6 +133,16 @@ function ActionDetails({ action }: { action: EditAction }) {
       <div style={{ padding: '6px 12px 8px' }}>
         <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
           Split at {action.splitTime !== undefined ? formatTime(action.splitTime) : '—'}
+        </span>
+      </div>
+    );
+  }
+
+  if (action.type === 'delete_range') {
+    return (
+      <div style={{ padding: '6px 12px 8px' }}>
+        <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
+          Remove {action.deleteStartTime !== undefined ? formatTime(action.deleteStartTime) : '—'} – {action.deleteEndTime !== undefined ? formatTime(action.deleteEndTime) : '—'}
         </span>
       </div>
     );
@@ -277,25 +297,98 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
 }
 
 function AssistantMessage({ msg }: { msg: ChatMessageType }) {
-  const applyAction = useEditorStore(s => s.applyAction);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoData = useEditorStore(s => s.videoData);
-  const clips = useEditorStore(s => s.clips);
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const previewOwnerId = useEditorStore(s => s.previewOwnerId);
+  const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
+  const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
+  const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
-  const [isApplied, setIsApplied] = useState(false);
+  const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [acceptedSteps, setAcceptedSteps] = useState(0);
+  const [skippedSteps, setSkippedSteps] = useState(0);
+  const [reviewResult, setReviewResult] = useState<string | null>(null);
+  const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
 
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
-  const meta = hasAction ? getActionMeta(action!) : null;
+  const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
+  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
+  const activeReviewAction = reviewInProgress ? reviewSteps[reviewIndex] : action ?? null;
+  const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
+  const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
 
-  const handleApply = useCallback(() => {
-    if (!action || action.type === 'none') return;
-    applyAction(action);
-    setIsApplied(true);
-  }, [action, applyAction]);
+  useEffect(() => () => clearPreviewSnapshot(msg.id), [clearPreviewSnapshot, msg.id]);
+
+  const finishReview = useCallback((draft: EditSnapshot, accepted: number, skipped: number) => {
+    clearPreviewSnapshot(msg.id);
+    if (accepted > 0) commitPreviewSnapshot(draft);
+    setReviewDraft(null);
+    setReviewIndex(reviewSteps.length);
+    setAcceptedSteps(accepted);
+    setSkippedSteps(skipped);
+    setReviewResult(accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.');
+  }, [clearPreviewSnapshot, commitPreviewSnapshot, msg.id, reviewSteps.length]);
+
+  const startReview = useCallback(() => {
+    if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
+    const state = useEditorStore.getState();
+    const baseSnapshot: EditSnapshot = {
+      clips: state.clips,
+      captions: state.captions,
+      transitions: state.transitions,
+      textOverlays: state.textOverlays,
+    };
+    const firstStep = reviewSteps[0];
+    if (!firstStep) return;
+    setReviewDraft(baseSnapshot);
+    setReviewIndex(0);
+    setAcceptedSteps(0);
+    setSkippedSteps(0);
+    setReviewResult(null);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstStep));
+  }, [action, anotherReviewActive, msg.id, reviewSteps, setPreviewSnapshot]);
+
+  const handleApplyStep = useCallback(() => {
+    if (!reviewDraft || !reviewSteps[reviewIndex]) return;
+    const nextDraft = applyActionToSnapshot(reviewDraft, reviewSteps[reviewIndex]);
+    const accepted = acceptedSteps + 1;
+    const nextIndex = reviewIndex + 1;
+    if (nextIndex >= reviewSteps.length) {
+      finishReview(nextDraft, accepted, skippedSteps);
+      return;
+    }
+    setReviewDraft(nextDraft);
+    setReviewIndex(nextIndex);
+    setAcceptedSteps(accepted);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, reviewSteps[nextIndex]));
+  }, [acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+
+  const handleSkipStep = useCallback(() => {
+    if (!reviewDraft || !reviewSteps[reviewIndex]) return;
+    const skipped = skippedSteps + 1;
+    const nextIndex = reviewIndex + 1;
+    if (nextIndex >= reviewSteps.length) {
+      finishReview(reviewDraft, acceptedSteps, skipped);
+      return;
+    }
+    setReviewIndex(nextIndex);
+    setSkippedSteps(skipped);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, reviewSteps[nextIndex]));
+  }, [acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+
+  const cancelReview = useCallback(() => {
+    clearPreviewSnapshot(msg.id);
+    setReviewDraft(null);
+    setReviewIndex(0);
+    setAcceptedSteps(0);
+    setSkippedSteps(0);
+  }, [clearPreviewSnapshot, msg.id]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request' || !videoUrl) return;
@@ -331,7 +424,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
       }
 
       setBackgroundTranscript(combinedTranscript, 'done');
-      setIsApplied(true);
+      setTranscriptionDone(true);
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
@@ -343,11 +436,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
     <div style={{ marginBottom: 4 }}>
       {/* Claude indicator */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-        <svg width="13" height="13" viewBox="0 0 18 18" fill="var(--accent)" style={{ flexShrink: 0 }}>
-          <path d="M 0,2.5 Q 0,0 2.236,1.118 L 6.764,3.382 Q 9,4.5 6.764,5.618 L 2.236,7.882 Q 0,9 0,6.5 Z"/>
-          <path d="M 9,7 Q 9,4.5 11.236,5.618 L 15.764,7.882 Q 18,9 15.764,10.118 L 11.236,12.382 Q 9,13.5 9,11 Z"/>
-          <path d="M 0,11.5 Q 0,9 2.236,10.118 L 6.764,12.382 Q 9,13.5 6.764,14.618 L 2.236,16.882 Q 0,18 0,15.5 Z"/>
-        </svg>
+        <AutocutMark size={13} />
       </div>
 
       {/* Message text */}
@@ -390,7 +479,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
           </div>
 
           {/* Details */}
-          <ActionDetails action={action!} />
+          <ActionDetails action={activeReviewAction!} />
 
           {/* Buttons */}
           {msg.autoApplied ? (
@@ -406,11 +495,26 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
                 Auto-applied ✓
               </span>
             </div>
+          ) : reviewResult ? (
+            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+              <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+                {reviewResult}
+              </span>
+            </div>
           ) : (
-            <div style={{
-              display: 'flex', gap: 6, padding: '8px 12px',
-              borderTop: '1px solid rgba(255,255,255,0.05)',
-            }}>
+            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+              {reviewSteps.length > 1 && activeReviewAction && action?.type !== 'transcribe_request' && (
+                <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                  {reviewInProgress
+                    ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
+                    : `Review ${reviewSteps.length} proposed changes before committing them.`}
+                </p>
+              )}
+              {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && (
+                <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                  Finish the active review before opening another one.
+                </p>
+              )}
               {action?.type === 'transcribe_request' ? (
                 <>
                   {transcribeError && (
@@ -420,37 +524,88 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
                   )}
                   <button
                     onClick={handleTranscribe}
-                    disabled={isTranscribing}
+                    disabled={isTranscribing || transcriptionDone}
                     style={{
-                      flex: 1, padding: '5px 0',
+                      width: '100%', padding: '5px 0',
                       fontSize: 12, fontWeight: 500,
-                      background: isTranscribing ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                      background: isTranscribing || transcriptionDone ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
                       border: 'none',
-                      color: isTranscribing ? 'var(--fg-muted)' : '#000',
-                      borderRadius: 4, cursor: isTranscribing ? 'default' : 'pointer',
+                      color: isTranscribing || transcriptionDone ? 'var(--fg-muted)' : '#000',
+                      borderRadius: 4, cursor: isTranscribing || transcriptionDone ? 'default' : 'pointer',
                       fontFamily: 'var(--font-serif)',
                       transition: 'all 0.15s',
                     }}
                   >
-                    {isTranscribing ? 'Transcribing…' : 'Transcribe'}
+                    {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
                   </button>
                 </>
+              ) : reviewInProgress ? (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={handleApplyStep}
+                    style={{
+                      flex: 1,
+                      padding: '5px 0',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      background: 'var(--accent)',
+                      border: 'none',
+                      color: '#000',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Apply
+                  </button>
+                  <button
+                    onClick={handleSkipStep}
+                    style={{
+                      flex: 1,
+                      padding: '5px 0',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      background: 'rgba(255,255,255,0.06)',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      color: 'var(--fg-secondary)',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Skip
+                  </button>
+                  <button
+                    onClick={cancelReview}
+                    style={{
+                      padding: '5px 10px',
+                      fontSize: 12,
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--fg-muted)',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
               ) : (
                 <button
-                  onClick={handleApply}
-                  disabled={isApplied}
+                  onClick={startReview}
+                  disabled={anotherReviewActive}
                   style={{
-                    flex: 1, padding: '5px 0',
+                    width: '100%', padding: '5px 0',
                     fontSize: 12, fontWeight: 500,
-                    background: isApplied ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                    background: anotherReviewActive ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
                     border: 'none',
-                    color: isApplied ? 'var(--fg-muted)' : '#000',
-                    borderRadius: 4, cursor: isApplied ? 'default' : 'pointer',
+                    color: anotherReviewActive ? 'var(--fg-muted)' : '#000',
+                    borderRadius: 4, cursor: anotherReviewActive ? 'default' : 'pointer',
                     fontFamily: 'var(--font-serif)',
                     transition: 'all 0.15s',
                   }}
                 >
-                  {isApplied ? 'Applied ✓' : 'Apply'}
+                  {reviewSteps.length > 1 ? 'Start review' : 'Preview edit'}
                 </button>
               )}
             </div>
@@ -465,11 +620,9 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
 function ThinkingIndicator({ status }: { status?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-      <svg width="13" height="13" viewBox="0 0 18 18" fill="var(--accent)" style={{ flexShrink: 0, marginTop: 3 }}>
-        <path d="M 0,2.5 Q 0,0 2.236,1.118 L 6.764,3.382 Q 9,4.5 6.764,5.618 L 2.236,7.882 Q 0,9 0,6.5 Z"/>
-        <path d="M 9,7 Q 9,4.5 11.236,5.618 L 15.764,7.882 Q 18,9 15.764,10.118 L 11.236,12.382 Q 9,13.5 9,11 Z"/>
-        <path d="M 0,11.5 Q 0,9 2.236,10.118 L 6.764,12.382 Q 9,13.5 6.764,14.618 L 2.236,16.882 Q 0,18 0,15.5 Z"/>
-      </svg>
+      <div style={{ flexShrink: 0, marginTop: 3 }}>
+        <AutocutMark size={13} />
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ display: 'flex', gap: 3, paddingTop: 4 }}>
           {[0, 1, 2].map(i => (
@@ -504,14 +657,8 @@ function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; index
       alignItems: 'center', justifyContent: 'center',
       padding: '32px 16px', gap: 8, textAlign: 'center',
     }}>
-      <img
-        src="/logo.png"
-        width={48} height={48}
-        style={{ display: 'block', marginBottom: 8, opacity: 0.9 }}
-        alt="Claude"
-      />
       <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg-primary)', margin: 0, fontFamily: 'var(--font-serif)' }}>
-        Ask Claude Cut to make edits
+        Ask Autocut to make edits
       </p>
       <p style={{ fontSize: 12, color: 'var(--fg-muted)', margin: 0, lineHeight: 1.6, fontFamily: 'var(--font-serif)' }}>
         Describe what you want — trim silence, add captions, adjust speed, and more.
@@ -560,6 +707,8 @@ export default function ChatSidebar() {
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
+  const previewOwnerId = useEditorStore(s => s.previewOwnerId);
+  const reviewLocked = previewOwnerId !== null;
 
   // Build selected clip context for the API
   const selectedClipContext = (() => {
@@ -602,7 +751,7 @@ export default function ChatSidebar() {
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
-    if (!text || isChatLoading) return;
+    if (!text || isChatLoading || reviewLocked) return;
 
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
@@ -673,10 +822,10 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [input, isChatLoading, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoFile, ensureFramesExtracted]);
+  }, [input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoFile, ensureFramesExtracted]);
 
   const handleAgentSend = useCallback(async (text: string) => {
-    if (!text || isChatLoading) return;
+    if (!text || isChatLoading || reviewLocked) return;
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
@@ -817,7 +966,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [isChatLoading, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFramesExtracted]);
+  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFramesExtracted]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -827,9 +976,10 @@ export default function ChatSidebar() {
   }, [setIsChatLoading]);
 
   const handleSend = useCallback(() => {
+    if (reviewLocked) return;
     if (agentMode) handleAgentSend(input.trim());
     else handleSendSingle();
-  }, [agentMode, input, handleAgentSend, handleSendSingle]);
+  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked]);
 
   const agentContextReady = transcriptStatus === 'done' && videoFrames !== null;
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
@@ -847,9 +997,10 @@ export default function ChatSidebar() {
     if (agentContextReady && !userChoseModeManually) {
       setAgentMode(true);
     }
-  }, [agentContextReady]);
+  }, [agentContextReady, userChoseModeManually]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (reviewLocked) return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
     if (e.key === 'Tab' && e.shiftKey) {
       e.preventDefault();
@@ -878,9 +1029,9 @@ export default function ChatSidebar() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <img src="/logo.png" width={16} height={16} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
+          <AutocutMark size={16} />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-            Claude Cut
+            Autocut
           </span>
         </div>
 
@@ -970,18 +1121,24 @@ export default function ChatSidebar() {
               </div>
             </div>
           )}
+          {reviewLocked && (
+            <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
+              Finish the active edit review before sending another request.
+            </p>
+          )}
           <textarea
             ref={textareaRef}
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder="Split, speed, filter, caption…"
+            placeholder={reviewLocked ? 'Complete the active review…' : 'Split, speed, filter, caption…'}
             rows={1}
+            disabled={reviewLocked}
             style={{
               resize: 'none',
               background: 'transparent',
               border: 'none',
-              color: 'var(--fg-primary)',
+              color: reviewLocked ? 'var(--fg-muted)' : 'var(--fg-primary)',
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
@@ -1012,11 +1169,11 @@ export default function ChatSidebar() {
                   {([{ label: 'Review edits', value: false }, { label: 'Auto-apply', value: true }] as const).map(({ label, value }) => (
                     <button
                       key={label}
-                      onClick={() => { setUserChoseModeManually(true); setAgentMode(value); }}
+                      onClick={() => { if (!reviewLocked) { setUserChoseModeManually(true); setAgentMode(value); } }}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 4,
                         background: 'none', border: 'none',
-                        cursor: 'pointer', padding: '2px 5px', borderRadius: 3,
+                        cursor: reviewLocked ? 'default' : 'pointer', padding: '2px 5px', borderRadius: 3,
                       }}
                     >
                       <div style={{
@@ -1058,19 +1215,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || !!(videoFile && !agentContextReady)}
+                disabled={!input.trim() || !!(videoFile && !agentContextReady) || reviewLocked}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !(videoFile && !agentContextReady) ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !(videoFile && !agentContextReady) ? 'pointer' : 'default',
+                  cursor: input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(videoFile && !agentContextReady) ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(videoFile && !agentContextReady) ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>

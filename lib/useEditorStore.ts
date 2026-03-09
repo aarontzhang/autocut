@@ -13,22 +13,30 @@ import {
   MediaTrack,
   TrackClip,
 } from './types';
+import {
+  actionChangesTimelineStructure,
+  applyActionToSnapshot,
+  EditSnapshot,
+} from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
 
+export type { EditSnapshot } from './editActionUtils';
+
 export type TranscriptStatus = 'idle' | 'loading' | 'done' | 'error';
+
+export interface MediaLibraryItem {
+  id: string;
+  url: string;
+  name: string;
+  duration: number;
+  sourcePath?: string;
+}
 
 export type FFmpegJob =
   | { status: 'idle' }
   | { status: 'running'; progress: number; stage: string }
   | { status: 'done'; outputUrl: string }
   | { status: 'error'; message: string };
-
-export interface EditSnapshot {
-  clips: VideoClip[];
-  captions: CaptionEntry[];
-  transitions: TransitionEntry[];
-  textOverlays: TextOverlayEntry[];
-}
 
 export type SelectedItem = {
   type: 'clip' | 'caption' | 'text' | 'transition';
@@ -66,6 +74,8 @@ interface EditorState {
   captions: CaptionEntry[];
   transitions: TransitionEntry[];
   textOverlays: TextOverlayEntry[];
+  previewSnapshot: EditSnapshot | null;
+  previewOwnerId: string | null;
 
   // Extra tracks (video/audio overlays with positioned clips)
   extraTracks: MediaTrack[];
@@ -106,6 +116,9 @@ interface EditorState {
   setVideoDuration: (duration: number) => void;
   setCurrentTime: (time: number) => void;
   setPendingAction: (action: EditAction | null) => void;
+  setPreviewSnapshot: (ownerId: string, snapshot: EditSnapshot) => void;
+  clearPreviewSnapshot: (ownerId?: string) => void;
+  commitPreviewSnapshot: (snapshot: EditSnapshot) => void;
 
   // Clip actions
   splitClipAtTime: (timelineTime: number) => void;
@@ -135,7 +148,7 @@ interface EditorState {
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[] }, blobUrl: string, storagePath: string, projectId: string, duration?: number) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -145,6 +158,14 @@ interface EditorState {
 
   setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
   setVideoFrames: (frames: string[]) => void;
+
+  // Media library (multi-source V1)
+  mediaLibrary: MediaLibraryItem[];
+  addToMediaLibrary: (file: File) => Promise<string>;
+  addMediaLibraryItem: (item: Omit<MediaLibraryItem, 'id'>) => string;
+  appendVideoToTimeline: (sourceUrl: string, sourceName: string, duration: number, sourcePath?: string) => string;
+  insertVideoIntoTimeline: (sourceUrl: string, sourceName: string, duration: number, insertAtTime: number, sourcePath?: string) => string;
+  updateClipSourcePath: (clipId: string, sourcePath: string) => void;
 
   // Reset
   resetEditor: () => void;
@@ -159,13 +180,18 @@ interface EditorState {
   updateTransition: (id: string, patch: { atTime?: number }) => void;
 
   // Extra track actions
-  addTrack: (type: 'video' | 'audio') => void;
+  addTrack: (type: 'video' | 'audio') => string;
   removeTrack: (trackId: string) => void;
-  addClipToTrack: (trackId: string, clip: Omit<TrackClip, 'id'>) => void;
+  addClipToTrack: (trackId: string, clip: Omit<TrackClip, 'id'> & { id?: string }) => void;
+  updateTrackClipSourcePath: (trackId: string, clipId: string, sourcePath: string) => void;
   moveTrackClip: (trackId: string, clipId: string, newTimelineStart: number) => void;
   trimTrackClip: (trackId: string, clipId: string, newSourceStart: number, newSourceDuration: number) => void;
   removeTrackClip: (trackId: string, clipId: string) => void;
 }
+
+type EditorStoreWithSnapshot = EditorState & {
+  _snapshot: () => EditSnapshot;
+};
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   videoFile: null,
@@ -178,6 +204,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   captions: [],
   transitions: [],
   textOverlays: [],
+  previewSnapshot: null,
+  previewOwnerId: null,
   extraTracks: [],
   selectedItem: null,
   history: [],
@@ -195,6 +223,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   rawTranscriptCaptions: null,
   videoFrames: null,
   videoFramesFresh: true,
+  mediaLibrary: [],
 
   _snapshot: (): EditSnapshot => {
     const s = get();
@@ -212,24 +241,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFile: file, videoUrl: url, videoData: null, videoDuration: 0, currentTime: 0,
       pendingAction: null, clips: [],
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
     });
   },
 
   setVideoDuration: (duration) => {
-    const { clips } = get();
+    const { clips, mediaLibrary } = get();
+    const updatedLibrary = mediaLibrary.map((item, i) =>
+      i === 0 && item.duration === 0 ? { ...item, duration } : item
+    );
     // Initialize a single clip spanning full video on first load
     if (clips.length === 0 && duration > 0) {
-      set({ videoDuration: duration, clips: [makeClip(0, duration)] });
+      set({ videoDuration: duration, clips: [makeClip(0, duration)], mediaLibrary: updatedLibrary });
     } else {
-      set({ videoDuration: duration });
+      set({ videoDuration: duration, mediaLibrary: updatedLibrary });
     }
   },
 
   setCurrentTime: (time) => set({ currentTime: time }),
   setPendingAction: (action) => set({ pendingAction: action }),
+  setPreviewSnapshot: (ownerId, snapshot) => set({ previewSnapshot: snapshot, previewOwnerId: ownerId }),
+  clearPreviewSnapshot: (ownerId) => set(state => {
+    if (ownerId && state.previewOwnerId && state.previewOwnerId !== ownerId) return state;
+    return { previewSnapshot: null, previewOwnerId: null };
+  }),
+  commitPreviewSnapshot: (snapshot) => {
+    const current = (get() as unknown as EditorStoreWithSnapshot)._snapshot();
+    set(state => ({
+      ...snapshot,
+      history: [...state.history, current],
+      future: [],
+      pendingAction: null,
+      previewSnapshot: null,
+      previewOwnerId: null,
+      videoFramesFresh: snapshot.clips === state.clips ? state.videoFramesFresh : false,
+    }));
+  },
 
   // ── Clip actions ────────────────────────────────────────────────────────────
 
@@ -247,7 +298,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
     if (!targetEntry) return;
 
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
 
     // Compute split point in source
     const offsetInTimeline = timelineTime - targetEntry.timelineStart;
@@ -274,7 +325,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   deleteRangeAtTime: (startTime, endTime) => {
     const { clips } = get();
     const schedule = buildClipSchedule(clips);
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
 
     const newClips: VideoClip[] = [];
     for (const entry of schedule) {
@@ -320,7 +371,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   deleteClip: (clipId) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set(s => ({
       history: [...s.history, snap],
       future: [],
@@ -330,7 +381,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   reorderClip: (clipId, newIndex) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const { clips } = get();
     const idx = clips.findIndex(c => c.id === clipId);
     if (idx === -1) return;
@@ -347,7 +398,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setClipSpeed: (clipId, speed) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set(s => ({
       history: [...s.history, snap],
       future: [],
@@ -356,7 +407,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setClipVolume: (clipId, volume, fadeIn, fadeOut) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set(s => ({
       history: [...s.history, snap],
       future: [],
@@ -370,7 +421,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setClipFilter: (clipId, filter) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set(s => ({
       history: [...s.history, snap],
       future: [],
@@ -379,7 +430,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setClipFade: (clipId, fadeIn, fadeOut) => {
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set(s => ({
       history: [...s.history, snap],
       future: [],
@@ -391,74 +442,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   applyAction: (action) => {
     if (action.type === 'none') return;
-    const { clips, captions, transitions, textOverlays } = get();
-    const snap = (get() as any)._snapshot();
-    set({ history: [...get().history, snap], future: [] });
-
-    const clipStructureChanged = ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip'].includes(action.type);
-
-    if (action.type === 'split_clip') {
-      if (action.splitTime !== undefined) {
-        get().splitClipAtTime(action.splitTime);
-      }
-    } else if (action.type === 'delete_range') {
-      if (action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
-        get().deleteRangeAtTime(action.deleteStartTime, action.deleteEndTime);
-      }
-    } else if (action.type === 'delete_ranges') {
-      // Sort end-to-start so each deletion doesn't shift the positions of earlier ranges
-      const sorted = [...(action.ranges ?? [])].sort((a, b) => b.start - a.start);
-      for (const r of sorted) {
-        if (r.end > r.start) get().deleteRangeAtTime(r.start, r.end);
-      }
-    } else if (action.type === 'reorder_clip') {
-      const idx = action.clipIndex ?? 0;
-      const clip = clips[idx];
-      if (clip && action.newIndex !== undefined) get().reorderClip(clip.id, action.newIndex);
-    } else if (action.type === 'delete_clip') {
-      const idx = action.clipIndex ?? 0;
-      const clip = clips[idx];
-      if (clip) get().deleteClip(clip.id);
-    } else if (action.type === 'set_clip_speed') {
-      const idx = action.clipIndex ?? 0;
-      const clip = clips[idx];
-      if (clip && action.speed !== undefined) get().setClipSpeed(clip.id, action.speed);
-    } else if (action.type === 'set_clip_volume') {
-      const idx = action.clipIndex ?? 0;
-      const clip = clips[idx];
-      if (clip && action.volume !== undefined) {
-        get().setClipVolume(clip.id, action.volume, action.fadeIn, action.fadeOut);
-      }
-    } else if (action.type === 'set_clip_filter') {
-      const idx = action.clipIndex ?? 0;
-      const clip = clips[idx];
-      if (clip) get().setClipFilter(clip.id, action.filter ?? null);
-    } else if (action.type === 'add_captions') {
-      const newCaptions = (action.captions ?? []).map(c => ({ ...c, id: uuidv4() }));
-      set({ captions: [...captions, ...newCaptions], pendingAction: null });
-    } else if (action.type === 'add_transition') {
-      const newTransitions = (action.transitions ?? []).map(t => ({ ...t, id: uuidv4() }));
-      set({ transitions: [...transitions, ...newTransitions], pendingAction: null });
-    } else if (action.type === 'add_text_overlay') {
-      const newOverlays = (action.textOverlays ?? []).map(t => ({ ...t, id: uuidv4() }));
-      set({ textOverlays: [...textOverlays, ...newOverlays], pendingAction: null });
-    } else if (action.type === 'replace_text_overlay') {
-      const idx = action.overlayIndex ?? 0;
-      const replacement = (action.textOverlays ?? [])[0];
-      if (replacement && idx < textOverlays.length) {
-        const newOverlays = [...textOverlays];
-        newOverlays[idx] = { ...replacement, id: uuidv4() };
-        set({ textOverlays: newOverlays, pendingAction: null });
-      }
-    }
-
-    // Mark frames as stale after structural edits — re-extraction happens in the
-    // background so the UI isn't blocked. Old frames remain available for context.
-    if (clipStructureChanged) {
-      set({ videoFramesFresh: false });
-    }
-
-    set({ pendingAction: null });
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const next = applyActionToSnapshot(snap, action);
+    if (next === snap) return;
+    set(state => ({
+      ...next,
+      history: [...state.history, snap],
+      future: [],
+      pendingAction: null,
+      previewSnapshot: null,
+      previewOwnerId: null,
+      videoFramesFresh: actionChangesTimelineStructure(action) ? false : state.videoFramesFresh,
+    }));
   },
 
   // ── Undo/redo ───────────────────────────────────────────────────────────────
@@ -466,17 +461,33 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   undo: () => {
     const { history, future } = get();
     if (history.length === 0) return;
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const prev = history[history.length - 1];
-    set({ ...prev, history: history.slice(0, -1), future: [snap, ...future], pendingAction: null, selectedItem: null });
+    set({
+      ...prev,
+      history: history.slice(0, -1),
+      future: [snap, ...future],
+      pendingAction: null,
+      selectedItem: null,
+      previewSnapshot: null,
+      previewOwnerId: null,
+    });
   },
 
   redo: () => {
     const { history, future } = get();
     if (future.length === 0) return;
-    const snap = (get() as any)._snapshot();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const next = future[0];
-    set({ ...next, history: [...history, snap], future: future.slice(1), pendingAction: null, selectedItem: null });
+    set({
+      ...next,
+      history: [...history, snap],
+      future: future.slice(1),
+      pendingAction: null,
+      selectedItem: null,
+      previewSnapshot: null,
+      previewOwnerId: null,
+    });
   },
 
   pushHistory: (snap) => set(s => ({ history: [...s.history, snap], future: [] })),
@@ -496,6 +507,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     captions: [],
     transitions: [],
     textOverlays: [],
+    previewSnapshot: null,
+    previewOwnerId: null,
     extraTracks: [],
     selectedItem: null,
   })),
@@ -509,10 +522,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFile: file, videoUrl: blobUrl, videoData: null, videoDuration: 0, currentTime: 0,
       pendingAction: null, clips: [],
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
+      mediaLibrary: [],
     });
   },
 
@@ -524,11 +539,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
       transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
+      previewSnapshot: null, previewOwnerId: null,
       extraTracks: (editState.extraTracks as MediaTrack[] | undefined) ?? [],
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
+      mediaLibrary: [],
     });
   },
 
@@ -538,7 +555,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   // ── Zoom ────────────────────────────────────────────────────────────────────
 
-  setZoom: (zoom) => set({ zoom: Math.max(1, Math.min(20, zoom)) }),
+  setZoom: (zoom) => set({ zoom: Math.max(0.25, Math.min(20, zoom)) }),
 
   // ── Reset ───────────────────────────────────────────────────────────────────
 
@@ -549,11 +566,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFile: null, videoUrl: '', videoData: null, videoDuration: 0, currentTime: 0,
       pendingAction: null, clips: [],
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      previewSnapshot: null, previewOwnerId: null,
       messages: [], isChatLoading: false,
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
+      mediaLibrary: [],
     });
   },
 
@@ -564,7 +583,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   deleteSelectedItem: () => {
     const s = get();
     if (!s.selectedItem) return;
-    const snap = (s as any)._snapshot();
+    const snap = (s as EditorStoreWithSnapshot)._snapshot();
     const { type, id } = s.selectedItem;
     const newHistory = [...s.history, snap];
     if (type === 'clip') {
@@ -597,14 +616,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   addTrack: (type) => {
     const { extraTracks } = get();
     const typeCount = extraTracks.filter(t => t.type === type).length + 2; // +1 for main, +1 for new
+    const id = uuidv4();
     set({
       extraTracks: [...extraTracks, {
-        id: uuidv4(),
+        id,
         type,
         label: type === 'video' ? `V${typeCount}` : `A${typeCount}`,
         clips: [],
       }],
     });
+    return id;
   },
 
   removeTrack: (trackId) => set(s => ({
@@ -614,7 +635,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   addClipToTrack: (trackId, clip) => set(s => ({
     extraTracks: s.extraTracks.map(t =>
       t.id === trackId
-        ? { ...t, clips: [...t.clips, { ...clip, id: uuidv4() }] }
+        ? { ...t, clips: [...t.clips, { ...clip, id: clip.id ?? uuidv4() }] }
+        : t
+    ),
+  })),
+
+  updateTrackClipSourcePath: (trackId, clipId, sourcePath) => set(s => ({
+    extraTracks: s.extraTracks.map(t =>
+      t.id === trackId
+        ? { ...t, clips: t.clips.map(c => c.id === clipId ? { ...c, sourcePath } : c) }
         : t
     ),
   })),
@@ -640,6 +669,128 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       t.id === trackId
         ? { ...t, clips: t.clips.filter(c => c.id !== clipId) }
         : t
+    ),
+  })),
+
+  addToMediaLibrary: async (file) => {
+    const url = URL.createObjectURL(file);
+    const duration = await new Promise<number>((resolve) => {
+      const tmp = document.createElement('video');
+      tmp.preload = 'metadata';
+      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
+      tmp.onerror = () => resolve(0);
+      tmp.src = url;
+    });
+    const item: MediaLibraryItem = { id: uuidv4(), url, name: file.name, duration };
+    set(s => ({ mediaLibrary: [...s.mediaLibrary, item] }));
+    return url;
+  },
+
+  addMediaLibraryItem: (item) => {
+    const id = uuidv4();
+    set(s => {
+      const existing = s.mediaLibrary.find(entry =>
+        (item.sourcePath && entry.sourcePath === item.sourcePath) || entry.url === item.url
+      );
+      if (existing) return s;
+      return { mediaLibrary: [...s.mediaLibrary, { ...item, id }] };
+    });
+    return id;
+  },
+
+  appendVideoToTimeline: (sourceUrl, sourceName, duration, sourcePath) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const { clips, mediaLibrary } = get();
+    const clipId = uuidv4();
+    const newClip: VideoClip = {
+      id: clipId,
+      sourceStart: 0,
+      sourceDuration: duration,
+      speed: 1.0,
+      volume: 1.0,
+      filter: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      sourceUrl,
+      sourcePath,
+      sourceName,
+    };
+    // Register in media library if not already present
+    const alreadyInLibrary = mediaLibrary.some(item =>
+      (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
+    );
+    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
+    set({ history: [...get().history, snap], future: [], clips: [...clips, newClip], mediaLibrary: newLibrary });
+    return clipId;
+  },
+
+  insertVideoIntoTimeline: (sourceUrl, sourceName, duration, insertAtTime, sourcePath) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const { clips, mediaLibrary } = get();
+    const clipId = uuidv4();
+    const newClip: VideoClip = {
+      id: clipId,
+      sourceStart: 0,
+      sourceDuration: duration,
+      speed: 1.0,
+      volume: 1.0,
+      filter: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      sourceUrl,
+      sourcePath,
+      sourceName,
+    };
+
+    const schedule = buildClipSchedule(clips);
+    const newClips = [...clips];
+    if (schedule.length === 0 || insertAtTime >= schedule[schedule.length - 1].timelineEnd - 0.001) {
+      newClips.push(newClip);
+    } else {
+      const targetEntry = schedule.find(entry => insertAtTime < entry.timelineEnd);
+      if (!targetEntry) {
+        newClips.push(newClip);
+      } else {
+        const clipIndex = newClips.findIndex(c => c.id === targetEntry.clipId);
+        if (clipIndex === -1) {
+          newClips.push(newClip);
+        } else if (insertAtTime <= targetEntry.timelineStart + 0.001) {
+          newClips.splice(clipIndex, 0, newClip);
+        } else {
+          const clip = newClips[clipIndex];
+          const splitOffset = (insertAtTime - targetEntry.timelineStart) * targetEntry.speed;
+          const beforeDuration = splitOffset;
+          const afterDuration = clip.sourceDuration - splitOffset;
+          if (beforeDuration <= 0.05 || afterDuration <= 0.05) {
+            newClips.splice(clipIndex + (beforeDuration > afterDuration ? 1 : 0), 0, newClip);
+          } else {
+            const beforeClip: VideoClip = { ...clip, sourceDuration: beforeDuration };
+            const afterClip: VideoClip = {
+              ...clip,
+              id: uuidv4(),
+              sourceStart: clip.sourceStart + splitOffset,
+              sourceDuration: afterDuration,
+            };
+            newClips.splice(clipIndex, 1, beforeClip, newClip, afterClip);
+          }
+        }
+      }
+    }
+
+    const alreadyInLibrary = mediaLibrary.some(item =>
+      (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
+    );
+    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
+    set({ history: [...get().history, snap], future: [], clips: newClips, mediaLibrary: newLibrary });
+    return clipId;
+  },
+
+  updateClipSourcePath: (clipId, sourcePath) => set(s => ({
+    clips: s.clips.map(clip => clip.id === clipId ? { ...clip, sourcePath } : clip),
+    mediaLibrary: s.mediaLibrary.map(item =>
+      item.url === s.clips.find(clip => clip.id === clipId)?.sourceUrl && !item.sourcePath
+        ? { ...item, sourcePath }
+        : item
     ),
   })),
 

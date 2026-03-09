@@ -1,8 +1,8 @@
 'use client';
 
-import { forwardRef, useImperativeHandle, useCallback, useState, useRef, useEffect } from 'react';
+import { forwardRef, useImperativeHandle, useCallback, useState, useRef, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { formatTime, formatTimeDetailed } from '@/lib/timelineUtils';
+import { formatTimeDetailed } from '@/lib/timelineUtils';
 import { buildClipSchedule } from '@/lib/playbackEngine';
 import { TrackClip } from '@/lib/types';
 
@@ -39,13 +39,28 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoUrl = useEditorStore(s => s.videoUrl);
   const currentTime = useEditorStore(s => s.currentTime);
   const videoDuration = useEditorStore(s => s.videoDuration);
-  const clips = useEditorStore(s => s.clips);
-  const captions = useEditorStore(s => s.captions);
-  const textOverlays = useEditorStore(s => s.textOverlays);
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
+  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
   const extraTracks = useEditorStore(s => s.extraTracks);
 
   const clipsRef = useRef(clips);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
+
+  // Re-seek the video when clips change while paused (e.g. after a delete while paused)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !video.paused || clips.length === 0) return;
+    const sched = buildClipSchedule(clips);
+    if (sched.length === 0) return;
+    const ct = useEditorStore.getState().currentTime;
+    let targetEntry = sched.find(e => ct >= e.timelineStart && ct <= e.timelineEnd);
+    if (!targetEntry) targetEntry = sched[sched.length - 1];
+    if (!targetEntry) return;
+    const offsetInTimeline = Math.max(0, ct - targetEntry.timelineStart);
+    const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+    video.currentTime = Math.max(0, sourceTime);
+  }, [clips, videoRef]);
 
   const extraTracksRef = useRef(extraTracks);
   useEffect(() => { extraTracksRef.current = extraTracks; }, [extraTracks]);
@@ -54,14 +69,23 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const extraAudioRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const extraAudioNodes = useRef<Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>>(new Map());
 
+  // Multi-source refs
+  const sourceVideoMapRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const activeSourceUrlRef = useRef<string>('');
+  const [activeSourceUrl, setActiveSourceUrl] = useState('');
+
+  // Ref for the inner video container div (for ResizeObserver)
+  const videoContainerRef = useRef<HTMLDivElement>(null);
+
   // Track the video element's actual rendered size so captions stay inside the frame
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const container = videoContainerRef.current;
+    if (!container) return;
     const observer = new ResizeObserver(() => {
-      setVideoDisplaySize({ width: video.offsetWidth, height: video.offsetHeight });
+      const video = videoRef.current;
+      if (video) setVideoDisplaySize({ width: video.offsetWidth, height: video.offsetHeight });
     });
-    observer.observe(video);
+    observer.observe(container);
     return () => observer.disconnect();
   }, [videoRef, videoUrl]);
 
@@ -134,16 +158,175 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, []);
 
+  // Apply active clip's CSS filter and speed
+  const applyClipEffects = useCallback((sourceTime: number) => {
+    const curClips = clipsRef.current;
+    const video = videoRef.current;
+    if (!video) return;
+
+    let activeClip = null;
+    for (const clip of curClips) {
+      const clipSource = clip.sourceUrl ?? videoUrl;
+      if (clipSource !== (activeSourceUrlRef.current || videoUrl)) continue;
+      if (sourceTime >= clip.sourceStart && sourceTime < clip.sourceStart + clip.sourceDuration) {
+        activeClip = clip;
+        break;
+      }
+    }
+    if (!activeClip && curClips.length > 0) {
+      activeClip = curClips[curClips.length - 1];
+    }
+    if (!activeClip) return;
+
+    if (video.playbackRate !== activeClip.speed) {
+      video.playbackRate = activeClip.speed;
+    }
+
+    const filterStr = activeClip.filter && activeClip.filter.type !== 'none'
+      ? (CSS_FILTERS[activeClip.filter.type] ?? '')
+      : '';
+    if (video.style.filter !== filterStr) {
+      video.style.filter = filterStr;
+    }
+
+    if (gainNodeRef.current && audioCtxRef.current) {
+      const targetGain = activeClip.volume;
+      gainNodeRef.current.gain.setTargetAtTime(targetGain, audioCtxRef.current.currentTime, 0.05);
+    }
+  }, [videoRef, videoUrl]);
+
+  // Compute unique source URLs across all clips + main videoUrl
+  const uniqueSourceUrls = useMemo(() => {
+    const urls = new Set<string>();
+    if (videoUrl) urls.add(videoUrl);
+    for (const clip of clips) {
+      if (clip.sourceUrl) urls.add(clip.sourceUrl);
+    }
+    return [...urls].filter(Boolean);
+  }, [clips, videoUrl]);
+
+  // Activate a source URL — show its element, hide others, update videoRef
+  const activateSource = useCallback((sourceUrl: string) => {
+    if (activeSourceUrlRef.current === sourceUrl) return;
+    activeSourceUrlRef.current = sourceUrl;
+    setActiveSourceUrl(sourceUrl);
+    for (const [url, el] of sourceVideoMapRef.current) {
+      const isActive = url === sourceUrl;
+      el.style.display = isActive ? 'block' : 'none';
+      el.style.visibility = isActive ? 'visible' : 'hidden';
+      el.style.pointerEvents = isActive ? 'auto' : 'none';
+    }
+    const el = sourceVideoMapRef.current.get(sourceUrl);
+    if (el) (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+  }, [videoRef]);
+
+  // The time update handler (named so it can be passed to each video element)
+  const handleTimeUpdate = useCallback(() => {
+    if (!videoRef.current) return;
+    const sourceTime = videoRef.current.currentTime;
+    const curClips = clipsRef.current;
+    if (curClips.length === 0) {
+      setCurrentTime(sourceTime);
+      syncExtraTracks(sourceTime, videoRef.current.paused);
+      return;
+    }
+
+    applyClipEffects(sourceTime);
+
+    const curSource = activeSourceUrlRef.current || videoUrl;
+    const sched = buildClipSchedule(curClips);
+
+    // Find the schedule entry (from the current source) that contains sourceTime
+    let activeEntry: typeof sched[0] | null = null;
+    for (const entry of sched) {
+      const clip = curClips.find(c => c.id === entry.clipId);
+      if (!clip || (clip.sourceUrl ?? videoUrl) !== curSource) continue;
+      if (sourceTime >= entry.sourceStart && sourceTime < entry.sourceStart + entry.sourceDuration) {
+        activeEntry = entry;
+        break;
+      }
+    }
+
+    if (activeEntry) {
+      const timelineTime = activeEntry.timelineStart + (sourceTime - activeEntry.sourceStart) / activeEntry.speed;
+      setCurrentTime(timelineTime);
+      syncExtraTracks(timelineTime, videoRef.current.paused);
+      return;
+    }
+
+    // Not in any clip from the current source.
+    // Find the furthest timelineEnd of current-source clips we've played past.
+    let lastSourceTimelineEnd = 0;
+    for (const entry of sched) {
+      const clip = curClips.find(c => c.id === entry.clipId);
+      if (!clip || (clip.sourceUrl ?? videoUrl) !== curSource) continue;
+      if (sourceTime >= entry.sourceStart + entry.sourceDuration - 0.05) {
+        lastSourceTimelineEnd = Math.max(lastSourceTimelineEnd, entry.timelineEnd);
+      }
+    }
+
+    // Find the next entry in the full schedule after that point
+    const nextEntry = sched.find(e => e.timelineStart >= lastSourceTimelineEnd - 0.01 && e.timelineEnd > lastSourceTimelineEnd);
+
+    if (nextEntry) {
+      const nextClip = curClips.find(c => c.id === nextEntry.clipId);
+      const nextSource = nextClip?.sourceUrl ?? videoUrl;
+      if (nextSource !== curSource) {
+        // Switch to the new source
+        const wasPlaying = !videoRef.current.paused;
+        sourceVideoMapRef.current.get(curSource)?.pause();
+        activateSource(nextSource);
+        const nextEl = sourceVideoMapRef.current.get(nextSource);
+        if (nextEl) {
+          nextEl.currentTime = nextEntry.sourceStart;
+          if (wasPlaying) nextEl.play().catch(() => {});
+        }
+        setCurrentTime(nextEntry.timelineStart);
+      } else {
+        // Same source, gap between clips — jump to next clip's source start
+        videoRef.current.currentTime = nextEntry.sourceStart;
+      }
+      return;
+    }
+
+    // Past all clips — end of timeline
+    videoRef.current.pause();
+    for (const el of sourceVideoMapRef.current.values()) el.pause();
+    for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) el.pause();
+    const lastEntry = sched[sched.length - 1];
+    if (lastEntry) {
+      const lastClip = curClips.find(c => c.id === lastEntry.clipId);
+      const lastSource = lastClip?.sourceUrl ?? videoUrl;
+      const lastEl = sourceVideoMapRef.current.get(lastSource);
+      if (lastEl) lastEl.currentTime = lastEntry.sourceStart + lastEntry.sourceDuration - 0.001;
+    }
+    setCurrentTime(totalTimelineDuration);
+  }, [applyClipEffects, videoRef, videoUrl, setCurrentTime, syncExtraTracks, activateSource, totalTimelineDuration]);
+
   useImperativeHandle(ref, () => ({
     seekTo: (timelineTime: number) => {
-      if (!videoRef.current) return;
       const sched = buildClipSchedule(clipsRef.current);
       let targetEntry = sched.find(e => timelineTime >= e.timelineStart && timelineTime <= e.timelineEnd);
       if (!targetEntry && sched.length > 0) targetEntry = sched[sched.length - 1];
       if (!targetEntry) return;
+
+      const clip = clipsRef.current.find(c => c.id === targetEntry!.clipId);
+      const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
+      const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
+      for (const el of sourceVideoMapRef.current.values()) {
+        if (!el.paused) el.pause();
+      }
+      activateSource(targetSourceUrl);
+
+      const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
+      if (!activeEl) return;
       const offsetInTimeline = timelineTime - targetEntry.timelineStart;
       const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-      videoRef.current.currentTime = Math.max(0, sourceTime);
+      activeEl.currentTime = Math.max(0, sourceTime);
+      setCurrentTime(timelineTime);
+      applyClipEffects(sourceTime);
+      syncExtraTracks(timelineTime, !wasPlaying);
+      if (wasPlaying) activeEl.play().catch(() => {});
 
       // Seek extra tracks
       for (const track of extraTracksRef.current) {
@@ -157,34 +340,36 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       }
     },
     togglePlay: () => {
-      if (!videoRef.current) return;
-      if (videoRef.current.paused) {
+      const video = videoRef.current;
+      if (!video) return;
+      if (video.paused) {
         setupAudio();
         if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
-        videoRef.current.play();
+        video.play().catch(() => {});
         for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
           if (el.src) el.play().catch(() => {});
         }
       } else {
-        videoRef.current.pause();
+        for (const el of sourceVideoMapRef.current.values()) el.pause();
         for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
           el.pause();
         }
       }
     },
-  }));
+  }), [activateSource, applyClipEffects, setCurrentTime, setupAudio, syncExtraTracks, videoRef, videoUrl]);
 
   const togglePlay = useCallback(() => {
-    if (!videoRef.current) return;
-    if (videoRef.current.paused) {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
       setupAudio();
       if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
-      videoRef.current.play();
+      video.play().catch(() => {});
       for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
         if (el.src) el.play().catch(() => {});
       }
     } else {
-      videoRef.current.pause();
+      for (const el of sourceVideoMapRef.current.values()) el.pause();
       for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
         el.pause();
       }
@@ -204,122 +389,52 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   // Compute progress based on timeline time
   const progress = totalTimelineDuration > 0 ? currentTime / totalTimelineDuration : 0;
 
-  // Apply active clip's CSS filter and speed
-  const applyClipEffects = useCallback((sourceTime: number) => {
-    const curClips = clipsRef.current;
-    const video = videoRef.current;
-    if (!video) return;
-
-    // Find active clip by source time
-    let activeClip = null;
-    for (const clip of curClips) {
-      if (sourceTime >= clip.sourceStart && sourceTime < clip.sourceStart + clip.sourceDuration) {
-        activeClip = clip;
-        break;
-      }
-    }
-    if (!activeClip && curClips.length > 0) {
-      activeClip = curClips[curClips.length - 1];
-    }
-    if (!activeClip) return;
-
-    // Apply playback rate
-    if (video.playbackRate !== activeClip.speed) {
-      video.playbackRate = activeClip.speed;
-    }
-
-    // Apply CSS filter
-    const filterStr = activeClip.filter && activeClip.filter.type !== 'none'
-      ? (CSS_FILTERS[activeClip.filter.type] ?? '')
-      : '';
-    if (video.style.filter !== filterStr) {
-      video.style.filter = filterStr;
-    }
-
-    // Apply volume via GainNode
-    if (gainNodeRef.current && audioCtxRef.current) {
-      const targetGain = activeClip.volume;
-      gainNodeRef.current.gain.setTargetAtTime(targetGain, audioCtxRef.current.currentTime, 0.05);
-    }
-  }, [videoRef]);
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#000' }}>
       {/* Video */}
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}>
-        <video
-          ref={videoRef as React.RefObject<HTMLVideoElement>}
-          src={videoUrl}
-          style={{ maxWidth: '100%', maxHeight: '100%', display: 'block', cursor: 'pointer' }}
-          onLoadedMetadata={() => {
-            if (videoRef.current) setVideoDuration(videoRef.current.duration);
-          }}
-          onTimeUpdate={() => {
-            if (!videoRef.current) return;
-            const sourceTime = videoRef.current.currentTime;
-            const curClips = clipsRef.current;
-            if (curClips.length === 0) {
-              setCurrentTime(sourceTime);
-              syncExtraTracks(sourceTime, videoRef.current.paused);
-              return;
-            }
-
-            // Apply effects for current source position
-            applyClipEffects(sourceTime);
-
-            // Check if we've passed the end of the current active clip
-            let foundClip = false;
-            let timelineTime = 0;
-            let cumTimeline = 0;
-
-            for (const clip of curClips) {
-              const clipTimelineDuration = clip.sourceDuration / clip.speed;
-              if (sourceTime >= clip.sourceStart && sourceTime < clip.sourceStart + clip.sourceDuration) {
-                const offsetInSource = sourceTime - clip.sourceStart;
-                timelineTime = cumTimeline + offsetInSource / clip.speed;
-                foundClip = true;
-                break;
+      <div
+        ref={videoContainerRef}
+        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}
+      >
+        {uniqueSourceUrls.map((srcUrl, idx) => (
+          <video
+            key={srcUrl}
+            ref={el => {
+              if (!el) { sourceVideoMapRef.current.delete(srcUrl); return; }
+              sourceVideoMapRef.current.set(srcUrl, el);
+              // Initialize active source to the first URL
+              if (!activeSourceUrlRef.current && idx === 0) {
+                activeSourceUrlRef.current = srcUrl;
+                setActiveSourceUrl(srcUrl);
               }
-              cumTimeline += clipTimelineDuration;
-            }
-
-            if (!foundClip) {
-              // sourceTime is in a deleted gap — find the next clip and jump to it
-              let nextClip: (typeof curClips)[0] | null = null;
-              for (const clip of curClips) {
-                if (clip.sourceStart >= sourceTime) {
-                  if (!nextClip || clip.sourceStart < nextClip.sourceStart) {
-                    nextClip = clip;
-                  }
-                }
+              // Update videoRef if this is the active source
+              if (srcUrl === (activeSourceUrlRef.current || uniqueSourceUrls[0])) {
+                (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
               }
-              if (nextClip && videoRef.current) {
-                videoRef.current.currentTime = nextClip.sourceStart;
-                return;
+            }}
+            src={srcUrl}
+            style={{
+              maxWidth: '100%', maxHeight: '100%',
+              display: srcUrl === (activeSourceUrl || uniqueSourceUrls[0]) ? 'block' : 'none',
+              visibility: srcUrl === (activeSourceUrl || uniqueSourceUrls[0]) ? 'visible' : 'hidden',
+              pointerEvents: srcUrl === (activeSourceUrl || uniqueSourceUrls[0]) ? 'auto' : 'none',
+              cursor: 'pointer',
+            }}
+            onLoadedMetadata={() => {
+              if (srcUrl === videoUrl) {
+                const el = sourceVideoMapRef.current.get(srcUrl);
+                if (el) setVideoDuration(el.duration);
               }
-              // Past all kept clips — end of timeline
-              if (videoRef.current) {
-                videoRef.current.pause();
-                for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
-                  el.pause();
-                }
-                const lastClip = [...curClips].sort((a, b) => (a.sourceStart + a.sourceDuration) - (b.sourceStart + b.sourceDuration)).pop();
-                if (lastClip) {
-                  videoRef.current.currentTime = lastClip.sourceStart + lastClip.sourceDuration - 0.001;
-                }
-              }
-              setCurrentTime(totalTimelineDuration);
-              return;
-            }
-
-            setCurrentTime(timelineTime);
-            syncExtraTracks(timelineTime, videoRef.current.paused);
-          }}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-          onClick={togglePlay}
-          playsInline
-        />
+            }}
+            onTimeUpdate={handleTimeUpdate}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onClick={togglePlay}
+            playsInline
+            preload="auto"
+            crossOrigin="anonymous"
+          />
+        ))}
 
         {/* Extra video track overlays */}
         {extraTracks.filter(t => t.type === 'video').map(track => {
@@ -336,7 +451,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                   extraAudioNodes.current.delete(track.id);
                 }
               }}
-              src={activeClip?.sourceUrl ?? ''}
+              src={activeClip?.sourceUrl ?? undefined}
               style={{
                 position: 'absolute', inset: 0, width: '100%', height: '100%',
                 objectFit: 'contain',
@@ -365,7 +480,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                   extraAudioNodes.current.delete(track.id);
                 }
               }}
-              src={activeClip?.sourceUrl ?? ''}
+              src={activeClip?.sourceUrl ?? undefined}
               style={{ display: 'none' }}
               muted={false}
               playsInline
@@ -442,10 +557,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             const sched = buildClipSchedule(clipsRef.current);
             let targetEntry = sched.find(e2 => timelineTime >= e2.timelineStart && timelineTime <= e2.timelineEnd);
             if (!targetEntry && sched.length > 0) targetEntry = sched[sched.length - 1];
-            if (targetEntry && videoRef.current) {
-              const offsetInTimeline = timelineTime - targetEntry.timelineStart;
-              const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-              videoRef.current.currentTime = Math.max(0, sourceTime);
+            if (targetEntry) {
+              const clip = clipsRef.current.find(c => c.id === targetEntry!.clipId);
+              const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
+              activateSource(targetSourceUrl);
+              const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
+              if (activeEl) {
+                const offsetInTimeline = timelineTime - targetEntry.timelineStart;
+                const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+                activeEl.currentTime = Math.max(0, sourceTime);
+              }
             }
           }}
         >
@@ -478,11 +599,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
           >
             {isPlaying ? (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="#fff">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="#111">
                 <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
               </svg>
             ) : (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="#fff" style={{ marginLeft: 1 }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="#111" style={{ marginLeft: 1 }}>
                 <polygon points="5 3 19 12 5 21 5 3"/>
               </svg>
             )}

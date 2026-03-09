@@ -11,6 +11,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .from('projects')
     .select('*')
     .eq('id', id)
+    .eq('user_id', user.id)
     .single();
 
   if (error || !project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -37,9 +38,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (body.edit_state !== undefined) patch.edit_state = body.edit_state;
   if (body.name !== undefined) patch.name = body.name;
   if (body.video_path !== undefined) patch.video_path = body.video_path;
+  if (body.video_filename !== undefined) patch.video_filename = body.video_filename;
+  if (body.video_size !== undefined) patch.video_size = body.video_size;
 
-  const { error } = await supabase.from('projects').update(patch).eq('id', id);
+  const { data: updated, error } = await supabase.from('projects').update(patch).eq('id', id).eq('user_id', user.id).select('id').single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!updated) return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }
 
@@ -49,12 +53,12 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { data: project } = await supabase.from('projects').select('video_path').eq('id', id).single();
+  const { data: project } = await supabase.from('projects').select('video_path').eq('id', id).eq('user_id', user.id).single();
   if (project?.video_path) {
     await supabase.storage.from('videos').remove([project.video_path]);
   }
 
-  const { error } = await supabase.from('projects').delete().eq('id', id);
+  const { error } = await supabase.from('projects').delete().eq('id', id).eq('user_id', user.id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

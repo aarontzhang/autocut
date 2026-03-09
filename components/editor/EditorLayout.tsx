@@ -12,7 +12,7 @@ import ChatSidebar from '../chat/ChatSidebar';
 import ExportProgress from './ExportProgress';
 import { useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
 
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -20,7 +20,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   // Resizable panel sizes
   const [chatWidth, setChatWidth] = useState(340);
-  const [timelineHeight, setTimelineHeight] = useState(240);
+  const [timelineHeight, setTimelineHeight] = useState(300);
   const [mediaPanelWidth, setMediaPanelWidth] = useState(200);
 
   const startChatResize = useCallback((e: React.MouseEvent) => {
@@ -89,12 +89,19 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const loadProject = useEditorStore(s => s.loadProject);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
+  const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
   const { user } = useAuth();
 
   useAutoSave();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Allow Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo) even when a text input is focused
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
       if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && useEditorStore.getState().selectedItem) {
         e.preventDefault();
@@ -106,25 +113,26 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         useEditorStore.getState().splitClipAtTime(useEditorStore.getState().currentTime);
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
-        e.preventDefault();
-        if (e.shiftKey) redo(); else undo();
-        return;
-      }
       if (e.code === 'Space') {
         e.preventDefault();
         playerRef.current?.togglePlay();
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
         const t = Math.max(0, currentTime - (e.shiftKey ? 10 : 1));
-        setCurrentTime(t);
-        if (videoRef.current) videoRef.current.currentTime = t;
+        playerRef.current?.seekTo(t);
+        if (!playerRef.current) {
+          setCurrentTime(t);
+          if (videoRef.current) videoRef.current.currentTime = t;
+        }
       } else if (e.code === 'ArrowRight') {
         e.preventDefault();
         const dur = videoRef.current?.duration ?? 0;
         const t = Math.min(dur, currentTime + (e.shiftKey ? 10 : 1));
-        setCurrentTime(t);
-        if (videoRef.current) videoRef.current.currentTime = t;
+        playerRef.current?.seekTo(t);
+        if (!playerRef.current) {
+          setCurrentTime(t);
+          if (videoRef.current) videoRef.current.currentTime = t;
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -161,23 +169,42 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         const res = await fetch(`/api/projects/${projectId}`);
         if (!res.ok) return;
         const data = await res.json();
-        if (!data.signedUrl) return;
-
-        const blobRes = await fetch(data.signedUrl);
-        const blob = await blobRes.blob();
-        const blobUrl = URL.createObjectURL(blob);
-
-        loadProject(
-          data.edit_state ?? {},
-          blobUrl,
-          data.video_path,
-          projectId
+        const editState = structuredClone(data.edit_state ?? {});
+        const videoUrl = data.signedUrl ?? '';
+        const clipPaths = (editState.clips ?? [])
+          .map((clip: { sourcePath?: string }) => clip.sourcePath)
+          .filter(Boolean);
+        const extraTrackPaths = (editState.extraTracks ?? []).flatMap((track: { clips?: Array<{ sourcePath?: string }> }) =>
+          (track.clips ?? []).map(clip => clip.sourcePath).filter(Boolean)
         );
+        const allAssetPaths = [...clipPaths, ...extraTrackPaths] as string[];
+        const signedPaths = allAssetPaths.length > 0 ? await createSignedUrls(allAssetPaths) : new Map<string, string>();
+
+        if (editState.clips?.length) {
+          editState.clips = editState.clips.map((clip: { sourcePath?: string; sourceUrl?: string }) =>
+            clip.sourcePath && signedPaths.has(clip.sourcePath)
+              ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+              : clip
+          );
+        }
+
+        if (editState.extraTracks?.length) {
+          editState.extraTracks = editState.extraTracks.map((track: { clips?: Array<{ sourcePath?: string; sourceUrl?: string }> }) => ({
+            ...track,
+            clips: (track.clips ?? []).map((clip: { sourcePath?: string; sourceUrl?: string }) =>
+              clip.sourcePath && signedPaths.has(clip.sourcePath)
+                ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+                : clip
+            ),
+          }));
+        }
+
+        loadProject(editState, videoUrl, data.video_path ?? null, projectId);
       } catch (e) {
         console.error('Failed to load project', e);
       }
     })();
-  }, [projectId]);
+  }, [loadProject, projectId]);
 
   const importFile = useCallback((file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -186,18 +213,41 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     // Background upload to storage so the project persists on reload
     const { currentProjectId, storagePath } = useEditorStore.getState();
     if (!currentProjectId || !user || storagePath) return; // skip if already uploaded
-    const path = `${user.id}/${currentProjectId}/${file.name}`;
-    const supabase = getSupabaseBrowser();
-    supabase.storage.from('videos').upload(path, file, { upsert: true }).then(({ error }) => {
-      if (error) { console.warn('Background upload failed:', error.message); return; }
+    uploadProjectMedia(file, user.id, currentProjectId, 'main').then((path) => {
       fetch(`/api/projects/${currentProjectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ video_path: path, video_filename: file.name, video_size: file.size }),
       });
       setStoragePath(path);
+    }).catch((error: Error) => {
+      console.warn('Background upload failed:', error.message);
     });
   }, [setVideoFile, user, setStoragePath]);
+
+  const importLibraryFile = useCallback(async (file: File) => {
+    if (!file.type.startsWith('video/')) return;
+    const { currentProjectId } = useEditorStore.getState();
+    const blobUrl = URL.createObjectURL(file);
+    const duration = await new Promise<number>((resolve) => {
+      const tmp = document.createElement('video');
+      tmp.preload = 'metadata';
+      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
+      tmp.onerror = () => resolve(0);
+      tmp.src = blobUrl;
+    });
+
+    let sourcePath: string | undefined;
+    if (user && currentProjectId) {
+      try {
+        sourcePath = await uploadProjectMedia(file, user.id, currentProjectId, 'sources');
+      } catch (error) {
+        console.warn('Library upload failed:', error);
+      }
+    }
+
+    addMediaLibraryItem({ url: blobUrl, name: file.name, duration, sourcePath });
+  }, [addMediaLibraryItem, user]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -216,7 +266,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       onDragOver={handleDragOver}
     >
       {/* ── Top bar ── */}
-      <TopBar />
+      <TopBar onImportFile={importFile} />
 
       {/* ── Main area below topbar ── */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
@@ -228,7 +278,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             {/* Media panel */}
             <div style={{ width: mediaPanelWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-              <MediaPanel />
+              <MediaPanel onImportMainFile={importFile} onImportLibraryFile={importLibraryFile} />
               {/* Media panel resize handle */}
               <div
                 onMouseDown={startMediaResize}
@@ -264,7 +314,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               onMouseLeave={e => { e.currentTarget.style.borderTopColor = 'var(--border)'; }}
             />
             <div style={{ height: timelineHeight }}>
-              <Timeline videoRef={videoRef} />
+              <Timeline videoRef={videoRef} playerRef={playerRef} onImportFile={importFile} />
             </div>
           </div>
         </div>

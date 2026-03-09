@@ -301,7 +301,9 @@ export async function extractVideoFrames(
   let srcUrl: string;
 
   if (fileOrUrl instanceof Uint8Array) {
-    const blob = new Blob([fileOrUrl], { type: 'video/mp4' });
+    const buffer = new ArrayBuffer(fileOrUrl.byteLength);
+    new Uint8Array(buffer).set(fileOrUrl);
+    const blob = new Blob([buffer], { type: 'video/mp4' });
     objectUrl = URL.createObjectURL(blob);
     srcUrl = objectUrl;
   } else if (fileOrUrl instanceof File) {

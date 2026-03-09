@@ -1,16 +1,17 @@
 @import "tailwindcss";
 
-/* Claude Cut — warm dark theme */
+/* Autocut — black with restrained warm highlights */
 :root {
-  --bg-base:     #1C1917;
-  --bg-panel:    #1C1917;
-  --bg-elevated: #1C1917;
-  --bg-surface:  #1C1917;
-  --bg-hover:    #252321;
+  --bg-base:     #111111;
+  --bg-panel:    #171717;
+  --bg-elevated: #1e1e1e;
+  --bg-surface:  #252525;
+  --bg-hover:    #2e2e2e;
 
-  --accent:        #D97757;
-  --accent-dim:    rgba(217, 119, 87, 0.10);
-  --accent-border: rgba(217, 119, 87, 0.35);
+  --accent:        #F4DE8A;
+  --accent-strong: #F8E7A8;
+  --accent-dim:    rgba(244, 222, 138, 0.09);
+  --accent-border: rgba(244, 222, 138, 0.22);
 
   /* Light blue track colors */
   --blue-clip:    #3B7FC4;
@@ -23,16 +24,16 @@
   --text-clip:    #8B5CF6;
   --speed-clip:   #EF4444;
 
-  --fg-primary:   rgba(255, 252, 248, 0.95);
-  --fg-secondary: rgba(255, 252, 248, 0.52);
-  --fg-muted:     rgba(255, 252, 248, 0.30);
-  --fg-faint:     rgba(255, 252, 248, 0.08);
+  --fg-primary:   rgba(255, 255, 255, 0.95);
+  --fg-secondary: rgba(255, 255, 255, 0.52);
+  --fg-muted:     rgba(255, 255, 255, 0.28);
+  --fg-faint:     rgba(255, 255, 255, 0.07);
 
-  --border:       rgba(255, 252, 248, 0.08);
-  --border-mid:   rgba(255, 252, 248, 0.13);
+  --border:       rgba(255, 255, 255, 0.07);
+  --border-mid:   rgba(255, 255, 255, 0.12);
 
   --playhead:    #ffffff;
-  --selection:   rgba(217, 119, 87, 0.18);
+  --selection:   rgba(0, 120, 212, 0.22);
 }
 
 @theme inline {
@@ -59,8 +60,8 @@ body {
 /* Scrollbars */
 ::-webkit-scrollbar       { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,252,248,0.08); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,252,248,0.18); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
 
 input, textarea { caret-color: var(--accent); outline: none; }
 

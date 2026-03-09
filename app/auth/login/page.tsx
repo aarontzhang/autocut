@@ -1,8 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/components/auth/AuthProvider';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import AutocutMark from '@/components/branding/AutocutMark';
 
 export default function LoginPage() {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
@@ -11,6 +13,11 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const { user } = useAuth();
+
+  useEffect(() => {
+    if (user) router.replace('/projects');
+  }, [router, user]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,7 +32,7 @@ export default function LoginPage() {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
       }
-      router.push('/');
+      router.push('/projects');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Authentication failed');
     } finally {
@@ -57,8 +64,8 @@ export default function LoginPage() {
     <div style={{ width: 360 }}>
       {/* Logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 32, justifyContent: 'center' }}>
-        <img src="/logo.png" width={24} height={24} style={{ display: 'block', flexShrink: 0 }} alt="Claude Cut" />
-        <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>Claude Cut</span>
+        <AutocutMark size={24} />
+        <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>Autocut</span>
       </div>
 
       {/* Card */}
@@ -69,7 +76,7 @@ export default function LoginPage() {
         padding: '28px 28px 24px',
       }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg-primary)', margin: '0 0 20px', textAlign: 'center' }}>
-          {mode === 'login' ? 'Sign in to Claude Cut' : 'Create your account'}
+          {mode === 'login' ? 'Sign in to Autocut' : 'Create your account'}
         </h2>
 
         {/* Google */}
@@ -118,7 +125,7 @@ export default function LoginPage() {
             style={{
               padding: '9px 12px',
               background: loading ? 'var(--bg-elevated)' : 'var(--accent)',
-              color: loading ? 'var(--fg-muted)' : '#fff',
+              color: loading ? 'var(--fg-muted)' : '#111',
               border: 'none', borderRadius: 6, cursor: loading ? 'default' : 'pointer',
               fontSize: 13, fontWeight: 500, marginTop: 4,
             }}

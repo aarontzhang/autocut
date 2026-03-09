@@ -144,7 +144,7 @@ function ProjectCard({
           flexShrink: 0,
         }}
       >
-        <VideoThumbnail src={(p as any).thumbnailUrl ?? null} />
+        <VideoThumbnail src={p.thumbnailUrl ?? null} />
         {/* Play hint on hover */}
         {hovered && (
           <div style={{
@@ -247,6 +247,21 @@ function ProjectCard({
         <p style={{ fontSize: 11, color: 'var(--fg-muted)', margin: 0 }}>
           {formatDate(p.updated_at)}{p.video_size ? ` · ${formatSize(p.video_size)}` : ''}
         </p>
+        {p.video_filename && (
+          <p
+            style={{
+              fontSize: 11,
+              color: 'var(--fg-faint)',
+              margin: '2px 0 0',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={p.video_filename}
+          >
+            {p.video_filename}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -265,7 +280,7 @@ export default function ProjectDashboard({ projects, loading, onNew, onOpen, onD
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 13, fontWeight: 500,
-            background: 'var(--accent)', color: '#fff',
+            background: 'var(--accent)', color: '#111',
             border: 'none', borderRadius: 7, cursor: 'pointer',
             padding: '7px 16px',
             transition: 'opacity 0.15s',
@@ -305,7 +320,7 @@ export default function ProjectDashboard({ projects, loading, onNew, onOpen, onD
             </svg>
           </div>
           <p style={{ fontSize: 14, marginBottom: 6, color: 'var(--fg-secondary)' }}>No projects yet</p>
-          <p style={{ fontSize: 13 }}>Click "New Project" to get started</p>
+          <p style={{ fontSize: 13 }}>Click New Project to get started</p>
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>

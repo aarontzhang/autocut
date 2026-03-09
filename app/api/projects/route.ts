@@ -9,18 +9,19 @@ export async function GET() {
   const { data, error } = await supabase
     .from('projects')
     .select('id, name, video_filename, video_size, video_path, created_at, updated_at')
+    .eq('user_id', user.id)
     .order('updated_at', { ascending: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   // Batch-generate signed URLs for projects that have a video_path
   const paths = (data ?? []).filter(p => p.video_path).map(p => p.video_path as string);
-  let signedMap: Record<string, string> = {};
+  const signedMap: Record<string, string> = {};
   if (paths.length > 0) {
     const { data: signed } = await supabase.storage.from('videos').createSignedUrls(paths, 3600);
     if (signed) {
       for (const s of signed) {
-        if (s.signedUrl) signedMap[s.path] = s.signedUrl;
+        if (s.path && s.signedUrl) signedMap[s.path] = s.signedUrl;
       }
     }
   }

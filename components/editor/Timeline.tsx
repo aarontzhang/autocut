@@ -1,17 +1,22 @@
 'use client';
 
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { timeToPx, pxToTime, getRulerTicks, formatTime, formatTimeDetailed, generateWaveform } from '@/lib/timelineUtils';
-import { CaptionEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
+import { getRulerTicks, formatTime, formatTimeDetailed, generateWaveform } from '@/lib/timelineUtils';
 import { EditSnapshot } from '@/lib/useEditorStore';
 import { buildClipSchedule } from '@/lib/playbackEngine';
 import ClipBlock from './ClipBlock';
+import type { VideoPlayerHandle } from './VideoPlayer';
+import { v4 as uuidv4 } from 'uuid';
+import { useAuth } from '@/components/auth/AuthProvider';
+import { uploadProjectMedia } from '@/lib/projectMedia';
 
 const BASE_TRACK_HEIGHT = 50;
 const EFFECT_TRACK_H = 26;
 const HEADER_W = 76;
 const RULER_H = 24;
+
+const SNAP_PX = 14; // pixels within which clips snap to each other's edges
 
 type DragInfo = {
   type: 'clip-move' | 'clip-trim-left' | 'clip-trim-right' | 'caption' | 'text' | 'transition' | 'track-clip-move' | 'track-clip-trim-left' | 'track-clip-trim-right';
@@ -23,42 +28,115 @@ type DragInfo = {
   snapTotalW: number;
   snapDuration: number;
   preDragSnap: EditSnapshot;
+  // Linked clip (video↔audio pair)
+  linkedTrackId?: string;
+  linkedClipId?: string;
+  linkedOrigStart?: number;
 };
+
+/** Collect all timeline edge positions (start/end of every clip) for snapping, excluding specified clip IDs */
+function collectSnapPoints(excludeClipIds: string[]): number[] {
+  const store = useEditorStore.getState();
+  const points: number[] = [0, store.currentTime];
+  const sched = buildClipSchedule(store.clips);
+  for (const e of sched) {
+    points.push(e.timelineStart, e.timelineEnd);
+  }
+  for (const track of store.extraTracks) {
+    for (const clip of track.clips) {
+      if (excludeClipIds.includes(clip.id)) continue;
+      points.push(clip.timelineStart, clip.timelineStart + clip.sourceDuration / clip.speed);
+    }
+  }
+  return points;
+}
+
+/** Return the nearest snap point if within threshold, else return raw time. Also returns the snapped-to point for the indicator. */
+function applySnap(rawTime: number, points: number[], threshold: number): { snapped: number; snapPoint: number | null } {
+  let best = rawTime;
+  let bestDist = threshold;
+  let snapPoint: number | null = null;
+  for (const p of points) {
+    const d = Math.abs(rawTime - p);
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+      snapPoint = p;
+    }
+  }
+  return { snapped: best, snapPoint };
+}
 
 interface TimelineProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  playerRef?: React.RefObject<VideoPlayerHandle | null>;
+  onImportFile?: (file: File) => void;
 }
 
-export default function Timeline({ videoRef }: TimelineProps) {
+export default function Timeline({ videoRef, playerRef, onImportFile }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [trackWidth, setTrackWidth] = useState(800);
-  const [waveform, setWaveform] = useState<number[]>([]);
   const dragRef = useRef<DragInfo | null>(null);
   const panRef = useRef<{ startX: number; startScrollLeft: number; moved: boolean } | null>(null);
   const playheadDragRef = useRef<{ totalW: number; totalDuration: number } | null>(null);
+  const clipDragJustEnded = useRef(false);
+
+  // Track clip selection (supports linked video+audio pair highlighting)
+  const [selectedTrackClipId, setSelectedTrackClipId] = useState<string | null>(null);
+  // Snap indicator: pixel X position within the tracks content div, null when not snapping
+  const [snapIndicatorX, setSnapIndicatorX] = useState<number | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
 
   const currentTime = useEditorStore(s => s.currentTime);
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
-  const clips = useEditorStore(s => s.clips);
-  const captions = useEditorStore(s => s.captions);
-  const transitions = useEditorStore(s => s.transitions);
-  const textOverlays = useEditorStore(s => s.textOverlays);
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
+  const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
+  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
   const extraTracks = useEditorStore(s => s.extraTracks);
-  const addTrack = useEditorStore(s => s.addTrack);
-  const removeTrack = useEditorStore(s => s.removeTrack);
   const addClipToTrack = useEditorStore(s => s.addClipToTrack);
-  const moveTrackClip = useEditorStore(s => s.moveTrackClip);
-  const trimTrackClip = useEditorStore(s => s.trimTrackClip);
+  const appendVideoToTimeline = useEditorStore(s => s.appendVideoToTimeline);
+  const insertVideoIntoTimeline = useEditorStore(s => s.insertVideoIntoTimeline);
+  const updateTrackClipSourcePath = useEditorStore(s => s.updateTrackClipSourcePath);
+  const updateClipSourcePath = useEditorStore(s => s.updateClipSourcePath);
   const removeTrackClip = useEditorStore(s => s.removeTrackClip);
-  const videoFile = useEditorStore(s => s.videoFile);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
-  const trimClip = useEditorStore(s => s.trimClip);
-  const pushHistory = useEditorStore(s => s.pushHistory);
+  const { user } = useAuth();
+
+  // Delete key: remove selected extra-track clip (and its linked partner)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTrackClipId) {
+        e.preventDefault();
+        const store = useEditorStore.getState();
+        for (const track of store.extraTracks) {
+          const clip = track.clips.find(c => c.id === selectedTrackClipId);
+          if (clip) {
+            store.removeTrackClip(track.id, selectedTrackClipId);
+            // Remove linked partner (video↔audio pair)
+            if (clip.linkedClipId) {
+              for (const t2 of store.extraTracks) {
+                if (t2.clips.find(c => c.id === clip.linkedClipId)) {
+                  store.removeTrackClip(t2.id, clip.linkedClipId);
+                  break;
+                }
+              }
+            }
+            setSelectedTrackClipId(null);
+            break;
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTrackClipId]);
 
   // Dynamic track height — shrinks as more tracks are added
   const totalMediaTracks = 2 + extraTracks.length; // main video + main audio + extras
@@ -66,7 +144,17 @@ export default function Timeline({ videoRef }: TimelineProps) {
 
   // Build schedule from clips
   const schedule = buildClipSchedule(clips);
-  const totalTimelineDuration = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
+  const mainTrackEnd = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
+
+  const maxExtraTrackEnd = extraTracks.reduce((acc, track) =>
+    track.clips.reduce((trackAcc, clip) => {
+      const clipEnd = clip.timelineStart + clip.sourceDuration / clip.speed;
+      return Math.max(trackAcc, clipEnd);
+    }, acc), 0);
+
+  const contentDuration = Math.max(mainTrackEnd, maxExtraTrackEnd);
+  const RIGHT_PAD = Math.max(30, contentDuration * 0.3);
+  const totalTimelineDuration = contentDuration + RIGHT_PAD;
 
   const totalW = trackWidth * zoom;
   const ticks = getRulerTicks(totalTimelineDuration, totalW);
@@ -75,11 +163,10 @@ export default function Timeline({ videoRef }: TimelineProps) {
   const hasTextOverlays = textOverlays.length > 0;
   const hasTransitions = transitions.length > 0;
 
-  useEffect(() => {
-    if (videoDuration > 0) {
-      const bars = Math.max(100, Math.floor(totalW / 4));
-      setWaveform(generateWaveform(videoDuration, bars));
-    }
+  const waveform = useMemo(() => {
+    if (videoDuration <= 0) return [];
+    const bars = Math.max(100, Math.floor(totalW / 4));
+    return generateWaveform(videoDuration, bars);
   }, [videoDuration, totalW]);
 
   useEffect(() => {
@@ -92,16 +179,27 @@ export default function Timeline({ videoRef }: TimelineProps) {
     return () => ro.disconnect();
   }, []);
 
-  // Non-passive wheel: ctrl/meta = zoom, vertical = horizontal pan
+  // Non-passive wheel: ctrl/meta = zoom (focal-point), vertical = horizontal pan
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const cursorXInContent = (e.clientX - rect.left - HEADER_W) + el.scrollLeft;
+
         const cur = useEditorStore.getState().zoom;
-        const next = e.deltaY > 0 ? cur / 1.25 : cur * 1.25;
-        useEditorStore.getState().setZoom(Math.max(0.5, Math.round(next * 10) / 10));
+        const factor = e.deltaY > 0 ? 1 / 1.25 : 1.25;
+        const next = Math.round(cur * factor * 100) / 100;
+        useEditorStore.getState().setZoom(next);
+
+        requestAnimationFrame(() => {
+          const newZoom = useEditorStore.getState().zoom;
+          const ratio = newZoom / cur;
+          const newCursorX = cursorXInContent * ratio;
+          el.scrollLeft = Math.max(0, newCursorX - (e.clientX - rect.left - HEADER_W));
+        });
         return;
       }
       if (Math.abs(e.deltaX) < Math.abs(e.deltaY)) {
@@ -121,23 +219,38 @@ export default function Timeline({ videoRef }: TimelineProps) {
 
   const seek = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     if (panRef.current?.moved) return; // was a pan drag, not a click
+    if (clipDragJustEnded.current) { clipDragJustEnded.current = false; return; } // suppress seek after clip drag
     const rect = containerEl.getBoundingClientRect();
     const scrollLeft = containerEl.scrollLeft;
     const px = (clientX - rect.left - HEADER_W) + scrollLeft;
-    const t = Math.max(0, Math.min(totalTimelineDuration, (px / totalW) * totalTimelineDuration));
-    setCurrentTime(t);
-    // Map timeline time back to source for video seeking
-    const store = useEditorStore.getState();
-    const sched = buildClipSchedule(store.clips);
-    if (sched.length > 0) {
-      let targetEntry = sched.find(e => t >= e.timelineStart && t <= e.timelineEnd);
-      if (!targetEntry) targetEntry = sched[sched.length - 1];
-      const offsetInTimeline = t - targetEntry.timelineStart;
-      const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-      if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
+    const t = Math.max(0, Math.min(contentDuration, (px / totalW) * totalTimelineDuration));
+    playerRef?.current?.seekTo(t);
+    if (!playerRef?.current) {
+      setCurrentTime(t);
+      const store = useEditorStore.getState();
+      const sched = buildClipSchedule(store.clips);
+      if (sched.length > 0) {
+        let targetEntry = sched.find(e => t >= e.timelineStart && t <= e.timelineEnd);
+        if (!targetEntry) targetEntry = sched[sched.length - 1];
+        const offsetInTimeline = t - targetEntry.timelineStart;
+        const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+        if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
+      }
     }
     setSelectedItem(null);
-  }, [totalTimelineDuration, totalW, setCurrentTime, videoRef, setSelectedItem]);
+  }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, totalTimelineDuration, totalW, videoRef]);
+
+  const getSnappedTime = useCallback((rawTime: number, clipDuration = 0, excludeClipIds: string[] = []) => {
+    const clamped = Math.max(0, rawTime);
+    if (!snapEnabled) return clamped;
+    const snapThreshold = (SNAP_PX / Math.max(totalW, 1)) * totalTimelineDuration;
+    const snapPts = collectSnapPoints(excludeClipIds);
+    const byStart = applySnap(clamped, snapPts, snapThreshold);
+    if (clipDuration <= 0) return byStart.snapped;
+    const byEnd = applySnap(clamped + clipDuration, snapPts, snapThreshold);
+    const startByEnd = byEnd.snapped - clipDuration;
+    return Math.abs(byStart.snapped - clamped) <= Math.abs(startByEnd - clamped) ? byStart.snapped : startByEnd;
+  }, [snapEnabled, totalTimelineDuration, totalW]);
 
   // Auto-scroll playhead into view (suppressed during drag)
   useEffect(() => {
@@ -218,12 +331,55 @@ export default function Timeline({ videoRef }: TimelineProps) {
     document.body.style.cursor = 'ew-resize';
   }, [totalW, totalTimelineDuration]);
 
+  const startClipMove = useCallback((e: React.MouseEvent, clipId: string) => {
+    e.stopPropagation(); e.preventDefault();
+    const state = useEditorStore.getState();
+    const schedule = buildClipSchedule(state.clips);
+    const entry = schedule.find(en => en.clipId === clipId);
+    if (!entry) return;
+    const preDragSnap: EditSnapshot = {
+      clips: state.clips, captions: state.captions,
+      transitions: state.transitions, textOverlays: state.textOverlays,
+    };
+    dragRef.current = {
+      type: 'clip-move', id: clipId,
+      startX: e.clientX,
+      origStart: entry.timelineStart,
+      origEnd: entry.timelineEnd,
+      snapTotalW: totalW,
+      snapDuration: totalTimelineDuration,
+      preDragSnap,
+    };
+    setSelectedItem({ type: 'clip', id: clipId });
+    document.body.style.cursor = 'grabbing';
+  }, [setSelectedItem, totalW, totalTimelineDuration]);
+
   const startTrackClipDrag = useCallback((e: React.MouseEvent, trackId: string, clipId: string) => {
     e.stopPropagation(); e.preventDefault();
     const state = useEditorStore.getState();
     const track = state.extraTracks.find(t => t.id === trackId);
     const clip = track?.clips.find(c => c.id === clipId);
     if (!clip) return;
+
+    // Select this clip (and highlight its linked partner via linkedClipId)
+    setSelectedTrackClipId(clipId);
+
+    // Find linked clip (video↔audio pair) for synchronized movement
+    let linkedTrackId: string | undefined;
+    let linkedClipId: string | undefined;
+    let linkedOrigStart: number | undefined;
+    if (clip.linkedClipId) {
+      for (const t of state.extraTracks) {
+        const linked = t.clips.find(c => c.id === clip.linkedClipId);
+        if (linked) {
+          linkedTrackId = t.id;
+          linkedClipId = linked.id;
+          linkedOrigStart = linked.timelineStart;
+          break;
+        }
+      }
+    }
+
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
       transitions: state.transitions, textOverlays: state.textOverlays,
@@ -236,6 +392,9 @@ export default function Timeline({ videoRef }: TimelineProps) {
       snapTotalW: totalW,
       snapDuration: totalTimelineDuration,
       preDragSnap,
+      linkedTrackId,
+      linkedClipId,
+      linkedOrigStart,
     };
     document.body.style.cursor = 'grabbing';
   }, [totalW, totalTimelineDuration]);
@@ -285,7 +444,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
   }, [totalW, totalTimelineDuration]);
 
   // Handle file drop onto a track at the cursor's horizontal position
-  const handleTrackFileDrop = useCallback(async (
+  const handleTrackFileDrop = async (
     e: React.DragEvent,
     trackId: string,
   ) => {
@@ -298,7 +457,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
     // Compute timeline position from drop X
     const rect = el.getBoundingClientRect();
     const px = (e.clientX - rect.left - HEADER_W) + el.scrollLeft;
-    const dropTime = Math.max(0, (px / totalW) * totalTimelineDuration);
+    const rawDropTime = Math.max(0, (px / totalW) * totalTimelineDuration);
 
     // Get duration
     const sourceUrl = URL.createObjectURL(file);
@@ -309,26 +468,58 @@ export default function Timeline({ videoRef }: TimelineProps) {
       tmp.onerror = () => { resolve(10); URL.revokeObjectURL(tmp.src); };
     });
 
+    const targetStart = getSnappedTime(rawDropTime, duration);
+
+    const clipId = uuidv4();
     addClipToTrack(trackId, {
+      id: clipId,
       sourceUrl,
       sourceName: file.name,
       sourceStart: 0,
       sourceDuration: duration,
-      timelineStart: dropTime,
+      timelineStart: targetStart,
       speed: 1,
       volume: 1,
     });
-  }, [totalW, totalTimelineDuration, addClipToTrack]);
 
-  // Handle file drop onto the main timeline area → auto-create video+audio track pair
+    const { currentProjectId } = useEditorStore.getState();
+    if (user && currentProjectId) {
+      uploadProjectMedia(file, user.id, currentProjectId, 'tracks').then((storagePath) => {
+        updateTrackClipSourcePath(trackId, clipId, storagePath);
+      }).catch((error: Error) => {
+        console.warn('Track clip upload failed:', error.message);
+      });
+    }
+  };
+
+  // Handle file drop onto the main timeline area → insert into the primary timeline
   const [isMainDragOver, setIsMainDragOver] = useState(false);
 
-  const handleMainFileDrop = useCallback(async (e: React.DragEvent) => {
+  const handleMainFileDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsMainDragOver(false);
     const file = e.dataTransfer.files[0];
     if (!file || !file.type.startsWith('video/')) return;
+
+    // If no main video loaded yet, import this as the main video
+    if (!useEditorStore.getState().videoUrl) {
+      if (onImportFile) {
+        onImportFile(file);
+      } else {
+        useEditorStore.getState().setVideoFile(file);
+      }
+      return;
+    }
+
+    // Capture cursor position before the await (synthetic event gets recycled)
+    const el = scrollRef.current;
+    let dropTime = useEditorStore.getState().currentTime;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      const px = (e.clientX - rect.left - HEADER_W) + el.scrollLeft;
+      dropTime = Math.max(0, (px / totalW) * totalTimelineDuration);
+    }
 
     const sourceUrl = URL.createObjectURL(file);
     const duration = await new Promise<number>((resolve) => {
@@ -338,42 +529,24 @@ export default function Timeline({ videoRef }: TimelineProps) {
       tmp.onerror = () => { resolve(10); tmp.src = ''; };
     });
 
-    const dropTime = useEditorStore.getState().currentTime;
+    const targetTime = getSnappedTime(dropTime, duration);
+    const clipId = targetTime >= mainTrackEnd - 0.05
+      ? appendVideoToTimeline(sourceUrl, file.name, duration)
+      : insertVideoIntoTimeline(sourceUrl, file.name, duration, targetTime);
 
-    // Add video track and get its ID
-    addTrack('video');
-    const videoTrack = useEditorStore.getState().extraTracks.slice().reverse().find(t => t.type === 'video');
-    if (videoTrack) {
-      addClipToTrack(videoTrack.id, {
-        sourceUrl,
-        sourceName: file.name,
-        sourceStart: 0,
-        sourceDuration: duration,
-        timelineStart: dropTime,
-        speed: 1,
-        volume: 1,
+    const { currentProjectId } = useEditorStore.getState();
+    if (user && currentProjectId) {
+      uploadProjectMedia(file, user.id, currentProjectId, 'sources').then((storagePath) => {
+        updateClipSourcePath(clipId, storagePath);
+      }).catch((error: Error) => {
+        console.warn('Main timeline clip upload failed:', error.message);
       });
     }
-
-    // Add matching audio track
-    addTrack('audio');
-    const audioTrack = useEditorStore.getState().extraTracks.slice().reverse().find(t => t.type === 'audio');
-    if (audioTrack) {
-      addClipToTrack(audioTrack.id, {
-        sourceUrl,
-        sourceName: file.name,
-        sourceStart: 0,
-        sourceDuration: duration,
-        timelineStart: dropTime,
-        speed: 1,
-        volume: 1,
-      });
-    }
-  }, [addTrack, addClipToTrack]);
+  };
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
-      // Playhead scrub drag
+      // Playhead scrub drag — with snapping to clip edges
       const ph = playheadDragRef.current;
       if (ph) {
         const el = scrollRef.current;
@@ -381,16 +554,23 @@ export default function Timeline({ videoRef }: TimelineProps) {
         const rect = el.getBoundingClientRect();
         const scrollLeft = el.scrollLeft;
         const rawPx = (e.clientX - rect.left - HEADER_W) + scrollLeft;
-        const t = Math.max(0, Math.min(ph.totalDuration, (rawPx / ph.totalW) * ph.totalDuration));
-        useEditorStore.getState().setCurrentTime(t);
-        const store = useEditorStore.getState();
-        const sched = buildClipSchedule(store.clips);
-        if (sched.length > 0) {
-          let targetEntry = sched.find(entry => t >= entry.timelineStart && t <= entry.timelineEnd);
-          if (!targetEntry) targetEntry = sched[sched.length - 1];
-          const offsetInTimeline = t - targetEntry.timelineStart;
-          const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-          if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
+        const rawT = Math.max(0, Math.min(ph.totalDuration, (rawPx / ph.totalW) * ph.totalDuration));
+        // Snap playhead to clip edges
+        const snapThreshold = (SNAP_PX / ph.totalW) * ph.totalDuration;
+        const snapPts = collectSnapPoints([]);
+        const t = snapEnabled ? applySnap(rawT, snapPts, snapThreshold).snapped : rawT;
+        playerRef?.current?.seekTo(t);
+        if (!playerRef?.current) {
+          useEditorStore.getState().setCurrentTime(t);
+          const store = useEditorStore.getState();
+          const sched = buildClipSchedule(store.clips);
+          if (sched.length > 0) {
+            let targetEntry = sched.find(entry => t >= entry.timelineStart && t <= entry.timelineEnd);
+            if (!targetEntry) targetEntry = sched[sched.length - 1];
+            const offsetInTimeline = t - targetEntry.timelineStart;
+            const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+            if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
+          }
         }
         return;
       }
@@ -413,9 +593,54 @@ export default function Timeline({ videoRef }: TimelineProps) {
       const timeDelta = (pxDelta / d.snapTotalW) * d.snapDuration;
       const store = useEditorStore.getState();
 
-      if (d.type === 'track-clip-move' && d.trackId) {
-        const newTimelineStart = d.origStart + timeDelta;
-        store.moveTrackClip(d.trackId, d.id, newTimelineStart);
+      if (d.type === 'clip-move') {
+        // Reorder V1 main clip by dragging: find the new array index based on cursor position
+        const rawNewStart = d.origStart + timeDelta;
+        const clipDuration = d.origEnd - d.origStart;
+        const midpoint = rawNewStart + clipDuration / 2;
+        const schedule = buildClipSchedule(store.clips);
+        let newIndex = schedule.length - 1;
+        for (let i = 0; i < schedule.length; i++) {
+          if (schedule[i].clipId === d.id) continue;
+          const entryMid = (schedule[i].timelineStart + schedule[i].timelineEnd) / 2;
+          if (midpoint < entryMid) { newIndex = i; break; }
+        }
+        // Direct state update (no history push) — history is pushed on mouseUp
+        const idx = store.clips.findIndex(c => c.id === d.id);
+        if (idx !== -1) {
+          const newClips = [...store.clips];
+          const [removed] = newClips.splice(idx, 1);
+          newClips.splice(Math.max(0, Math.min(newClips.length, newIndex)), 0, removed);
+          useEditorStore.setState({ clips: newClips });
+        }
+      } else if (d.type === 'track-clip-move' && d.trackId) {
+        const rawNewStart = d.origStart + timeDelta;
+        const clipDuration = d.origEnd - d.origStart;
+        const snapThreshold = (SNAP_PX / d.snapTotalW) * d.snapDuration;
+        const excludeIds = [d.id, d.linkedClipId].filter(Boolean) as string[];
+        const snapPts = collectSnapPoints(excludeIds);
+        const startSnap = snapEnabled ? applySnap(rawNewStart, snapPts, snapThreshold) : { snapped: rawNewStart, snapPoint: null };
+        const endSnap = snapEnabled ? applySnap(rawNewStart + clipDuration, snapPts, snapThreshold) : { snapped: rawNewStart + clipDuration, snapPoint: null };
+        const snappedByEnd = endSnap.snapped - clipDuration;
+        const distStart = Math.abs(startSnap.snapped - rawNewStart);
+        const distEnd = Math.abs(snappedByEnd - rawNewStart);
+        const newTimelineStart = distStart <= distEnd ? startSnap.snapped : snappedByEnd;
+        const activeSnapPoint = distStart <= distEnd ? startSnap.snapPoint : endSnap.snapPoint;
+
+        // Show snap indicator
+        if (snapEnabled && activeSnapPoint !== null) {
+          setSnapIndicatorX((activeSnapPoint / d.snapDuration) * d.snapTotalW);
+        } else {
+          setSnapIndicatorX(null);
+        }
+
+        store.moveTrackClip(d.trackId, d.id, Math.max(0, newTimelineStart));
+
+        // Move linked clip (video↔audio pair) by the same delta
+        if (d.linkedTrackId && d.linkedClipId && d.linkedOrigStart !== undefined) {
+          const linkedDelta = newTimelineStart - d.origStart;
+          store.moveTrackClip(d.linkedTrackId, d.linkedClipId, Math.max(0, d.linkedOrigStart + linkedDelta));
+        }
       } else if (d.type === 'track-clip-trim-left' && d.trackId) {
         const track = store.extraTracks.find(t => t.id === d.trackId);
         const clip = track?.clips.find(c => c.id === d.id);
@@ -460,6 +685,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
     };
 
     const onMouseUp = () => {
+      setSnapIndicatorX(null);
       if (playheadDragRef.current) {
         playheadDragRef.current = null;
         document.body.style.cursor = '';
@@ -471,6 +697,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
       }
       const d = dragRef.current;
       if (!d) return;
+      clipDragJustEnded.current = true;
       useEditorStore.getState().pushHistory(d.preDragSnap);
       dragRef.current = null;
       document.body.style.cursor = '';
@@ -482,7 +709,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     };
-  }, []);
+  }, [playerRef, snapEnabled, videoRef]);
 
   const playheadX = tPx(currentTime);
 
@@ -526,10 +753,29 @@ export default function Timeline({ videoRef }: TimelineProps) {
 
         <div style={{ flex: 1 }} />
 
+        <button
+          onClick={() => setSnapEnabled(v => !v)}
+          style={{
+            height: 22,
+            padding: '0 9px',
+            borderRadius: 999,
+            border: `1px solid ${snapEnabled ? 'var(--accent-border)' : 'var(--border)'}`,
+            background: snapEnabled ? 'var(--accent-dim)' : 'transparent',
+            color: snapEnabled ? 'var(--accent-strong)' : 'var(--fg-secondary)',
+            cursor: 'pointer',
+            fontSize: 10,
+            fontFamily: 'var(--font-serif)',
+            letterSpacing: '0.05em',
+            textTransform: 'uppercase',
+          }}
+        >
+          {snapEnabled ? 'Snapping On' : 'Free Move'}
+        </button>
+
         {/* Zoom controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
           <button
-            onClick={() => setZoom(Math.max(0.5, Math.round(zoom / 1.25 * 10) / 10))}
+            onClick={() => setZoom(Math.round(zoom / 1.25 * 100) / 100)}
             style={{
               width: 22, height: 22, borderRadius: 4, background: 'transparent',
               border: '1px solid var(--border)', cursor: 'pointer',
@@ -575,7 +821,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
             background: 'rgba(255,255,255,0.03)',
           }}>
             <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-serif)' }}>
-              Drop video — clips start at playhead
+              Drop video to place here
             </span>
           </div>
         )}
@@ -596,7 +842,6 @@ export default function Timeline({ videoRef }: TimelineProps) {
               label={track.label}
               height={TRACK_HEIGHT}
               color="var(--blue-clip-hi)"
-              onRemove={() => removeTrack(track.id)}
             />
           ))}
           <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--audio-clip-hi)" />
@@ -607,7 +852,6 @@ export default function Timeline({ videoRef }: TimelineProps) {
               label={track.label}
               height={TRACK_HEIGHT}
               color="var(--audio-clip-hi)"
-              onRemove={() => removeTrack(track.id)}
             />
           ))}
           {hasCaptions && <EffectHeader label="CC" color="var(--caption-clip)" />}
@@ -616,7 +860,16 @@ export default function Timeline({ videoRef }: TimelineProps) {
         </div>
 
         {/* Tracks content */}
-        <div style={{ position: 'relative', width: totalW, flexShrink: 0 }}>
+        <div style={{ position: 'relative', width: totalW, minWidth: '100%', flexShrink: 0 }}>
+          {/* Snap indicator — glowing vertical line at the snap point during drag */}
+          {snapIndicatorX !== null && (
+            <div style={{
+              position: 'absolute', left: snapIndicatorX, top: 0, bottom: 0, width: 1,
+              background: 'var(--accent-strong)',
+              boxShadow: '0 0 6px 1px var(--accent-border)',
+              zIndex: 20, pointerEvents: 'none',
+            }} />
+          )}
           {/* Ruler */}
           <div
             style={{
@@ -662,7 +915,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
               onMouseDown={e => {
                 e.stopPropagation();
                 e.preventDefault();
-                playheadDragRef.current = { totalW, totalDuration: totalTimelineDuration };
+                playheadDragRef.current = { totalW, totalDuration: contentDuration };
                 document.body.style.cursor = 'ew-resize';
               }}
             />
@@ -682,10 +935,10 @@ export default function Timeline({ videoRef }: TimelineProps) {
                   left={clipLeft}
                   width={clipWidth}
                   height={TRACK_HEIGHT}
-                  isSelected={false}
+                  isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
                   index={i}
-                  onSelect={e => e.stopPropagation()}
-                  onMouseDown={e => { e.stopPropagation(); }}
+                  onSelect={e => { e.stopPropagation(); setSelectedItem({ type: 'clip', id: clip.id }); }}
+                  onMouseDown={e => startClipMove(e, clip.id)}
                   onTrimLeftStart={e => startClipTrimLeft(e, clip.id)}
                   onTrimRightStart={e => startClipTrimRight(e, clip.id)}
                 />
@@ -700,21 +953,21 @@ export default function Timeline({ videoRef }: TimelineProps) {
               key={track.id}
               height={TRACK_HEIGHT}
               track={track}
-              totalW={totalW}
-              totalTimelineDuration={totalTimelineDuration}
               tPx={tPx}
               playheadX={playheadX}
+              selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
               onTrimLeft={(e, clipId) => startTrackClipTrimLeft(e, track.id, clipId)}
               onTrimRight={(e, clipId) => startTrackClipTrimRight(e, track.id, clipId)}
               onRemoveClip={clipId => removeTrackClip(track.id, clipId)}
+              onDeselect={() => setSelectedTrackClipId(null)}
             />
           ))}
 
           {/* Audio track */}
           <TrackRow height={TRACK_HEIGHT} onSeek={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }}>
-            {videoDuration > 0 && schedule.map((entry, i) => {
+            {videoDuration > 0 && schedule.map((entry) => {
               const clip = clips.find(c => c.id === entry.clipId);
               if (!clip) return null;
               const clipLeft = tPx(entry.timelineStart);
@@ -725,6 +978,7 @@ export default function Timeline({ videoRef }: TimelineProps) {
               const startBar = Math.floor(startFrac * waveform.length);
               const endBar = Math.ceil(endFrac * waveform.length);
               const clipWaveform = waveform.slice(startBar, endBar);
+              const isClipSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
               return (
                 <div
                   key={clip.id}
@@ -737,8 +991,13 @@ export default function Timeline({ videoRef }: TimelineProps) {
                     height: TRACK_HEIGHT - 12,
                     borderRadius: 4,
                     overflow: 'hidden',
-                    border: '1px solid rgba(255,255,255,0.06)',
+                    background: isClipSelected ? 'rgba(96,165,250,0.18)' : undefined,
+                    border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(255,255,255,0.06)',
+                    cursor: 'pointer',
+                    boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
+                    opacity: isClipSelected ? 1 : 0.92,
                   }}
+                  onClick={e => { e.stopPropagation(); setSelectedItem({ type: 'clip', id: clip.id }); }}
                 >
                   <div style={{
                     position: 'absolute', inset: 0,
@@ -761,15 +1020,15 @@ export default function Timeline({ videoRef }: TimelineProps) {
               key={track.id}
               height={TRACK_HEIGHT}
               track={track}
-              totalW={totalW}
-              totalTimelineDuration={totalTimelineDuration}
               tPx={tPx}
               playheadX={playheadX}
+              selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
               onTrimLeft={(e, clipId) => startTrackClipTrimLeft(e, track.id, clipId)}
               onTrimRight={(e, clipId) => startTrackClipTrimRight(e, track.id, clipId)}
               onRemoveClip={clipId => removeTrackClip(track.id, clipId)}
+              onDeselect={() => setSelectedTrackClipId(null)}
             />
           ))}
 
@@ -978,18 +1237,18 @@ const EXTRA_CLIP_COLORS = [
   { bg: 'rgba(245,158,11,0.3)', border: 'rgba(251,191,36,0.6)' },
 ];
 
-function ExtraTrackRow({ height, track, totalW, totalTimelineDuration, tPx, playheadX, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip }: {
+function ExtraTrackRow({ height, track, tPx, playheadX, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
   height: number;
   track: import('@/lib/types').MediaTrack;
-  totalW: number;
-  totalTimelineDuration: number;
   tPx: (t: number) => number;
   playheadX: number;
+  selectedTrackClipId?: string | null;
   onDrop: (e: React.DragEvent) => void;
   onClipDrag: (e: React.MouseEvent, clipId: string) => void;
   onTrimLeft: (e: React.MouseEvent, clipId: string) => void;
   onTrimRight: (e: React.MouseEvent, clipId: string) => void;
   onRemoveClip: (clipId: string) => void;
+  onDeselect?: () => void;
 }) {
   const [isDragOver, setIsDragOver] = useState(false);
   const HANDLE_W = 5;
@@ -1006,6 +1265,7 @@ function ExtraTrackRow({ height, track, totalW, totalTimelineDuration, tPx, play
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); }}
       onDragLeave={() => setIsDragOver(false)}
       onDrop={e => { e.stopPropagation(); setIsDragOver(false); onDrop(e); }}
+      onClick={e => { if ((e.target as HTMLElement) === e.currentTarget) onDeselect?.(); }}
     >
       {isDragOver && (
         <div style={{
@@ -1023,6 +1283,9 @@ function ExtraTrackRow({ height, track, totalW, totalTimelineDuration, tPx, play
         const color = EXTRA_CLIP_COLORS[i % EXTRA_CLIP_COLORS.length];
         const clipLeft = tPx(clip.timelineStart);
         const clipW = Math.max(HANDLE_W * 2 + 4, tPx(clip.timelineStart + clip.sourceDuration / clip.speed) - clipLeft);
+        // A clip is "selected" if it is the selected clip OR its linked partner is selected
+        const isSelected = selectedTrackClipId !== null && selectedTrackClipId !== undefined &&
+          (clip.id === selectedTrackClipId || clip.linkedClipId === selectedTrackClipId);
         return (
           <div
             key={clip.id}
@@ -1033,12 +1296,14 @@ function ExtraTrackRow({ height, track, totalW, totalTimelineDuration, tPx, play
               top: 5,
               width: clipW,
               height: height - 10,
-              background: color.bg,
-              border: `1.5px solid ${color.border}`,
+              background: isSelected ? color.bg.replace('0.3', '0.5') : color.bg,
+              border: isSelected ? `2px solid ${color.border.replace('0.6', '1')}` : `1.5px solid ${color.border}`,
               borderRadius: 4,
               boxSizing: 'border-box',
               cursor: 'grab',
               overflow: 'hidden',
+              boxShadow: isSelected ? `0 0 0 1px ${color.border}` : 'none',
+              transition: 'border 0.08s, box-shadow 0.08s',
             }}
             onMouseDown={e => { e.stopPropagation(); onClipDrag(e, clip.id); }}
           >

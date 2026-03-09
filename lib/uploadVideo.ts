@@ -28,19 +28,46 @@ export async function uploadVideoToSupabase(
 
   onProgress?.(5);
 
-  const { error } = await supabase.storage
+  // 2. Get a signed upload URL for real progress tracking
+  const { data: signedData, error: signErr } = await supabase.storage
     .from('videos')
-    .upload(storagePath, file, { upsert: true });
+    .createSignedUploadUrl(storagePath, { upsert: true });
 
-  if (error) throw new Error(`Storage upload failed: ${error.message}`);
+  if (signErr || !signedData) {
+    console.error('[uploadVideo] Failed to get signed URL:', signErr);
+    throw new Error(`Failed to get upload URL: ${signErr?.message ?? 'unknown error'}. Check that your Supabase Storage "videos" bucket has INSERT/SELECT policies for authenticated users.`);
+  }
+
+  // 3. Complete the signed upload using the token returned by Supabase.
+  // Raw PUTs against the signed URL do not match the storage client contract here.
+  onProgress?.(15);
+  const { error: uploadErr } = await supabase.storage
+    .from('videos')
+    .uploadToSignedUrl(storagePath, signedData.token, file, {
+      upsert: true,
+      contentType: file.type || 'video/mp4',
+    });
+
+  if (uploadErr) {
+    console.error('[uploadVideo] Signed upload failed:', uploadErr);
+    if ('status' in uploadErr && uploadErr.status === 413) {
+      throw new Error('File too large — increase the max file size in Supabase Dashboard -> Storage -> Settings');
+    }
+    throw new Error(`Upload failed: ${uploadErr.message}. Check that the "videos" bucket exists and allows authenticated uploads.`);
+  }
   onProgress?.(100);
 
-  // 3. Update project with video_path
-  await fetch(`/api/projects/${projectId}`, {
+  // 4. Update project with video_path
+  const patchRes = await fetch(`/api/projects/${projectId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ video_path: storagePath }),
   });
+  if (!patchRes.ok) {
+    const errText = await patchRes.text().catch(() => 'unknown');
+    console.error('[uploadVideo] Failed to save video_path:', patchRes.status, errText);
+    throw new Error(`Video uploaded but failed to link to your account (HTTP ${patchRes.status}). Please try again.`);
+  }
 
   return { projectId, storagePath };
 }

@@ -14,8 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Claude Cut",
-  description: "AI-powered video editor by Claude. Cut, caption, and edit via chat.",
+  title: "Autocut",
+  description: "AI-powered video editor. Cut, caption, and edit via chat.",
+  icons: {
+    icon: "/favicon.svg",
+    shortcut: "/favicon.svg",
+    apple: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({

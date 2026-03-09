@@ -8,6 +8,10 @@ export interface VideoClip {
   filter: ColorFilter | null;
   fadeIn: number;        // seconds
   fadeOut: number;       // seconds
+  // Multi-source support
+  sourceUrl?: string;    // blob URL for this clip's source (undefined = main videoUrl from store)
+  sourcePath?: string;   // Supabase Storage path for persisted secondary sources
+  sourceName?: string;   // display name for the clip
 }
 
 export interface ClipScheduleEntry {
@@ -51,12 +55,14 @@ export interface ColorFilter {
 export interface TrackClip {
   id: string;
   sourceUrl: string;
+  sourcePath?: string; // Supabase Storage path — set after background upload, used to re-hydrate on load
   sourceName: string;
   sourceStart: number;
   sourceDuration: number;
   timelineStart: number; // seconds in the output timeline
   speed: number;
   volume: number;
+  linkedClipId?: string; // ID of the paired clip on another track (video↔audio pair)
 }
 
 /** An extra video or audio track (beyond the main track 0) */
