@@ -277,16 +277,17 @@ export default function ProjectDashboard({ projects, loading, onNew, onOpen, onD
         </h1>
         <button
           onClick={onNew}
+          className="iridescent-button"
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 13, fontWeight: 500,
-            background: 'var(--accent)', color: '#111',
-            border: 'none', borderRadius: 7, cursor: 'pointer',
+            color: 'var(--accent-ink)',
+            borderRadius: 7, cursor: 'pointer',
             padding: '7px 16px',
-            transition: 'opacity 0.15s',
+            transition: 'transform 0.15s, filter 0.15s, box-shadow 0.15s',
           }}
-          onMouseEnter={e => { e.currentTarget.style.opacity = '0.85'; }}
-          onMouseLeave={e => { e.currentTarget.style.opacity = '1'; }}
+          onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
+          onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; }}
         >
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>

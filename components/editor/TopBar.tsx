@@ -243,15 +243,14 @@ export default function TopBar({ onImportFile }: { onImportFile?: (file: File) =
         <a
           href={(ffmpegJob as { status: 'done'; outputUrl: string }).outputUrl}
           download="export-output.mp4"
+          className="iridescent-button"
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: 6,
             fontSize: 12,
             fontWeight: 500,
-            background: 'var(--accent)',
-            color: '#111',
-            border: 'none',
+            color: 'var(--accent-ink)',
             borderRadius: 5,
             cursor: 'pointer',
             padding: '5px 14px',
@@ -270,14 +269,15 @@ export default function TopBar({ onImportFile }: { onImportFile?: (file: File) =
         <button
           onClick={handleExport}
           disabled={!canExport}
+          className={canExport ? 'iridescent-button' : undefined}
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: 6,
             fontSize: 12,
             fontWeight: 500,
-            background: canExport ? 'var(--accent)' : 'var(--bg-elevated)',
-            color: canExport ? '#111' : 'var(--fg-muted)',
+            background: canExport ? undefined : 'var(--bg-elevated)',
+            color: canExport ? 'var(--accent-ink)' : 'var(--fg-muted)',
             border: `1px solid ${canExport ? 'transparent' : 'var(--border-mid)'}`,
             borderRadius: 5,
             cursor: canExport ? 'pointer' : 'default',

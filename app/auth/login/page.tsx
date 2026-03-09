@@ -122,12 +122,13 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
+            className="iridescent-button"
             style={{
               padding: '9px 12px',
-              background: loading ? 'var(--bg-elevated)' : 'var(--accent)',
-              color: loading ? 'var(--fg-muted)' : '#111',
-              border: 'none', borderRadius: 6, cursor: loading ? 'default' : 'pointer',
+              color: loading ? 'var(--fg-muted)' : 'var(--accent-ink)',
+              borderRadius: 6, cursor: loading ? 'default' : 'pointer',
               fontSize: 13, fontWeight: 500, marginTop: 4,
+              transition: 'filter 0.15s, box-shadow 0.15s',
             }}
           >
             {loading ? 'Please wait...' : mode === 'login' ? 'Sign in' : 'Create account'}
