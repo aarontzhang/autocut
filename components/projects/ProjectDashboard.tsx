@@ -281,9 +281,12 @@ export default function ProjectDashboard({ projects, loading, onNew, onOpen, onD
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 13, fontWeight: 500,
-            color: 'var(--accent-ink)',
+            background: '#ffffff',
+            color: '#0c0c0c',
+            border: '1px solid rgba(255,255,255,0.92)',
             borderRadius: 7, cursor: 'pointer',
             padding: '7px 16px',
+            boxShadow: '0 6px 18px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.92)',
             transition: 'transform 0.15s, filter 0.15s, box-shadow 0.15s',
           }}
           onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; }}

@@ -573,7 +573,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
           <div style={{
             position: 'absolute', left: 0, top: 0, bottom: 0,
             width: `${progress * 100}%`,
-            background: 'var(--accent)', borderRadius: 2, transition: 'width 0.05s linear',
+            background: '#ffffff', borderRadius: 2, transition: 'width 0.05s linear',
           }} />
         </div>
 
@@ -594,8 +594,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
           <button
             onClick={togglePlay}
             style={{
-              width: 34, height: 34, borderRadius: '50%', background: 'var(--accent)',
-              border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              width: 34, height: 34, borderRadius: '50%', background: '#ffffff',
+              border: '1px solid rgba(255,255,255,0.92)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              boxShadow: '0 6px 16px rgba(0,0,0,0.28)',
             }}
           >
             {isPlaying ? (

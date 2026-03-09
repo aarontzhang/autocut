@@ -742,9 +742,9 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
         {clips.length > 1 && (
           <span style={{
             fontSize: 10, padding: '1px 7px', borderRadius: 3,
-            background: 'rgba(59,130,246,0.12)',
-            border: '1px solid rgba(96,165,250,0.25)',
-            color: 'rgba(147,197,253,0.9)',
+            background: 'rgba(33,212,255,0.12)',
+            border: '1px solid rgba(33,212,255,0.26)',
+            color: 'rgba(184,243,255,0.92)',
             fontFamily: 'var(--font-serif)',
           }}>
             {clips.length} clips
@@ -760,7 +760,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
             padding: '0 9px',
             borderRadius: 999,
             border: `1px solid ${snapEnabled ? 'var(--accent-border)' : 'var(--border)'}`,
-            background: snapEnabled ? 'var(--accent-dim)' : 'transparent',
+            background: snapEnabled ? 'rgba(33,212,255,0.18)' : 'transparent',
             color: snapEnabled ? 'var(--accent-strong)' : 'var(--fg-secondary)',
             cursor: 'pointer',
             fontSize: 10,
@@ -866,7 +866,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
             <div style={{
               position: 'absolute', left: snapIndicatorX, top: 0, bottom: 0, width: 1,
               background: 'var(--accent-strong)',
-              boxShadow: '0 0 6px 1px var(--accent-border)',
+              boxShadow: '0 0 10px 2px var(--accent-border)',
               zIndex: 20, pointerEvents: 'none',
             }} />
           )}

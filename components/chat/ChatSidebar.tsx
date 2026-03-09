@@ -1029,7 +1029,7 @@ export default function ChatSidebar() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <AutocutMark size={16} />
+          <AutocutMark size={18} />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
             Autocut
           </span>
@@ -1179,11 +1179,12 @@ export default function ChatSidebar() {
                       <div style={{
                         width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
                         background: agentMode === value ? 'var(--accent)' : 'rgba(255,255,255,0.18)',
-                        transition: 'background 0.15s',
+                        boxShadow: agentMode === value ? '0 0 10px rgba(33,212,255,0.45)' : 'none',
+                        transition: 'background 0.15s, box-shadow 0.15s',
                       }} />
                       <span style={{
                         fontSize: 10, fontFamily: 'var(--font-serif)',
-                        color: agentMode === value ? 'var(--fg-secondary)' : 'var(--fg-muted)',
+                        color: agentMode === value ? 'var(--accent-strong)' : 'var(--fg-muted)',
                         transition: 'color 0.15s',
                       }}>
                         {label}

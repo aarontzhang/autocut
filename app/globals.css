@@ -8,20 +8,20 @@
   --bg-surface:  #252525;
   --bg-hover:    #2e2e2e;
 
-  --accent:        #7cc8ff;
-  --accent-strong: #dff1ff;
-  --accent-dim:    rgba(97, 170, 255, 0.16);
-  --accent-border: rgba(141, 208, 255, 0.34);
+  --accent:        #21d4ff;
+  --accent-strong: #b8f3ff;
+  --accent-dim:    rgba(33, 212, 255, 0.18);
+  --accent-border: rgba(33, 212, 255, 0.42);
   --accent-ink:    #04101f;
-  --accent-gradient: linear-gradient(135deg, #f1f6ff 0%, #9fd7ff 18%, #5f8cff 48%, #6b5cff 72%, #8fe8ff 100%);
-  --accent-gradient-soft: linear-gradient(135deg, rgba(241, 246, 255, 0.2) 0%, rgba(159, 215, 255, 0.16) 24%, rgba(95, 140, 255, 0.2) 56%, rgba(107, 92, 255, 0.18) 78%, rgba(143, 232, 255, 0.14) 100%);
+  --accent-gradient: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%);
+  --accent-gradient-soft: linear-gradient(135deg, rgba(33, 212, 255, 0.18) 0%, rgba(64, 122, 255, 0.12) 100%);
   --surface-gradient: linear-gradient(180deg, rgba(32, 32, 32, 0.96) 0%, rgba(18, 18, 18, 0.98) 100%);
   --logo-tile: linear-gradient(180deg, #ffffff 0%, #f1f4fb 100%);
 
-  --blue-clip:    #286bc9;
-  --blue-clip-hi: #54a6ff;
-  --audio-clip:   #3278da;
-  --audio-clip-hi:#6fc4ff;
+  --blue-clip:    #149bff;
+  --blue-clip-hi: #67e8ff;
+  --audio-clip:   #18acff;
+  --audio-clip-hi:#82f0ff;
 
   /* Caption / text overlay / speed track colors */
   --caption-clip: #F59E0B;
@@ -37,7 +37,7 @@
   --border-mid:   rgba(255, 255, 255, 0.12);
 
   --playhead:    #ffffff;
-  --selection:   rgba(64, 153, 255, 0.22);
+  --selection:   rgba(33, 212, 255, 0.24);
 }
 
 @theme inline {
@@ -82,19 +82,19 @@ a { color: inherit; }
 }
 
 .iridescent-button {
-  background-image: var(--accent-gradient);
-  color: var(--accent-ink);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #ffffff;
+  color: #0c0c0c;
+  border: 1px solid rgba(255, 255, 255, 0.88);
   box-shadow:
-    0 10px 26px rgba(47, 92, 255, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+    0 6px 18px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .iridescent-button:hover {
-  filter: saturate(1.08) brightness(1.03);
+  filter: brightness(0.97);
   box-shadow:
-    0 14px 34px rgba(47, 92, 255, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    0 8px 22px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .iridescent-button:disabled {

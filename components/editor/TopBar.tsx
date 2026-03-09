@@ -58,7 +58,7 @@ export default function TopBar({ onImportFile }: { onImportFile?: (file: File) =
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 4 }}>
-        <AutocutMark size={22} />
+        <AutocutMark size={24} />
         <span
           style={{
             fontSize: 14,
