@@ -13,6 +13,7 @@ import AutocutMark from '@/components/branding/AutocutMark';
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
 const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
+const AUTO_NARROWED_FRAME_WINDOW_SECONDS = 6;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const AGENT_MENU_ITEMS = [
   { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
@@ -426,6 +427,53 @@ function formatChatTime(seconds: number): string {
 
 function looksLikeVisualSearchQuery(text: string): boolean {
   return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
+}
+
+function extractExplicitTimeReferences(text: string): number[] {
+  const matches: number[] = [];
+  const seen = new Set<number>();
+  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = timePattern.exec(text)) !== null) {
+    const seconds = match[1] !== undefined
+      ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
+      : parseFloat(match[3] ?? '0');
+    if (!Number.isFinite(seconds) || seen.has(seconds)) continue;
+    seen.add(seconds);
+    matches.push(seconds);
+  }
+
+  return matches;
+}
+
+function narrowDenseFrameRequestAroundMention(
+  req: { startTime: number; endTime: number; count?: number },
+  latestUserInput: string,
+  videoDuration: number,
+): { startTime: number; endTime: number; count?: number } | null {
+  const mentionedTimes = extractExplicitTimeReferences(latestUserInput);
+  const anchor = mentionedTimes.find((time) => time >= req.startTime - 1 && time <= req.endTime + 1);
+  if (anchor === undefined) return null;
+
+  const targetWindow = Math.min(MAX_DENSE_FRAME_WINDOW_SECONDS, AUTO_NARROWED_FRAME_WINDOW_SECONDS);
+  const halfWindow = targetWindow / 2;
+  let startTime = Math.max(0, anchor - halfWindow);
+  let endTime = Math.min(videoDuration, anchor + halfWindow);
+
+  if (endTime - startTime < targetWindow) {
+    if (startTime <= 0) {
+      endTime = Math.min(videoDuration, startTime + targetWindow);
+    } else if (endTime >= videoDuration) {
+      startTime = Math.max(0, endTime - targetWindow);
+    }
+  }
+
+  startTime = Math.max(req.startTime, startTime);
+  endTime = Math.min(req.endTime, endTime);
+
+  if (endTime - startTime <= 0.5) return null;
+  return { ...req, startTime, endTime };
 }
 
 function upsertMarkersFromVisualSearch(
@@ -1802,15 +1850,20 @@ export default function ChatSidebar() {
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
-        const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-        const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
+        let req = action.frameRequest as { startTime: number; endTime: number; count?: number };
+        let spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
         if (spanSeconds > MAX_DENSE_FRAME_WINDOW_SECONDS) {
-          addMessage({
-            role: 'assistant',
-            content: getDenseRequestTooBroadMessage(req.startTime, req.endTime),
-          });
-          producedVisibleResponse = true;
-          return;
+          const narrowedReq = narrowDenseFrameRequestAroundMention(req, latestUserInput, freshState.videoDuration);
+          if (!narrowedReq) {
+            addMessage({
+              role: 'assistant',
+              content: getDenseRequestTooBroadMessage(req.startTime, req.endTime),
+            });
+            producedVisibleResponse = true;
+            return;
+          }
+          req = narrowedReq;
+          spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
         }
         const count = Math.min(
           req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),

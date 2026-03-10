@@ -238,12 +238,39 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     return targetClip?.sourceUrl ?? videoUrl ?? uniqueSourceUrls[0] ?? '';
   }, [clips, currentTime, uniqueSourceUrls, videoUrl]);
 
-  const displaySourceUrl = activeSourceUrl || desiredSourceUrl;
+  const resolvedActiveSourceUrl = activeSourceUrl && uniqueSourceUrls.includes(activeSourceUrl)
+    ? activeSourceUrl
+    : '';
+  const displaySourceUrl = resolvedActiveSourceUrl || desiredSourceUrl;
   const activeDimensions = sourceDimensions[displaySourceUrl || uniqueSourceUrls[0] || videoUrl] ?? null;
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, activeDimensions),
     [activeDimensions, containerSize],
   );
+
+  useEffect(() => {
+    const activeEl = displaySourceUrl ? sourceVideoMapRef.current.get(displaySourceUrl) : null;
+    if (!activeEl) return;
+
+    const sched = buildClipSchedule(clipsRef.current);
+    const targetEntry = findTimelineEntryAtTime(sched, currentTimeRef.current);
+    if (!targetEntry) return;
+
+    const targetClip = clipsRef.current.find((clip) => clip.id === targetEntry.clipId);
+    const targetSourceUrl = targetClip?.sourceUrl ?? videoUrl;
+    if (targetSourceUrl !== displaySourceUrl) return;
+
+    const offsetInTimeline = Math.max(0, currentTimeRef.current - targetEntry.timelineStart);
+    const targetSourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+    const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some((el) => !el.paused);
+
+    if (Math.abs(activeEl.currentTime - targetSourceTime) > 1 / 120) {
+      activeEl.currentTime = Math.max(0, targetSourceTime);
+    }
+    if (wasPlaying && activeEl.paused) {
+      activeEl.play().catch(() => {});
+    }
+  }, [displaySourceUrl, uniqueSourceUrls, videoUrl]);
 
   // Activate a source URL — show its element, hide others, update videoRef
   const activateSource = useCallback((sourceUrl: string) => {

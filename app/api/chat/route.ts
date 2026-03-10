@@ -492,6 +492,51 @@ function extractMentionedTimes(messages: ChatTurn[], clips: ClipSummary[]) {
   return mentioned;
 }
 
+function extractExplicitTimesFromText(text: string): number[] {
+  const matches: number[] = [];
+  const seen = new Set<number>();
+  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = timePattern.exec(text)) !== null) {
+    const seconds = match[1] !== undefined
+      ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
+      : parseFloat(match[3] ?? '0');
+    if (!Number.isFinite(seconds) || seen.has(seconds)) continue;
+    seen.add(seconds);
+    matches.push(seconds);
+  }
+
+  return matches;
+}
+
+function assistantRequestedRefinement(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes('approximate timestamp')
+    || normalized.includes('narrower range')
+    || normalized.includes('closer look')
+    || normalized.includes('find the exact frame');
+}
+
+function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
+  const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex === -1) return null;
+
+  const latestUserMessage = messages[latestUserIndex]?.content ?? '';
+  if (extractExplicitTimesFromText(latestUserMessage).length === 0) return null;
+
+  const previousAssistant = [...messages.slice(0, latestUserIndex)]
+    .reverse()
+    .find((message) => message.role === 'assistant');
+  if (!previousAssistant || !assistantRequestedRefinement(previousAssistant.content)) return null;
+
+  const priorUserMessage = [...messages.slice(0, latestUserIndex)]
+    .reverse()
+    .find((message) => message.role === 'user' && message.content.trim() !== latestUserMessage.trim());
+
+  return priorUserMessage?.content?.trim() || null;
+}
+
 function extractMentionedMarkers(
   message: string,
   markers: Array<{
@@ -868,6 +913,11 @@ Honor these defaults unless the user explicitly asks for something different in 
             : `${entry.raw} source is now around ${fmtSec(entry.currentTimeline)}`
         )).join(' | ')
       );
+    }
+
+    const followUpParentGoal = findFollowUpParentGoal(Array.isArray(messages) ? messages : []);
+    if (followUpParentGoal) {
+      contextLines.push(`Latest user message is a follow-up timing refinement for this earlier request: "${followUpParentGoal}"`);
     }
 
     if (context?.selectedClip != null) {

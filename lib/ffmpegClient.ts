@@ -298,6 +298,7 @@ export async function extractVideoFrames(
 ): Promise<string[]> {
   // Use browser-native video + Canvas — avoids loading the file into WASM memory entirely
   let objectUrl: string | null = null;
+  let fallbackObjectUrl: string | null = null;
   let srcUrl: string;
 
   if (fileOrUrl instanceof Uint8Array) {
@@ -316,18 +317,50 @@ export async function extractVideoFrames(
   const video = document.createElement('video');
   video.muted = true;
   video.preload = 'auto';
+  video.playsInline = true;
+  video.crossOrigin = 'anonymous';
 
   const canvas = document.createElement('canvas');
   canvas.width = 320;
   canvas.height = 180;
   const ctx = canvas.getContext('2d')!;
 
-  try {
+  const loadMetadata = async (url: string) => {
     await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => resolve();
-      video.onerror = () => reject(new Error('Failed to load video for frame extraction'));
-      video.src = srcUrl;
+      const handleLoadedMetadata = () => {
+        cleanup();
+        resolve();
+      };
+      const handleError = () => {
+        cleanup();
+        reject(new Error('Failed to load video for frame extraction'));
+      };
+      const cleanup = () => {
+        video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        video.removeEventListener('error', handleError);
+      };
+
+      video.addEventListener('loadedmetadata', handleLoadedMetadata);
+      video.addEventListener('error', handleError);
+      video.src = url;
+      video.load();
     });
+  };
+
+  try {
+    try {
+      await loadMetadata(srcUrl);
+    } catch (error) {
+      if (typeof fileOrUrl !== 'string') throw error;
+      const response = await fetch(fileOrUrl);
+      if (!response.ok) {
+        throw error;
+      }
+      const blob = await response.blob();
+      fallbackObjectUrl = URL.createObjectURL(blob);
+      srcUrl = fallbackObjectUrl;
+      await loadMetadata(srcUrl);
+    }
 
     const frames: string[] = [];
     const maxSeekTime = Math.max(video.duration - 0.05, 0);
@@ -348,5 +381,6 @@ export async function extractVideoFrames(
     video.src = '';
     video.load();
     if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (fallbackObjectUrl) URL.revokeObjectURL(fallbackObjectUrl);
   }
 }
