@@ -9,6 +9,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const audio = formData.get('audio') as Blob | null;
     const startTime = parseFloat((formData.get('startTime') as string) ?? '0');
+    const wordsPerCaption = Math.max(1, Math.min(12, parseInt((formData.get('wordsPerCaption') as string) ?? '4', 10) || 4));
 
     if (!audio) return NextResponse.json({ error: 'No audio provided' }, { status: 400 });
 
@@ -21,12 +22,11 @@ export async function POST(req: NextRequest) {
       timestamp_granularities: ['word'],
     });
 
-    const WORDS_PER_CAPTION = 4;
     const words = transcription.words ?? [];
     const captions: CaptionEntry[] = [];
 
-    for (let i = 0; i < words.length; i += WORDS_PER_CAPTION) {
-      const chunk = words.slice(i, i + WORDS_PER_CAPTION);
+    for (let i = 0; i < words.length; i += wordsPerCaption) {
+      const chunk = words.slice(i, i + wordsPerCaption);
       if (chunk.length === 0) continue;
       captions.push({
         startTime: startTime + chunk[0].start,

@@ -12,6 +12,8 @@ import {
   VideoClip,
   MediaTrack,
   TrackClip,
+  IndexedVideoFrame,
+  AIEditingSettings,
 } from './types';
 import {
   actionChangesTimelineStructure,
@@ -56,6 +58,43 @@ function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
   };
 }
 
+export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
+  silenceRemoval: {
+    paddingSeconds: 2,
+    minDurationSeconds: 6,
+    preserveShortPauses: true,
+    requireSpeakerAbsence: true,
+  },
+  frameInspection: {
+    defaultFrameCount: 15,
+  },
+  captions: {
+    wordsPerCaption: 4,
+  },
+  transitions: {
+    defaultDuration: 1,
+    defaultType: 'crossfade',
+  },
+  textOverlays: {
+    defaultPosition: 'bottom',
+    defaultFontSize: 16,
+  },
+};
+
+function mergeAISettings(
+  current: AIEditingSettings,
+  patch?: Partial<AIEditingSettings>,
+): AIEditingSettings {
+  if (!patch) return current;
+  return {
+    silenceRemoval: { ...current.silenceRemoval, ...patch.silenceRemoval },
+    frameInspection: { ...current.frameInspection, ...patch.frameInspection },
+    captions: { ...current.captions, ...patch.captions },
+    transitions: { ...current.transitions, ...patch.transitions },
+    textOverlays: { ...current.textOverlays, ...patch.textOverlays },
+  };
+}
+
 interface EditorState {
   // Video
   videoFile: File | null;
@@ -90,6 +129,7 @@ interface EditorState {
   // Chat
   messages: ChatMessage[];
   isChatLoading: boolean;
+  aiSettings: AIEditingSettings;
 
   // FFmpeg
   ffmpegJob: FFmpegJob;
@@ -108,7 +148,7 @@ interface EditorState {
   transcriptStatus: TranscriptStatus;
   rawTranscriptCaptions: CaptionEntry[] | null;
   // Video frames cache
-  videoFrames: string[] | null;
+  videoFrames: IndexedVideoFrame[] | null;
   videoFramesFresh: boolean; // false when a structural edit invalidated the frame-to-timeline mapping
 
   // Actions
@@ -143,12 +183,13 @@ interface EditorState {
   addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   setIsChatLoading: (v: boolean) => void;
   clearMessages: () => void;
+  setAISettings: (settings: Partial<AIEditingSettings>) => void;
 
   // FFmpeg
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; aiSettings?: unknown }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -157,7 +198,7 @@ interface EditorState {
   setZoom: (zoom: number) => void;
 
   setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
-  setVideoFrames: (frames: string[]) => void;
+  setVideoFrames: (frames: IndexedVideoFrame[]) => void;
 
   // Media library (multi-source V1)
   mediaLibrary: MediaLibraryItem[];
@@ -212,6 +253,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   future: [],
   messages: [],
   isChatLoading: false,
+  aiSettings: DEFAULT_AI_EDITING_SETTINGS,
   ffmpegJob: { status: 'idle' },
   currentProjectId: null,
   storagePath: null,
@@ -243,6 +285,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
@@ -319,7 +362,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const idx = clips.findIndex(c => c.id === clip.id);
     const newClips = [...clips.slice(0, idx), firstClip, secondClip, ...clips.slice(idx + 1)];
 
-    set({ history: [...get().history, snap], future: [], clips: newClips });
+    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
   },
 
   deleteRangeAtTime: (startTime, endTime) => {
@@ -367,7 +410,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
-    set({ history: [...get().history, snap], future: [], clips: newClips });
+    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
   },
 
   deleteClip: (clipId) => {
@@ -377,6 +420,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       future: [],
       clips: s.clips.filter(c => c.id !== clipId),
       selectedItem: null,
+      videoFramesFresh: false,
     }));
   },
 
@@ -388,12 +432,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const newClips = [...clips];
     const [removed] = newClips.splice(idx, 1);
     newClips.splice(Math.max(0, Math.min(newClips.length, newIndex)), 0, removed);
-    set({ history: [...get().history, snap], future: [], clips: newClips });
+    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
   },
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
     set(s => ({
       clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
+      videoFramesFresh: false,
     }));
   },
 
@@ -403,6 +448,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...s.history, snap],
       future: [],
       clips: s.clips.map(c => c.id === clipId ? { ...c, speed: Math.max(0.1, Math.min(10, speed)) } : c),
+      videoFramesFresh: false,
     }));
   },
 
@@ -443,6 +489,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   applyAction: (action) => {
     if (action.type === 'none') return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    if (action.type === 'update_ai_settings') {
+      set(state => ({
+        aiSettings: mergeAISettings(state.aiSettings, action.settings),
+        pendingAction: null,
+        previewSnapshot: null,
+        previewOwnerId: null,
+      }));
+      return;
+    }
     const next = applyActionToSnapshot(snap, action);
     if (next === snap) return;
     set(state => ({
@@ -471,6 +526,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       previewSnapshot: null,
       previewOwnerId: null,
+      videoFramesFresh: false,
     });
   },
 
@@ -487,6 +543,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       previewSnapshot: null,
       previewOwnerId: null,
+      videoFramesFresh: false,
     });
   },
 
@@ -513,6 +570,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     selectedItem: null,
   })),
 
+  setAISettings: (settings) => set(state => ({
+    aiSettings: mergeAISettings(state.aiSettings, settings),
+  })),
+
   // ── FFmpeg ──────────────────────────────────────────────────────────────────
 
   setFFmpegJob: (job) => set({ ffmpegJob: job }),
@@ -524,6 +585,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
@@ -541,7 +603,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
       previewSnapshot: null, previewOwnerId: null,
       extraTracks: (editState.extraTracks as MediaTrack[] | undefined) ?? [],
-      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      messages: (editState.messages as ChatMessage[] | undefined) ?? [],
+      ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
@@ -568,6 +632,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       captions: [], transitions: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], isChatLoading: false,
+      aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
@@ -587,7 +652,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { type, id } = s.selectedItem;
     const newHistory = [...s.history, snap];
     if (type === 'clip') {
-      set({ history: newHistory, future: [], clips: s.clips.filter(c => c.id !== id), selectedItem: null });
+      set({ history: newHistory, future: [], clips: s.clips.filter(c => c.id !== id), selectedItem: null, videoFramesFresh: false });
     } else if (type === 'caption') {
       set({ history: newHistory, future: [], captions: s.captions.filter(c => c.id !== id), selectedItem: null });
     } else if (type === 'text') {
@@ -720,7 +785,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
     );
     const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
-    set({ history: [...get().history, snap], future: [], clips: [...clips, newClip], mediaLibrary: newLibrary });
+    set({ history: [...get().history, snap], future: [], clips: [...clips, newClip], mediaLibrary: newLibrary, videoFramesFresh: false });
     return clipId;
   },
 
@@ -781,7 +846,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
     );
     const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
-    set({ history: [...get().history, snap], future: [], clips: newClips, mediaLibrary: newLibrary });
+    set({ history: [...get().history, snap], future: [], clips: newClips, mediaLibrary: newLibrary, videoFramesFresh: false });
     return clipId;
   },
 

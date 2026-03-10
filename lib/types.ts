@@ -82,6 +82,38 @@ export interface ChatMessage {
   autoApplied?: boolean;
 }
 
+export interface IndexedVideoFrame {
+  image: string;
+  timelineTime: number;
+  sourceTime: number;
+  kind: 'overview' | 'dense';
+  rangeStart?: number;
+  rangeEnd?: number;
+}
+
+export interface AIEditingSettings {
+  silenceRemoval: {
+    paddingSeconds: number;
+    minDurationSeconds: number;
+    preserveShortPauses: boolean;
+    requireSpeakerAbsence: boolean;
+  };
+  frameInspection: {
+    defaultFrameCount: number;
+  };
+  captions: {
+    wordsPerCaption: number;
+  };
+  transitions: {
+    defaultDuration: number;
+    defaultType: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
+  };
+  textOverlays: {
+    defaultPosition: 'top' | 'center' | 'bottom';
+    defaultFontSize: number;
+  };
+}
+
 export interface EditAction {
   type:
     | 'split_clip'
@@ -98,6 +130,7 @@ export interface EditAction {
     | 'add_transition'
     | 'add_text_overlay'
     | 'replace_text_overlay'
+    | 'update_ai_settings'
     | 'none';
   // split_clip
   splitTime?: number;
@@ -130,5 +163,7 @@ export interface EditAction {
   textOverlays?: TextOverlayEntry[];
   // replace_text_overlay
   overlayIndex?: number;
+  // update_ai_settings
+  settings?: Partial<AIEditingSettings>;
   message: string;
 }

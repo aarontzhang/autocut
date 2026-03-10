@@ -97,7 +97,12 @@ export function actionChangesTimelineStructure(action: EditAction) {
 }
 
 export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction): EditSnapshot {
-  if (action.type === 'none' || action.type === 'transcribe_request' || action.type === 'request_frames') return snapshot;
+  if (
+    action.type === 'none' ||
+    action.type === 'transcribe_request' ||
+    action.type === 'request_frames' ||
+    action.type === 'update_ai_settings'
+  ) return snapshot;
 
   if (action.type === 'split_clip') {
     if (action.splitTime === undefined) return snapshot;

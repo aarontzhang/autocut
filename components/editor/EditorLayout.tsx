@@ -93,6 +93,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const aiSettings = useEditorStore(s => s.aiSettings);
   const loadProject = useEditorStore(s => s.loadProject);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
@@ -148,14 +149,16 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   // Background auto-transcription on video load
   useEffect(() => {
-    if (!videoFile || videoDuration <= 0 || transcriptStatus !== 'idle') return;
+    const source = videoFile ?? videoUrl;
+    if (!source || videoDuration <= 0 || transcriptStatus !== 'idle') return;
     setBackgroundTranscript(null, 'loading');
     (async () => {
       try {
-        const audioBlob = await extractAudioSegment(videoFile, 0, videoDuration);
+        const audioBlob = await extractAudioSegment(source, 0, videoDuration);
         const form = new FormData();
         form.append('audio', audioBlob, 'audio.mp3');
         form.append('startTime', '0');
+        form.append('wordsPerCaption', String(aiSettings.captions.wordsPerCaption));
         const res = await fetch('/api/transcribe', { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
@@ -166,7 +169,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         setBackgroundTranscript(null, 'error');
       }
     })();
-  }, [videoFile, videoDuration, transcriptStatus, setBackgroundTranscript]);
+  }, [aiSettings.captions.wordsPerCaption, videoDuration, transcriptStatus, setBackgroundTranscript, videoFile, videoUrl]);
 
   // Load project from URL param
   useEffect(() => {

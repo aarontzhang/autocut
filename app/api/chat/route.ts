@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
-import { EditAction } from '@/lib/types';
+import { AIEditingSettings, EditAction, IndexedVideoFrame } from '@/lib/types';
 
 const client = new Anthropic();
 
-const SYSTEM_PROMPT = `You are an AI video editor assistant inside a professional clip-based timeline editor (like CapCut). Help users edit their video using natural language commands.
+const BASE_SYSTEM_PROMPT = `You are an AI video editor assistant inside a professional clip-based timeline editor (like CapCut). Help users edit their video using natural language commands.
 
 The video is organized as a sequence of clips on the timeline. You can split, delete, and modify clips.
 
@@ -33,7 +33,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Remove ALL non-speaking / silent sections in one single action
 - ranges: array of { start, end } in seconds — list every range to delete at once
 - Applied end-to-start internally, so offsets stay correct — you do NOT need to account for shifting
-- IMPORTANT buffer rule: add 2 seconds of padding inside each range. If silence is detected from T1 to T2, set start = T1 + 2, end = T2 - 2. Skip any range shorter than 6 seconds after buffering — only remove long, extended gaps where the speaker is clearly absent for a significant stretch. Do NOT remove short pauses, breathing room, or brief moments of silence between sentences. It is always better to leave silence than to accidentally clip speech.
+- IMPORTANT: use the silence-removal settings provided in context. Treat them as the current default behavior unless the user explicitly overrides them in the latest request.
 - IMPORTANT: delete_ranges is a complete, one-shot operation. After issuing it, immediately return type:none. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
@@ -61,7 +61,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ### 6. Request Dense Frames (request_frames)
 - Request a higher-density set of video frames for a specific time range to pinpoint a precise visual moment
 - Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
-- startTime/endTime: the range to inspect (seconds); count: frames to extract (default 15, max 30)
+- startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 30)
 - After extraction, the frames will be attached — use them to identify the exact timestamp, then make your edit
 
 Example:
@@ -78,6 +78,7 @@ Example:
 - captions: array of { startTime, endTime, text } entries in seconds
 - Use when user says: "add captions", "subtitle this", "caption what I'm saying", "add subtitles", etc.
 - Do NOT use add_text_overlay for captions — use this tool instead
+- Use the caption defaults from context unless the user asks for something different.
 
 Example:
 <action>{"type":"add_captions","captions":[{"startTime":0,"endTime":3,"text":"Hello world"},{"startTime":3,"endTime":6,"text":"This is a caption"}],"message":"Added captions."}</action>
@@ -86,6 +87,7 @@ Example:
 - Add a transition effect at a specific timeline time
 - Types: "crossfade", "fade_black", "dissolve", "wipe"
 - Use when user says: "add a fade between clips", "transition at 0:30", etc.
+- Use the transition defaults from context unless the user asks for something different.
 
 ### 10. Text Overlays (add_text_overlay / replace_text_overlay)
 - Add text/title overlays that appear on screen at specific timeline times
@@ -93,6 +95,13 @@ Example:
 - fontSize: optional number in pixels (default 16). Use smaller values (12–14) for single-line overlays
 - Use add_text_overlay when user says: "add a title", "put text saying X", "add lower thirds", etc.
 - Use replace_text_overlay when user says: "change the text overlay", "move it to top", "make the font smaller", "edit the title" — i.e. modifying an existing overlay. Include overlayIndex (0-based) to identify which overlay to replace.
+- Use the text-overlay defaults from context unless the user asks for something different.
+
+### 11. Update AI Defaults (update_ai_settings)
+- Update the project's AI editing defaults for future requests
+- settings: partial settings object containing only the values that should change
+- Use when the user asks to change default editing behavior, such as silence padding, silence cutoff, default caption chunking, default transition duration/type, frame inspection density, or text overlay defaults
+- If the user asks to change a default and also wants an edit right now, update the settings first
 
 ## Response format
 
@@ -141,6 +150,9 @@ Text overlay:
 Replace/edit existing text overlay (index 0):
 <action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"Updated the text overlay."}</action>
 
+Update AI settings:
+<action>{"type":"update_ai_settings","settings":{"silenceRemoval":{"paddingSeconds":1,"minDurationSeconds":3}},"message":"Updated the silence-removal defaults."}</action>
+
 No action:
 <action>{"type":"none","message":"Just a note."}</action>
 
@@ -162,9 +174,55 @@ You may be provided with sampled frames from the user's video as images, and/or 
 - If NEITHER frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate. Never copy transcript text directly as captions — use transcribe_request only to store the transcript internally.`;
 
+const DEFAULT_SETTINGS: AIEditingSettings = {
+  silenceRemoval: {
+    paddingSeconds: 2,
+    minDurationSeconds: 6,
+    preserveShortPauses: true,
+    requireSpeakerAbsence: true,
+  },
+  frameInspection: {
+    defaultFrameCount: 15,
+  },
+  captions: {
+    wordsPerCaption: 4,
+  },
+  transitions: {
+    defaultDuration: 1,
+    defaultType: 'crossfade',
+  },
+  textOverlays: {
+    defaultPosition: 'bottom',
+    defaultFontSize: 16,
+  },
+};
+
+function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
+  return {
+    silenceRemoval: { ...DEFAULT_SETTINGS.silenceRemoval, ...patch?.silenceRemoval },
+    frameInspection: { ...DEFAULT_SETTINGS.frameInspection, ...patch?.frameInspection },
+    captions: { ...DEFAULT_SETTINGS.captions, ...patch?.captions },
+    transitions: { ...DEFAULT_SETTINGS.transitions, ...patch?.transitions },
+    textOverlays: { ...DEFAULT_SETTINGS.textOverlays, ...patch?.textOverlays },
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { messages, context } = await req.json();
+    const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
+    const systemPrompt = `${BASE_SYSTEM_PROMPT}
+
+## Current AI Editing Defaults
+- Silence removal: trim ${settings.silenceRemoval.paddingSeconds}s from each silent gap edge; skip any silent gap shorter than ${settings.silenceRemoval.minDurationSeconds}s after trimming
+- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
+- Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
+- Dense frame inspection default count: ${settings.frameInspection.defaultFrameCount}
+- Caption defaults: ${settings.captions.wordsPerCaption} words per caption
+- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
+- Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
+
+Honor these defaults unless the user explicitly asks for something different in the current message.`;
 
     const fmtSec = (s: number) => {
       const m = Math.floor(s / 60);
@@ -196,21 +254,37 @@ export async function POST(req: NextRequest) {
     if (context?.transcript) {
       contextLines.push(`\nFull video transcript (spoken content only — do NOT copy as captions, use transcribe_request for that):\n<transcript>\n${context.transcript}\n</transcript>`);
     }
+    contextLines.push(
+      `\nCurrent AI defaults:\n` +
+      `- Silence padding: ${settings.silenceRemoval.paddingSeconds}s\n` +
+      `- Minimum silence duration after padding: ${settings.silenceRemoval.minDurationSeconds}s\n` +
+      `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
+      `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
+      `- Default dense-frame count: ${settings.frameInspection.defaultFrameCount}\n` +
+      `- Caption defaults: ${settings.captions.wordsPerCaption} words per caption\n` +
+      `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
+      `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
+    );
     const contextText = contextLines.join('\n');
 
     const contextContent: Anthropic.ContentBlockParam[] = [];
 
-    if (context?.frames && Array.isArray(context.frames) && context.frames.length > 0) {
-      for (const frame of context.frames as string[]) {
+    const frames = (context?.frames as IndexedVideoFrame[] | undefined) ?? [];
+    if (frames.length > 0) {
+      for (const frame of frames) {
         contextContent.push({
           type: 'image',
-          source: { type: 'base64', media_type: 'image/jpeg', data: frame },
+          source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
         });
       }
     }
 
-    const frameNote = contextContent.length > 0
-      ? `\n[${contextContent.length} video frame(s) are attached above as images — use them to answer visual questions]`
+    const frameNote = frames.length > 0
+      ? `\n[${frames.length} video frame(s) are attached above as images in this exact order. Use the mapping below when reasoning about timestamps.]\n` +
+        frames.map((frame, index) =>
+          `Frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.kind}` +
+          (frame.rangeStart !== undefined && frame.rangeEnd !== undefined ? `, requested from ${fmtSec(frame.rangeStart)} to ${fmtSec(frame.rangeEnd)}` : '')
+        ).join('\n')
       : '';
     contextContent.push({ type: 'text', text: contextText + frameNote });
 
@@ -226,7 +300,7 @@ export async function POST(req: NextRequest) {
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: anthropicMessages,
     });
 

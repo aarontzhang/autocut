@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction } from '@/lib/types';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
 import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext } from '@/lib/timelineUtils';
 import { extractAudioSegment, extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -75,6 +75,12 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         summary: req ? `${formatTime(req.startTime)} → ${formatTime(req.endTime)}` : '',
       };
     }
+    case 'update_ai_settings':
+      return {
+        label: 'Update AI settings',
+        color: '#facc15',
+        summary: 'Defaults updated',
+      };
     case 'add_captions':
       return {
         label: `Add ${action.captions?.length ?? 0} caption${(action.captions?.length ?? 0) !== 1 ? 's' : ''}`,
@@ -226,6 +232,25 @@ function ActionDetails({ action }: { action: EditAction }) {
     );
   }
 
+  if (action.type === 'update_ai_settings') {
+    const settings = action.settings;
+    const details = [
+      settings?.silenceRemoval?.paddingSeconds !== undefined ? `silence padding ${settings.silenceRemoval.paddingSeconds}s` : '',
+      settings?.silenceRemoval?.minDurationSeconds !== undefined ? `min silence ${settings.silenceRemoval.minDurationSeconds}s` : '',
+      settings?.frameInspection?.defaultFrameCount !== undefined ? `inspect ${settings.frameInspection.defaultFrameCount} frames` : '',
+      settings?.captions?.wordsPerCaption !== undefined ? `${settings.captions.wordsPerCaption} words per caption` : '',
+      settings?.transitions?.defaultDuration !== undefined ? `${settings.transitions.defaultDuration}s transitions` : '',
+      settings?.textOverlays?.defaultFontSize !== undefined ? `${settings.textOverlays.defaultFontSize}px text` : '',
+    ].filter(Boolean);
+    return (
+      <div style={{ padding: '6px 12px 8px' }}>
+        <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
+          {details.length > 0 ? details.join(', ') : 'AI editing defaults updated for future requests.'}
+        </span>
+      </div>
+    );
+  }
+
   if (action.type === 'add_transition') {
     return (
       <div style={{ padding: '6px 12px 8px' }}>
@@ -304,6 +329,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
   const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
   const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
+  const applyStoredAction = useEditorStore(s => s.applyAction);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
@@ -412,6 +438,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
         const form = new FormData();
         form.append('audio', audioBlob, 'audio.mp3');
         form.append('startTime', String(sourceSeg.timelineOffset));
+        form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
 
         const res = await fetch('/api/transcribe', { method: 'POST', body: form });
         const data = await res.json();
@@ -423,7 +450,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
         combinedTranscript += (combinedTranscript ? '\n' : '') + segText;
       }
 
-      setBackgroundTranscript(combinedTranscript, 'done');
+      setBackgroundTranscript(combinedTranscript, 'done', []);
       setTranscriptionDone(true);
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Unknown error');
@@ -431,6 +458,12 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
       setIsTranscribing(false);
     }
   }, [action, videoUrl, videoData, clips, setBackgroundTranscript]);
+
+  const handleApplySettings = useCallback(() => {
+    if (!action || action.type !== 'update_ai_settings') return;
+    applyStoredAction(action);
+    setReviewResult('AI settings updated.');
+  }, [action, applyStoredAction]);
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -515,7 +548,23 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
                   Finish the active review before opening another one.
                 </p>
               )}
-              {action?.type === 'transcribe_request' ? (
+              {action?.type === 'update_ai_settings' ? (
+                <button
+                  onClick={handleApplySettings}
+                  style={{
+                    width: '100%', padding: '5px 0',
+                    fontSize: 12, fontWeight: 500,
+                    background: 'var(--accent)',
+                    border: 'none',
+                    color: '#000',
+                    borderRadius: 4, cursor: 'pointer',
+                    fontFamily: 'var(--font-serif)',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  Apply settings
+                </button>
+              ) : action?.type === 'transcribe_request' ? (
                 <>
                   {transcribeError && (
                     <p style={{ fontSize: 11, color: '#f87171', margin: '0 0 6px', fontFamily: 'var(--font-serif)' }}>
@@ -704,6 +753,7 @@ export default function ChatSidebar() {
   const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const aiSettings = useEditorStore(s => s.aiSettings);
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
@@ -724,16 +774,17 @@ export default function ChatSidebar() {
 
   // Extract frames on first load, and re-extract in background when stale after edits
   useEffect(() => {
-    if (!videoFile || videoDuration <= 0) return;
+    if ((!videoFile && !videoUrl && !videoData) || videoDuration <= 0) return;
     if (videoFrames === null || !videoFramesFresh) {
       ensureFramesExtracted(!videoFramesFresh);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoFile, videoDuration, videoFramesFresh]);
+  }, [videoData, videoDuration, videoFile, videoFramesFresh, videoUrl]);
 
-  const ensureFramesExtracted = useCallback(async (force = false): Promise<string[]> => {
+  const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
     if (videoFrames !== null && !force) return videoFrames;
-    if (!videoFile || videoDuration <= 0) return videoFrames ?? [];
+    const source = videoData ?? videoFile ?? videoUrl;
+    if (!source || videoDuration <= 0) return videoFrames ?? [];
     try {
       const currentClips = useEditorStore.getState().clips;
       const currentDuration = useEditorStore.getState().videoDuration;
@@ -741,13 +792,19 @@ export default function ChatSidebar() {
       const timelineTimestamps: number[] = [];
       for (let t = 0; t < currentDuration; t += interval) timelineTimestamps.push(t);
       const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
-      const frames = await extractVideoFrames(videoFile, sourceTimestamps);
+      const images = await extractVideoFrames(source, sourceTimestamps);
+      const frames = images.map((image, index) => ({
+        image,
+        timelineTime: timelineTimestamps[index],
+        sourceTime: sourceTimestamps[index],
+        kind: 'overview' as const,
+      }));
       setVideoFrames(frames);
       return frames;
     } catch {
       return videoFrames ?? [];
     }
-  }, [videoFrames, videoFile, videoDuration, setVideoFrames]);
+  }, [videoData, videoDuration, videoFile, videoFrames, videoUrl, setVideoFrames]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -785,6 +842,7 @@ export default function ChatSidebar() {
               clips: clips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
               selectedClip: selectedClipContext,
               transcript: backgroundTranscript,
+              settings: aiSettings,
               frames: currentFrames,
             },
           }),
@@ -797,14 +855,24 @@ export default function ChatSidebar() {
 
         const { message, action } = data;
 
-        if (action?.type === 'request_frames' && action.frameRequest && videoFile) {
+        if (action?.type === 'request_frames' && action.frameRequest) {
           const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-          const count = Math.min(req.count ?? 15, 30);
+          const count = Math.min(req.count ?? aiSettings.frameInspection.defaultFrameCount, 30);
           setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
           const interval = (req.endTime - req.startTime) / count;
           const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
           const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(clips, t));
-          currentFrames = await extractVideoFrames(videoFile, sourceTimestamps);
+          const source = videoData ?? videoFile ?? videoUrl;
+          if (!source) throw new Error('No video source available for frame extraction');
+          const images = await extractVideoFrames(source, sourceTimestamps);
+          currentFrames = images.map((image, index) => ({
+            image,
+            timelineTime: timelineTimestamps[index],
+            sourceTime: sourceTimestamps[index],
+            kind: 'dense' as const,
+            rangeStart: req.startTime,
+            rangeEnd: req.endTime,
+          }));
           setLoadingStatus('');
           history.push({ role: 'assistant', content: message });
           history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
@@ -822,7 +890,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoFile, ensureFramesExtracted]);
+  }, [aiSettings, input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoData, videoFile, videoUrl, ensureFramesExtracted]);
 
   const handleAgentSend = useCallback(async (text: string) => {
     if (!text || isChatLoading || reviewLocked) return;
@@ -877,6 +945,7 @@ export default function ChatSidebar() {
               clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
               selectedClip: selectedClipContext,
               transcript: currentTranscript,
+              settings: freshState.aiSettings,
               frames: currentFrames,
             },
           }),
@@ -893,14 +962,24 @@ export default function ChatSidebar() {
         if (!action || action.type === 'none') break;
 
         let resultSummary = '';
-        if (action.type === 'request_frames' && action.frameRequest && videoFile) {
+        if (action.type === 'request_frames' && action.frameRequest) {
           const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-          const count = Math.min(req.count ?? 15, 30);
+          const count = Math.min(req.count ?? useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount, 30);
           setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
           const interval = (req.endTime - req.startTime) / count;
           const timelineTimestamps = Array.from({ length: count }, (_, k) => req.startTime + k * interval);
           const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
-          currentFrames = await extractVideoFrames(videoFile, sourceTimestamps);
+          const source = videoData ?? videoFile ?? videoUrl;
+          if (!source) throw new Error('No video source available for frame extraction');
+          const images = await extractVideoFrames(source, sourceTimestamps);
+          currentFrames = images.map((image, index) => ({
+            image,
+            timelineTime: timelineTimestamps[index],
+            sourceTime: sourceTimestamps[index],
+            kind: 'dense' as const,
+            rangeStart: req.startTime,
+            rangeEnd: req.endTime,
+          }));
           setLoadingStatus('');
           resultSummary = `Extracted ${count} dense frames from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Use these to identify the exact moment, then make your edit.`;
         } else if (action.type === 'transcribe_request') {
@@ -919,6 +998,7 @@ export default function ChatSidebar() {
                 const form = new FormData();
                 form.append('audio', audioBlob, 'audio.mp3');
                 form.append('startTime', String(sourceSeg.timelineOffset));
+                form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
                 const tRes = await fetch('/api/transcribe', { method: 'POST', body: form });
                 const tData = await tRes.json();
                 if (!tRes.ok) throw new Error(tData.error ?? 'Transcription failed');
@@ -945,7 +1025,7 @@ export default function ChatSidebar() {
           madeStructuralEdit = true;
           applyAction(action);
           // Re-extract frames in background if structural edit made them stale
-          if (!useEditorStore.getState().videoFramesFresh && videoFile) {
+          if (!useEditorStore.getState().videoFramesFresh && (videoFile || videoUrl || videoData)) {
             currentFrames = await ensureFramesExtracted(true);
           }
           if (action.type === 'delete_ranges') {
@@ -981,9 +1061,10 @@ export default function ChatSidebar() {
     else handleSendSingle();
   }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked]);
 
+  const hasVideoSource = !!(videoFile || videoUrl || videoData);
   const agentContextReady = transcriptStatus === 'done' && videoFrames !== null;
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
-  const agentNotReadyReason = !agentContextReady && videoFile
+  const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && videoFrames === null)
       ? 'Indexing audio and loading frames…'
       : transcriptStatus === 'loading'
