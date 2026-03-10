@@ -282,6 +282,41 @@ function looksLikeVisualSearchQuery(text: string): boolean {
   return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
 }
 
+function upsertMarkersFromVisualSearch(
+  query: string,
+  session: VisualSearchSession | null | undefined,
+  addMarker: ReturnType<typeof useEditorStore.getState>['addMarker'],
+) {
+  if (!session) return;
+  const proposalRanges = session.proposal?.timelineRanges ?? [];
+  const fallbackRanges = proposalRanges.length > 0
+    ? []
+    : session.candidates.slice(0, 3).map((candidate) => ({
+        timelineStart: candidate.sourceStart,
+        timelineEnd: candidate.sourceEnd,
+      }));
+  const ranges = proposalRanges.length > 0 ? proposalRanges : fallbackRanges;
+  if (ranges.length === 0) return;
+
+  const existing = useEditorStore.getState().markers;
+  ranges.forEach((range, index) => {
+    const timelineTime = range.timelineStart;
+    const alreadyExists = existing.some((marker) => (
+      marker.note === query && Math.abs(marker.timelineTime - timelineTime) < 0.1
+    ));
+    if (alreadyExists) return;
+    addMarker({
+      timelineTime,
+      label: `Finding ${index + 1}`,
+      createdBy: 'ai',
+      status: 'open',
+      linkedRange: { startTime: range.timelineStart, endTime: range.timelineEnd },
+      confidence: session.confidenceBand === 'high' ? 0.9 : session.confidenceBand === 'medium' ? 0.7 : 0.5,
+      note: query,
+    });
+  });
+}
+
 // ─── Action card config ────────────────────────────────────────────────────────
 function getActionMeta(action: EditAction): { label: string; color: string; summary: string } {
   switch (action.type) {
@@ -372,6 +407,18 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         label: `Add ${action.transitions?.length ?? 0} transition${(action.transitions?.length ?? 0) !== 1 ? 's' : ''}`,
         color: 'rgba(255,255,255,0.6)',
         summary: (action.transitions ?? []).map(t => t.type).join(', '),
+      };
+    case 'add_marker':
+      return {
+        label: 'Add marker',
+        color: '#facc15',
+        summary: action.marker?.timelineTime !== undefined ? formatChatTime(action.marker.timelineTime) : '',
+      };
+    case 'add_markers':
+      return {
+        label: `Add ${action.markers?.length ?? 0} marker${(action.markers?.length ?? 0) !== 1 ? 's' : ''}`,
+        color: '#facc15',
+        summary: 'Review findings',
       };
     case 'add_text_overlay':
       return {
@@ -542,6 +589,25 @@ function ActionDetails({ action }: { action: EditAction }) {
     );
   }
 
+  if (action.type === 'add_marker' || action.type === 'add_markers') {
+    const markers = action.type === 'add_marker' ? [action.marker] : action.markers;
+    return (
+      <div style={{ padding: '6px 12px 8px' }}>
+        {(markers ?? []).filter(Boolean).map((marker, i) => (
+          <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+            <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)' }}>
+              {marker?.number ? `@${marker.number}` : 'Marker'}
+            </span>
+            <span style={{ fontSize: 10, color: 'var(--fg-secondary)' }}>
+              {marker?.timelineTime !== undefined ? formatChatTime(marker.timelineTime) : '—'}
+            </span>
+            {marker?.label && <span style={{ fontSize: 10, color: 'var(--fg-muted)' }}>{marker.label}</span>}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   if (action.type === 'add_text_overlay') {
     return (
       <div style={{ padding: '6px 12px 8px' }}>
@@ -575,6 +641,46 @@ function renderMarkdown(text: string): React.ReactNode {
   });
 }
 
+function MarkerAwareText({ text }: { text: string }) {
+  const markers = useEditorStore(s => s.markers);
+  const requestSeek = useEditorStore(s => s.requestSeek);
+  const setSelectedItem = useEditorStore(s => s.setSelectedItem);
+  const parts = text.split(/(marker\s+\d+|@\d+)/gi);
+
+  return parts.map((part, index) => {
+    const match = part.match(/(?:marker\s+|@)(\d+)/i);
+    if (!match) return <span key={index}>{renderMarkdown(part)}</span>;
+    const markerNumber = Number(match[1]);
+    const marker = markers.find((entry) => entry.number === markerNumber);
+    if (!marker) return <span key={index}>{part}</span>;
+    return (
+      <button
+        key={index}
+        onClick={() => {
+          setSelectedItem({ type: 'marker', id: marker.id });
+          requestSeek(marker.timelineTime);
+        }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          margin: '0 2px',
+          padding: '1px 6px',
+          borderRadius: 999,
+          border: '1px solid rgba(250,204,21,0.28)',
+          background: 'rgba(250,204,21,0.12)',
+          color: '#fde68a',
+          fontSize: 11,
+          fontFamily: 'var(--font-serif)',
+          cursor: 'pointer',
+        }}
+      >
+        @{marker.number}
+      </button>
+    );
+  });
+}
+
 // ─── Message bubbles ───────────────────────────────────────────────────────────
 function UserMessage({ msg }: { msg: ChatMessageType }) {
   return (
@@ -590,7 +696,7 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
         lineHeight: 1.55,
         fontFamily: 'var(--font-serif)',
       }}>
-        {msg.content}
+        <MarkerAwareText text={msg.content} />
       </div>
     </div>
   );
@@ -695,6 +801,7 @@ function AssistantMessage({
       clips: state.clips,
       captions: state.captions,
       transitions: state.transitions,
+      markers: state.markers,
       textOverlays: state.textOverlays,
     };
     const firstStep = reviewSteps[0];
@@ -827,7 +934,7 @@ function AssistantMessage({
         lineHeight: 1.65, paddingLeft: 22,
         fontFamily: 'var(--font-serif)',
       }}>
-        {renderMarkdown(msg.content)}
+        <MarkerAwareText text={msg.content} />
       </div>
 
       {msg.visualSearch && (
@@ -1194,10 +1301,10 @@ function EmptyState({
       padding: '32px 16px', gap: 8, textAlign: 'center',
     }}>
       <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg-primary)', margin: 0, fontFamily: 'var(--font-serif)' }}>
-        Ask Autocut to make edits
+        Find moments. Tag them. Review the cut.
       </p>
       <p style={{ fontSize: 12, color: 'var(--fg-muted)', margin: 0, lineHeight: 1.6, fontFamily: 'var(--font-serif)' }}>
-        Describe what you want — trim silence, add captions, adjust speed, and more.
+        Describe the event you want to find, then review the markers and proposed cuts before committing anything.
       </p>
       {isIndexing && (
         <div style={{ width: '100%', maxWidth: 290, marginTop: 10 }}>
@@ -1254,7 +1361,7 @@ function VisualSearchPanel({ session }: { session: VisualSearchSession }) {
                 fontFamily: 'var(--font-serif)',
               }}
             >
-              <span>Candidate {index + 1}</span>
+              <span>Finding {index + 1}</span>
               <span>{formatChatTime(candidate.sourceStart)}-{formatChatTime(candidate.sourceEnd)}</span>
             </div>
           ))}
@@ -1279,26 +1386,23 @@ export default function ChatSidebar() {
   const setIsChatLoading = useEditorStore(s => s.setIsChatLoading);
   const videoDuration = useEditorStore(s => s.videoDuration);
   const clips = useEditorStore(s => s.clips);
+  const markers = useEditorStore(s => s.markers);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
-  const [agentMode, setAgentMode] = useState(false);
-  const [userChoseModeManually, setUserChoseModeManually] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
-  const applyAction = useEditorStore(s => s.applyAction);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
-  const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
-  const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
-  const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
+  const addMarker = useEditorStore(s => s.addMarker);
+  const requestSeek = useEditorStore(s => s.requestSeek);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
 
@@ -1308,6 +1412,10 @@ export default function ChatSidebar() {
     const idx = clips.findIndex(c => c.id === selectedItem.id);
     if (idx === -1) return null;
     return { index: idx, duration: clips[idx].sourceDuration };
+  })();
+  const selectedMarkerContext = (() => {
+    if (!selectedItem || selectedItem.type !== 'marker') return null;
+    return markers.find((marker) => marker.id === selectedItem.id) ?? null;
   })();
 
   useEffect(() => {
@@ -1507,6 +1615,20 @@ export default function ChatSidebar() {
           clipCount: currentClips.length,
           clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
           selectedClip: selectedClipContext,
+          selectedMarker: selectedMarkerContext ? {
+            number: selectedMarkerContext.number,
+            timelineTime: selectedMarkerContext.timelineTime,
+            label: selectedMarkerContext.label ?? null,
+          } : null,
+          markers: freshState.markers.map((marker) => ({
+            id: marker.id,
+            number: marker.number,
+            timelineTime: marker.timelineTime,
+            label: marker.label ?? null,
+            status: marker.status,
+            linkedRange: marker.linkedRange ?? null,
+            note: marker.note ?? null,
+          })),
           transcript: currentTranscript,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
@@ -1514,6 +1636,8 @@ export default function ChatSidebar() {
         },
       }, ctrl);
       setVisualSearchSession(visualSearch ?? null);
+      upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
+      const markerAction = action?.type === 'add_marker' || action?.type === 'add_markers' || action?.type === 'update_marker' || action?.type === 'remove_marker';
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
@@ -1556,7 +1680,7 @@ export default function ChatSidebar() {
       addMessage({
         role: 'assistant',
         content: assistantMessage,
-        action: action ?? undefined,
+        action: markerAction ? undefined : action ?? undefined,
         visualSearch: visualSearch ?? undefined,
       });
       producedVisibleResponse = true;
@@ -1569,7 +1693,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext, setVisualSearchSession]);
+  }, [addMarker, addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext, selectedMarkerContext, setVisualSearchSession]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -1635,170 +1759,6 @@ export default function ChatSidebar() {
     }
   }, [addMessage, isChatLoading, reviewLocked, runSingleTurn, setIsChatLoading]);
 
-  const handleAgentSend = useCallback(async (text: string) => {
-    if (!text || isChatLoading || reviewLocked) return;
-    setInput('');
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
-
-    addMessage({ role: 'user', content: text });
-
-    const agentHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [
-      ...messages.map(m => ({ role: m.role, content: m.content })),
-      { role: 'user' as const, content: text },
-    ];
-
-    setIsChatLoading(true);
-    setLoadingStatus('');
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    stopRequestedRef.current = false;
-    try {
-      const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(text) && !!useEditorStore.getState().currentProjectId;
-      let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
-      if (!preferSourceVisualRetrieval) {
-        currentFrames = await ensureFrameDescriptions(currentFrames);
-      }
-      // After a batch silence cut, suppress the transcript so the agent can't
-      // re-analyze it and issue a second round of deletions.
-      let suppressTranscriptNextIter = false;
-      let madeStructuralEdit = false;
-      for (let i = 0; i < 8; i++) {
-        if (stopRequestedRef.current) break;
-        // Always read fresh state at the top of each iteration so post-edit context is current
-        const freshState = useEditorStore.getState();
-        const currentClips = freshState.clips;
-        const currentDuration = freshState.videoDuration;
-        const rawCaptions = freshState.rawTranscriptCaptions;
-
-        // Remap transcript timestamps to current timeline if we have raw captions.
-        // If suppressTranscriptNextIter is set (after a delete_ranges batch), omit
-        // the transcript so the agent can't see gaps and issue duplicate cuts.
-        const currentTranscript = suppressTranscriptNextIter
-          ? null
-          : rawCaptions && rawCaptions.length > 0
-            ? buildTranscriptContext(currentClips, rawCaptions)
-            : freshState.backgroundTranscript;
-        suppressTranscriptNextIter = false;
-
-        const { message = '', action, visualSearch } = await postChatRequest({
-          messages: agentHistory,
-          context: {
-            projectId: freshState.currentProjectId,
-            visualSearchSession: freshState.visualSearchSession,
-            videoDuration: currentDuration,
-            clipCount: currentClips.length,
-            clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
-            selectedClip: selectedClipContext,
-            transcript: currentTranscript,
-            settings: freshState.aiSettings,
-            appliedActions: freshState.appliedActions,
-            frames: buildFrameContextPayload(currentFrames, currentClips),
-          },
-        }, ctrl);
-        setVisualSearchSession(visualSearch ?? null);
-        const frameRequest = action?.type === 'request_frames' ? action.frameRequest : null;
-        const requestSpanSeconds = frameRequest
-          ? Math.max(frameRequest.endTime - frameRequest.startTime, 0.5)
-          : null;
-        const requestTooBroad = requestSpanSeconds !== null && requestSpanSeconds > MAX_DENSE_FRAME_WINDOW_SECONDS;
-        const assistantMessage = requestTooBroad
-          ? getDenseRequestTooBroadMessage(frameRequest!.startTime, frameRequest!.endTime)
-          : (message.trim() || getAssistantFallbackMessage(action));
-        addMessage({
-          role: 'assistant',
-          content: assistantMessage,
-          action: requestTooBroad ? undefined : action ?? undefined,
-          visualSearch: visualSearch ?? undefined,
-          autoApplied: true,
-          actionStatus: requestTooBroad ? undefined : action && action.type !== 'none' ? 'completed' : undefined,
-          actionResult: requestTooBroad ? undefined : action && action.type !== 'none' ? 'Auto-applied ✓' : undefined,
-        });
-
-        if (requestTooBroad) break;
-
-        if (!action || action.type === 'none') break;
-
-        let resultSummary = '';
-        if (action.type === 'request_frames' && action.frameRequest) {
-          const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-          const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
-          const count = Math.min(
-            req.count ?? Math.max(useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
-            60,
-          );
-          setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
-          const interval = (req.endTime - req.startTime) / count;
-          const timelineTimestamps = Array.from({ length: count }, (_, k) => req.startTime + k * interval);
-          const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
-          const source = videoData ?? videoFile ?? videoUrl;
-          if (!source) throw new Error('No video source available for frame extraction');
-          const images = await extractVideoFrames(source, sourceTimestamps);
-          currentFrames = images.map((image, index) => ({
-            image,
-            timelineTime: timelineTimestamps[index],
-            sourceTime: sourceTimestamps[index],
-            kind: 'dense' as const,
-            rangeStart: req.startTime,
-            rangeEnd: req.endTime,
-          }));
-          setLoadingStatus('');
-          resultSummary = `Extracted ${count} dense frames from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Use these to identify the exact moment, then make your edit.`;
-        } else if (action.type === 'transcribe_request') {
-          const seg = action.segments?.[0];
-          if (seg && videoUrl) {
-            try {
-              setLoadingStatus(`Transcribing audio (${formatTime(seg.startTime)}–${formatTime(seg.endTime)})…`);
-              const sourceSegs = getSourceSegmentsForTimelineRange(currentClips, seg.startTime, seg.endTime);
-              const ranges = sourceSegs.flatMap((sourceSeg) => (
-                buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration)
-              ));
-              const rawCaptions = await transcribeSourceRanges(
-                videoData ?? videoUrl,
-                ranges,
-                useEditorStore.getState().aiSettings.captions.wordsPerCaption,
-                { onProgress: setTranscriptProgress },
-              );
-              const remappedTranscript = buildTranscriptContext(useEditorStore.getState().clips, rawCaptions);
-              setBackgroundTranscript(remappedTranscript, 'done', rawCaptions);
-              resultSummary = `Transcription complete. Full transcript:\n${remappedTranscript}`;
-            } catch (err) {
-              resultSummary = `Transcription failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
-            } finally {
-              setLoadingStatus('');
-            }
-          }
-        } else {
-          // If the agent is trying to make a second structural edit, stop —
-          // the first edit already fulfilled the request.
-          if (madeStructuralEdit) break;
-          madeStructuralEdit = true;
-          const actionSourceRanges = sourceRangesForAction(currentClips, action);
-          applyAction(action);
-          recordAppliedAction(action, action.message, { sourceRanges: actionSourceRanges });
-          if (action.type === 'delete_ranges') {
-            // Batch silence removal is a complete, one-shot operation.
-            // Suppress transcript next iteration so the agent can't see remapped
-            // caption gaps and mistakenly issue a second round of cuts.
-            suppressTranscriptNextIter = true;
-            resultSummary = `Executed: ${action.message} All ${action.ranges?.length ?? 0} silent sections removed in one batch. Do not issue any more delete_ranges or delete_range actions. Return type:none unless you have other explicitly requested edits remaining.`;
-          } else {
-            resultSummary = `Executed: ${action.message}`;
-          }
-        }
-
-        agentHistory.push({ role: 'assistant', content: assistantMessage });
-        agentHistory.push({ role: 'user', content: `[Agent result: ${resultSummary}. Unless the user's message explicitly requested additional edits beyond this, you MUST return {"type":"none"} now. Do not make any further edits.]` });
-      }
-    } catch (err) {
-      if ((err as Error)?.name !== 'AbortError') {
-        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
-      }
-    } finally {
-      setIsChatLoading(false);
-      setLoadingStatus('');
-    }
-  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, setTranscriptProgress, videoFile, ensureFrameDescriptions, ensureFramesExtracted, setVisualSearchSession]);
-
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
     const ctrl = abortRef.current;
@@ -1860,23 +1820,12 @@ export default function ChatSidebar() {
 
   const handleSend = useCallback(() => {
     if (reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing)) return;
-    if (agentMode) handleAgentSend(input.trim());
-    else handleSendSingle();
-  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked, hasVideoSource, agentContextReady, canSendDespiteIndexing]);
-
-  useEffect(() => {
-    if (agentContextReady && !userChoseModeManually) {
-      setAgentMode(true);
-    }
-  }, [agentContextReady, userChoseModeManually]);
+    handleSendSingle();
+  }, [handleSendSingle, reviewLocked, hasVideoSource, agentContextReady, canSendDespiteIndexing]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (reviewLocked) return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
-    if (e.key === 'Tab' && e.shiftKey) {
-      e.preventDefault();
-      if (agentContextReady) { setUserChoseModeManually(true); setAgentMode(m => !m); }
-    }
   };
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1901,8 +1850,38 @@ export default function ChatSidebar() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <AutocutMark size={18} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-            Autocut
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
+              Cut assistant
+            </span>
+            <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Review edits only
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 5 }}>
+          <span style={{
+            padding: '3px 6px',
+            borderRadius: 999,
+            background: 'rgba(33,212,255,0.12)',
+            border: '1px solid rgba(33,212,255,0.18)',
+            fontSize: 10,
+            color: 'var(--accent-strong)',
+            fontFamily: 'var(--font-serif)',
+          }}>
+            Find cuts
+          </span>
+          <span style={{
+            padding: '3px 6px',
+            borderRadius: 999,
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            fontSize: 10,
+            color: 'var(--fg-muted)',
+            fontFamily: 'var(--font-serif)',
+          }}>
+            Highlights soon
           </span>
         </div>
 
@@ -2001,6 +1980,30 @@ export default function ChatSidebar() {
               </div>
             </div>
           )}
+          {selectedMarkerContext && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => {
+                  requestSeek(selectedMarkerContext.timelineTime);
+                  setInput((current) => current.trim().length > 0 ? `${current} marker ${selectedMarkerContext.number}` : `marker ${selectedMarkerContext.number}`);
+                }}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  padding: '2px 7px',
+                  background: 'rgba(250,204,21,0.12)',
+                  border: '1px solid rgba(250,204,21,0.28)',
+                  borderRadius: 999,
+                  fontSize: 11,
+                  color: '#fde68a',
+                  fontFamily: 'var(--font-serif)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span>@{selectedMarkerContext.number}</span>
+                <span>{selectedMarkerContext.label ?? formatChatTime(selectedMarkerContext.timelineTime)}</span>
+              </button>
+            </div>
+          )}
           {reviewLocked && (
             <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
               Finish the active edit review before sending another request.
@@ -2018,7 +2021,7 @@ export default function ChatSidebar() {
                   ? 'Autocut is working…'
                   : hasVideoSource && !agentContextReady && !canSendDespiteIndexing
                     ? 'Autocut is preparing the media…'
-                  : 'Split, speed, filter, caption…'
+                  : 'Find events, reference markers, and review cuts…'
             }
             rows={1}
             disabled={composerDisabled}
@@ -2036,49 +2039,16 @@ export default function ChatSidebar() {
             }}
           />
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            {/* Mode toggle — two options side by side */}
-            {(() => {
-              const isIndexing = hasVideoSource && !agentContextReady;
-              if (isIndexing) {
-                if (canSendDespiteIndexing) {
-                  return (
-                    <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--accent-strong)' }}>
-                      Source retrieval ready
-                    </span>
-                  );
-                }
-                return <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'rgba(255,255,255,0.2)' }}>Composer locked</span>;
-              }
-              return (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  {([{ label: 'Review edits', value: false }, { label: 'Auto-apply', value: true }] as const).map(({ label, value }) => (
-                    <button
-                      key={label}
-                      onClick={() => { if (!reviewLocked) { setUserChoseModeManually(true); setAgentMode(value); } }}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 4,
-                        background: 'none', border: 'none',
-                        cursor: reviewLocked ? 'default' : 'pointer', padding: '2px 5px', borderRadius: 3,
-                      }}
-                    >
-                      <div style={{
-                        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                        background: agentMode === value ? 'var(--accent)' : 'rgba(255,255,255,0.18)',
-                        boxShadow: agentMode === value ? '0 0 10px rgba(33,212,255,0.45)' : 'none',
-                        transition: 'background 0.15s, box-shadow 0.15s',
-                      }} />
-                      <span style={{
-                        fontSize: 10, fontFamily: 'var(--font-serif)',
-                        color: agentMode === value ? 'var(--accent-strong)' : 'var(--fg-muted)',
-                        transition: 'color 0.15s',
-                      }}>
-                        {label}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              );
-            })()}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--accent-strong)' }}>
+                Review edits
+              </span>
+              {canSendDespiteIndexing && (
+                <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--fg-muted)' }}>
+                  Source retrieval ready
+                </span>
+              )}
+            </div>
 
             {isChatLoading ? (
               <button

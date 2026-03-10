@@ -23,7 +23,7 @@ import { verifyCandidatesAgainstQuery } from '@/lib/server/visionIndexing.mjs';
 
 const client = new Anthropic();
 
-const BASE_SYSTEM_PROMPT = `You are an AI video editor assistant inside a professional clip-based timeline editor (like CapCut). Help users edit their video using natural language commands.
+const BASE_SYSTEM_PROMPT = `You are an AI-assisted cutting assistant inside a professional clip-based timeline editor. Help users find moments, tag them with markers, and propose cuts or transitions for review using natural language commands.
 
 The video is organized as a sequence of clips on the timeline. You can split, delete, and modify clips.
 
@@ -113,6 +113,13 @@ Example:
 - Use when user says: "add a fade between clips", "transition at 0:30", etc.
 - Use the transition defaults from context unless the user asks for something different.
 
+### 9b. Markers (add_marker / add_markers / update_marker / remove_marker)
+- Create numbered markers on the timeline to tag candidate moments for review
+- Use markers when the user asks you to find, tag, or point out likely moments before cutting
+- Prefer adding markers first when you found plausible events but the user still needs to review them
+- Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
+- When a user references "marker 1" or "@1", treat that marker as a stable timeline reference from context
+
 ### 10. Text Overlays (add_text_overlay / replace_text_overlay)
 - Add text/title overlays that appear on screen at specific timeline times
 - Position: "top", "center", or "bottom"
@@ -167,6 +174,9 @@ Transcribe:
 
 Transition:
 <action>{"type":"add_transition","transitions":[{"atTime":30,"type":"crossfade","duration":1.0}],"message":"Added crossfade at 0:30."}</action>
+
+Markers:
+<action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review."}</action>
 
 Text overlay:
 <action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"Added title overlay."}</action>
@@ -727,19 +737,40 @@ Honor these defaults unless the user explicitly asks for something different in 
           confidenceBand = proposal.confidenceBand;
         }
 
-        if (proposal && proposal.timelineRanges.length > 0 && intent.actionType === 'delete') {
-          const deleteAction = intent.actionType === 'delete' ? makeDeleteRangesAction(proposal) : null;
-          if (deleteAction) {
-            action = {
-              ...deleteAction,
-              message: deleteAction.message,
-            };
-          } else {
-            action = { type: 'none', message: 'I found a strong source-anchored visual match.' };
-          }
-          if (proposal.confidenceBand !== 'high') {
-            followUpPrompt = 'I used the strongest source match and you can review or undo it if needed.';
-          }
+        if (proposal && proposal.timelineRanges.length > 0) {
+          action = {
+            type: proposal.timelineRanges.length > 1 ? 'add_markers' : 'add_marker',
+            markers: proposal.timelineRanges.map((range, index) => ({
+              timelineTime: range.timelineStart,
+              label: proposal.timelineRanges.length > 1 ? `Finding ${index + 1}` : 'Finding',
+              createdBy: 'ai',
+              status: 'open',
+              linkedRange: {
+                startTime: range.timelineStart,
+                endTime: range.timelineEnd,
+              },
+              confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
+              note: latestUserMessage,
+            })),
+            marker: proposal.timelineRanges[0]
+              ? {
+                  timelineTime: proposal.timelineRanges[0].timelineStart,
+                  label: 'Finding',
+                  createdBy: 'ai',
+                  status: 'open',
+                  linkedRange: {
+                    startTime: proposal.timelineRanges[0].timelineStart,
+                    endTime: proposal.timelineRanges[0].timelineEnd,
+                  },
+                  confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
+                  note: latestUserMessage,
+                }
+              : undefined,
+            message: proposal.timelineRanges.length === 1
+              ? 'Tagged one likely moment for review.'
+              : `Tagged ${proposal.timelineRanges.length} likely moments for review.`,
+          };
+          followUpPrompt = 'I tagged the strongest matches as markers so you can review them, then ask me to cut around a marker or add a transition at one.';
         } else {
           followUpPrompt = confidenceBand === 'medium'
             ? 'I found a few plausible source windows. Choose one, or give me an approximate timestamp for tighter verification.'
@@ -797,6 +828,40 @@ Honor these defaults unless the user explicitly asks for something different in 
     if (context?.selectedClip != null) {
       const sc = context.selectedClip;
       contextLines.push(`Selected clip: Clip ${sc.index + 1} (index ${sc.index}), duration ${sc.duration.toFixed(2)}s`);
+    }
+    if (context?.selectedMarker && typeof context.selectedMarker === 'object') {
+      const marker = context.selectedMarker as { number?: number; timelineTime?: number; label?: string | null };
+      if (typeof marker.number === 'number' && typeof marker.timelineTime === 'number') {
+        contextLines.push(`Selected marker: @${marker.number} at ${fmtSec(marker.timelineTime)}${marker.label ? ` labeled "${marker.label}"` : ''}`);
+      }
+    }
+    if (Array.isArray(context?.markers) && context.markers.length > 0) {
+      const markerSummary = (context.markers as Array<{
+        number?: number;
+        timelineTime?: number;
+        label?: string | null;
+        status?: string;
+        linkedRange?: { startTime?: number; endTime?: number } | null;
+        note?: string | null;
+      }>)
+        .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
+        .slice(0, 12)
+        .map((marker) => {
+          const markerNumber = marker.number as number;
+          const markerTimelineTime = marker.timelineTime as number;
+          return (
+            `@${markerNumber} ${fmtSec(markerTimelineTime)}` +
+          (marker.label ? ` "${marker.label}"` : '') +
+          (marker.linkedRange?.startTime !== undefined && marker.linkedRange?.endTime !== undefined
+            ? ` range ${fmtSec(marker.linkedRange.startTime)}-${fmtSec(marker.linkedRange.endTime)}`
+            : '') +
+          (marker.status ? ` ${marker.status}` : '') +
+          (marker.note ? ` note "${marker.note}"` : '')
+          );
+        });
+      if (markerSummary.length > 0) {
+        contextLines.push(`Timeline markers: ${markerSummary.join(' | ')}`);
+      }
     }
     if (context?.transcript) {
       const transcriptExcerpt = selectRelevantTranscriptLines(context.transcript, messages);

@@ -33,7 +33,7 @@ export interface CaptionEntry {
 export interface TransitionEntry {
   id?: string;
   atTime: number;
-  type: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe' | 'glitch_flash';
+  type: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
   duration: number;
 }
 
@@ -288,7 +288,7 @@ export interface AIEditingSettings {
   };
   transitions: {
     defaultDuration: number;
-    defaultType: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe' | 'glitch_flash';
+    defaultType: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
   };
   textOverlays: {
     defaultPosition: 'top' | 'center' | 'bottom';
