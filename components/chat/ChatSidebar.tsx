@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, MarkerEntry, VisualSearchSession } from '@/lib/types';
 import { formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -42,6 +42,13 @@ type IndexingProgress = {
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
+const MARKER_REFERENCE_PATTERN = /(?:marker\s+|@)(\d+)/gi;
+
+type ActiveMarkerMention = {
+  query: string;
+  start: number;
+  end: number;
+};
 
 async function parseJsonResponse<T>(res: Response): Promise<T | null> {
   const text = await res.text();
@@ -115,6 +122,53 @@ function formatEtaLabel(seconds?: number | null): string | null {
   if (seconds < 60) return `about ${Math.ceil(seconds / 5) * 5}s left`;
   const roundedMinutes = Math.ceil((seconds / 60) * 2) / 2;
   return `about ${roundedMinutes} min left`;
+}
+
+function getActiveMarkerMention(text: string, caret: number | null): ActiveMarkerMention | null {
+  if (caret === null) return null;
+  const prefix = text.slice(0, caret);
+  const match = prefix.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  const atIndex = prefix.lastIndexOf('@');
+  if (atIndex === -1) return null;
+  return {
+    query: match[1] ?? '',
+    start: atIndex,
+    end: caret,
+  };
+}
+
+function replaceMarkerMention(text: string, mention: ActiveMarkerMention, markerNumber: number): string {
+  return `${text.slice(0, mention.start)}@${markerNumber} ${text.slice(mention.end)}`;
+}
+
+function appendMarkerReference(text: string, markerNumber: number): string {
+  const token = `@${markerNumber}`;
+  if (new RegExp(`(^|\\s)${token}\\b`).test(text)) return text;
+  return text.trim().length > 0 ? `${text.replace(/\s+$/, '')} ${token} ` : `${token} `;
+}
+
+function removeMarkerReference(text: string, markerNumber: number): string {
+  return text
+    .replace(new RegExp(`(^|[\\s])@${markerNumber}\\b`, 'g'), '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^[ \t]+/gm, '')
+    .trimStart();
+}
+
+function extractReferencedMarkers(text: string, markers: MarkerEntry[]): MarkerEntry[] {
+  const markerNumbers = new Set<number>();
+  let match: RegExpExecArray | null;
+  MARKER_REFERENCE_PATTERN.lastIndex = 0;
+  while ((match = MARKER_REFERENCE_PATTERN.exec(text)) !== null) {
+    const markerNumber = Number(match[1]);
+    if (Number.isFinite(markerNumber)) markerNumbers.add(markerNumber);
+  }
+  return [...markerNumbers]
+    .map((number) => markers.find((marker) => marker.number === number) ?? null)
+    .filter((marker): marker is MarkerEntry => marker !== null)
+    .sort((a, b) => a.number - b.number);
 }
 
 function getProgressValue(progress: IndexingProgress | null): number | null {
@@ -1323,6 +1377,8 @@ function EmptyState({
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
   const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
+  const [activeMarkerMention, setActiveMarkerMention] = useState<ActiveMarkerMention | null>(null);
+  const [highlightedMarkerIndex, setHighlightedMarkerIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -1367,10 +1423,27 @@ export default function ChatSidebar() {
     if (!selectedItem || selectedItem.type !== 'marker') return null;
     return markers.find((marker) => marker.id === selectedItem.id) ?? null;
   })();
+  const taggedMarkers = useMemo(() => extractReferencedMarkers(input, markers), [input, markers]);
+  const markerSuggestions = useMemo(() => {
+    if (!activeMarkerMention) return [];
+    const query = activeMarkerMention.query.trim().toLowerCase();
+    return [...markers]
+      .sort((a, b) => a.number - b.number)
+      .filter((marker) => {
+        if (!query) return true;
+        const label = marker.label?.toLowerCase() ?? '';
+        return marker.number.toString().startsWith(query) || label.includes(query);
+      })
+      .slice(0, 6);
+  }, [activeMarkerMention, markers]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isChatLoading]);
+
+  useEffect(() => {
+    setHighlightedMarkerIndex(0);
+  }, [activeMarkerMention?.query, markerSuggestions.length]);
 
   useEffect(() => {
     if (!isAgentMenuOpen) return;
@@ -1661,6 +1734,7 @@ export default function ChatSidebar() {
     if (!text || isChatLoading || reviewLocked) return;
 
     setInput('');
+    setActiveMarkerMention(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
     addMessage({ role: 'user', content: text });
@@ -1773,6 +1847,55 @@ export default function ChatSidebar() {
   const canSendDespiteIndexing = pendingVisualQuery;
   const composerDisabled = isChatLoading || reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing);
 
+  const resizeComposer = useCallback(() => {
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.style.height = 'auto';
+      ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`;
+    }
+  }, []);
+
+  const syncActiveMarkerMention = useCallback((value: string, caret: number | null) => {
+    setActiveMarkerMention(getActiveMarkerMention(value, caret));
+  }, []);
+
+  const focusComposer = useCallback((selectionStart?: number, selectionEnd?: number) => {
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      if (selectionStart !== undefined) {
+        ta.selectionStart = selectionStart;
+        ta.selectionEnd = selectionEnd ?? selectionStart;
+      }
+      resizeComposer();
+    });
+  }, [resizeComposer]);
+
+  const applyMarkerSuggestion = useCallback((marker: MarkerEntry) => {
+    if (!activeMarkerMention) return;
+    const nextValue = replaceMarkerMention(input, activeMarkerMention, marker.number);
+    const nextCaret = activeMarkerMention.start + `@${marker.number} `.length;
+    setInput(nextValue);
+    setActiveMarkerMention(null);
+    focusComposer(nextCaret);
+  }, [activeMarkerMention, focusComposer, input]);
+
+  const tagSelectedMarker = useCallback((marker: MarkerEntry) => {
+    requestSeek(marker.timelineTime);
+    const nextValue = appendMarkerReference(input, marker.number);
+    setInput(nextValue);
+    setActiveMarkerMention(null);
+    focusComposer(nextValue.length);
+  }, [focusComposer, input, requestSeek]);
+
+  const untagMarker = useCallback((markerNumber: number) => {
+    const nextValue = removeMarkerReference(input, markerNumber);
+    setInput(nextValue);
+    setActiveMarkerMention(null);
+    focusComposer(nextValue.length);
+  }, [focusComposer, input]);
+
   useEffect(() => {
     if (agentContextReady) {
       setFrameIndexingProgress(null);
@@ -1786,13 +1909,35 @@ export default function ChatSidebar() {
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (reviewLocked) return;
+    if (markerSuggestions.length > 0 && activeMarkerMention) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setHighlightedMarkerIndex((current) => Math.min(current + 1, markerSuggestions.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setHighlightedMarkerIndex((current) => Math.max(current - 1, 0));
+        return;
+      }
+      if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        e.preventDefault();
+        applyMarkerSuggestion(markerSuggestions[highlightedMarkerIndex] ?? markerSuggestions[0]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setActiveMarkerMention(null);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
-    const ta = textareaRef.current;
-    if (ta) { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`; }
+    syncActiveMarkerMention(e.target.value, e.target.selectionStart);
+    resizeComposer();
   };
 
   return (
@@ -1989,13 +2134,38 @@ export default function ChatSidebar() {
               </div>
             </div>
           )}
+          {taggedMarkers.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+              {taggedMarkers.map((marker) => (
+                <button
+                  key={marker.id}
+                  onClick={() => untagMarker(marker.number)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '2px 7px',
+                    background: 'rgba(250,204,21,0.12)',
+                    border: '1px solid rgba(250,204,21,0.28)',
+                    borderRadius: 999,
+                    fontSize: 11,
+                    color: '#fde68a',
+                    fontFamily: 'var(--font-serif)',
+                    cursor: 'pointer',
+                  }}
+                  title="Remove this marker tag from the message"
+                >
+                  <span>@{marker.number}</span>
+                  <span>{marker.label ?? formatChatTime(marker.timelineTime)}</span>
+                  <span style={{ color: 'rgba(253,230,138,0.72)' }}>×</span>
+                </button>
+              ))}
+            </div>
+          )}
           {selectedMarkerContext && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
               <button
-                onClick={() => {
-                  requestSeek(selectedMarkerContext.timelineTime);
-                  setInput((current) => current.trim().length > 0 ? `${current} marker ${selectedMarkerContext.number}` : `marker ${selectedMarkerContext.number}`);
-                }}
+                onClick={() => tagSelectedMarker(selectedMarkerContext)}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 6,
                   padding: '2px 7px',
@@ -2013,6 +2183,49 @@ export default function ChatSidebar() {
               </button>
             </div>
           )}
+          {activeMarkerMention && markerSuggestions.length > 0 && (
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+              padding: '4px',
+              borderRadius: 8,
+              background: 'rgba(0,0,0,0.18)',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}>
+              {markerSuggestions.map((marker, index) => {
+                const isHighlighted = index === highlightedMarkerIndex;
+                return (
+                  <button
+                    key={marker.id}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => applyMarkerSuggestion(marker)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      padding: '6px 8px',
+                      borderRadius: 6,
+                      border: 'none',
+                      background: isHighlighted ? 'rgba(250,204,21,0.16)' : 'transparent',
+                      color: isHighlighted ? '#fde68a' : 'var(--fg-secondary)',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                      fontSize: 11,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <span>@{marker.number}</span>
+                    <span style={{ flex: 1, color: 'var(--fg-primary)' }}>
+                      {marker.label ?? formatChatTime(marker.timelineTime)}
+                    </span>
+                    <span style={{ color: 'var(--fg-muted)' }}>{formatChatTime(marker.timelineTime)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {reviewLocked && (
             <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
               Finish the active edit review before sending another request.
@@ -2023,6 +2236,8 @@ export default function ChatSidebar() {
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
+            onClick={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+            onKeyUp={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
             placeholder={
               reviewLocked
                 ? 'Complete the active review…'

@@ -93,6 +93,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const [snapEnabled, setSnapEnabled] = useState(true);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
+  const currentTime = useEditorStore(s => s.currentTime);
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
@@ -769,9 +770,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
 
         <button
           onClick={() => {
-            const label = window.prompt('Marker label (optional)')?.trim();
-            createMarkerAtTime(useEditorStore.getState().currentTime, {
-              label: label || undefined,
+            createMarkerAtTime(currentTime, {
               createdBy: 'human',
             });
           }}
@@ -1016,10 +1015,12 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                   }}
                   style={{
                     position: 'absolute',
-                    left: Math.max(0, x - 10),
-                    top: 2,
-                    width: 20,
+                    left: x,
+                    transform: 'translateX(-50%)',
+                    top: 1,
+                    minWidth: 20,
                     height: 20,
+                    padding: '0 4px',
                     borderRadius: 999,
                     border: isSelected ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
                     background: isSelected ? 'rgba(250,204,21,0.24)' : 'rgba(250,204,21,0.12)',
@@ -1354,7 +1355,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
       <div
         style={{
           position: 'absolute',
-          left: playheadX,
+          left: playheadX - 1,
           top: rulerHeight - 2,
           bottom: 0,
           width: 2,
@@ -1369,7 +1370,8 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
         style={{
           position: 'absolute',
           top: 1,
-          left: playheadX - 7,
+          left: playheadX,
+          transform: 'translateX(-50%)',
           width: 14,
           height: 14,
           borderRadius: '50%',

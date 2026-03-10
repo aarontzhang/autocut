@@ -119,6 +119,7 @@ Example:
 - Prefer adding markers first when you found plausible events but the user still needs to review them
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
 - When a user references "marker 1" or "@1", treat that marker as a stable timeline reference from context
+- If the latest user message explicitly references one or more markers, prioritize those markers over unmentioned markers when deciding where to inspect, cut, or add emphasis
 
 ### 10. Text Overlays (add_text_overlay / replace_text_overlay)
 - Add text/title overlays that appear on screen at specific timeline times
@@ -491,6 +492,38 @@ function extractMentionedTimes(messages: ChatTurn[], clips: ClipSummary[]) {
   return mentioned;
 }
 
+function extractMentionedMarkers(
+  message: string,
+  markers: Array<{
+    number?: number;
+    timelineTime?: number;
+    label?: string | null;
+    linkedRange?: { startTime?: number; endTime?: number } | null;
+  }>,
+) {
+  const referencedNumbers = new Set<number>();
+  const explicitMarkers: Array<{
+    number?: number;
+    timelineTime?: number;
+    label?: string | null;
+    linkedRange?: { startTime?: number; endTime?: number } | null;
+  }> = [];
+  let match: RegExpExecArray | null;
+  const pattern = /(?:marker\s+|@)(\d+)/gi;
+
+  while ((match = pattern.exec(message)) !== null) {
+    const markerNumber = Number(match[1]);
+    if (!Number.isFinite(markerNumber) || referencedNumbers.has(markerNumber)) continue;
+    referencedNumbers.add(markerNumber);
+    const marker = markers.find((entry) => entry.number === markerNumber);
+    if (marker && typeof marker.timelineTime === 'number') {
+      explicitMarkers.push(marker);
+    }
+  }
+
+  return explicitMarkers;
+}
+
 function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
   return clips.map((clip, index) => ({
     id: `clip-${clip.index ?? index}`,
@@ -848,7 +881,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       }
     }
     if (Array.isArray(context?.markers) && context.markers.length > 0) {
-      const markerSummary = (context.markers as Array<{
+      const availableMarkers = (context.markers as Array<{
         number?: number;
         timelineTime?: number;
         label?: string | null;
@@ -856,7 +889,8 @@ Honor these defaults unless the user explicitly asks for something different in 
         linkedRange?: { startTime?: number; endTime?: number } | null;
         note?: string | null;
       }>)
-        .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
+        .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number');
+      const markerSummary = availableMarkers
         .slice(0, 12)
         .map((marker) => {
           const markerNumber = marker.number as number;
@@ -873,6 +907,18 @@ Honor these defaults unless the user explicitly asks for something different in 
         });
       if (markerSummary.length > 0) {
         contextLines.push(`Timeline markers: ${markerSummary.join(' | ')}`);
+      }
+      const explicitlyMentionedMarkers = extractMentionedMarkers(latestUserMessage, availableMarkers);
+      if (explicitlyMentionedMarkers.length > 0) {
+        contextLines.push(
+          'Explicit marker references in the latest user request: ' +
+          explicitlyMentionedMarkers.map((marker) => {
+            const markerNumber = marker.number as number;
+            const markerTimelineTime = marker.timelineTime as number;
+            return `@${markerNumber} ${fmtSec(markerTimelineTime)}${marker.label ? ` "${marker.label}"` : ''}`;
+          }).join(' | ') +
+          '. Prioritize these markers in the response.'
+        );
       }
     }
     if (context?.transcript) {
