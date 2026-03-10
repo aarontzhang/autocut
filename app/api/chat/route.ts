@@ -305,6 +305,15 @@ function isAffirmativeVisualFollowUp(message: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isCaptionRequest(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (!normalized.trim()) return false;
+  return /\b(add|create|generate|make|show|turn on)\b[\w\s]{0,24}\b(captions?|subtitles?)\b/.test(normalized)
+    || /\b(captions?|subtitles?)\b[\w\s]{0,24}\b(add|create|generate|make|show)\b/.test(normalized)
+    || /\bcaption this\b/.test(normalized)
+    || /\bsubtitle this\b/.test(normalized);
+}
+
 function tokenizeForRetrieval(text: string): string[] {
   return text
     .toLowerCase()
@@ -509,7 +518,7 @@ function formatVisualCandidateMessage(session: VisualSearchSession): string {
   }
 
   if (session.candidates.length === 0) {
-    return session.followUpPrompt ?? 'I could not find a confident visual match in the indexed source media.';
+    return session.followUpPrompt ?? 'I checked the indexed source media and did not find a usable on-screen match this pass.';
   }
 
   const preview = session.candidates
@@ -517,11 +526,7 @@ function formatVisualCandidateMessage(session: VisualSearchSession): string {
     .map((candidate, index) => `${index + 1}. source ${candidate.sourceStart.toFixed(2)}-${candidate.sourceEnd.toFixed(2)}s`)
     .join(' ');
 
-  if (session.confidenceBand === 'medium') {
-    return `I narrowed this to a few likely source windows but I am not confident enough to cut automatically. Candidates: ${preview}`;
-  }
-
-  return session.followUpPrompt ?? `I do not have a reliable visual match yet. Best candidates: ${preview}`;
+  return session.followUpPrompt ?? `I searched the source index and narrowed this to a few likely windows. Best candidates: ${preview}`;
 }
 
 function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (seconds: number) => string): string[] {
@@ -656,6 +661,13 @@ Honor these defaults unless the user explicitly asks for something different in 
       });
     }
 
+    if (isCaptionRequest(latestUserMessage)) {
+      return NextResponse.json({
+        message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
+        action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
+      });
+    }
+
     if (context?.projectId && typeof context.projectId === 'string' && isLikelyVisualQuery(latestUserMessage)) {
       const supabase = await getSupabaseServer();
       const { data: { user } } = await supabase.auth.getUser();
@@ -687,7 +699,7 @@ Honor these defaults unless the user explicitly asks for something different in 
         let candidates;
         const removedSourceRanges = extractRemovedSourceRanges(context?.appliedActions, asset?.id);
         try {
-          candidates = await retrieveVisualCandidates(supabase, asset, intent, 5);
+          candidates = await retrieveVisualCandidates(supabase, asset, intent, 12);
         } catch (error) {
           console.error('[chat.visual] failed to retrieve visual candidates, falling back to legacy flow', error);
           candidates = null;
@@ -773,8 +785,8 @@ Honor these defaults unless the user explicitly asks for something different in 
           followUpPrompt = 'I tagged the strongest matches as markers so you can review them, then ask me to cut around a marker or add a transition at one.';
         } else {
           followUpPrompt = confidenceBand === 'medium'
-            ? 'I found a few plausible source windows. Choose one, or give me an approximate timestamp for tighter verification.'
-            : 'I am not confident enough to cut automatically. Please give me a more specific visual description or an approximate timestamp.';
+            ? 'I searched deeper in the source index and found a few plausible windows. I can keep narrowing from one of those moments or from an approximate timestamp.'
+            : 'I made a best-effort pass through the indexed source media but did not get to a clean timeline match yet. I can keep narrowing if you give me an approximate timestamp or one extra visual detail.';
         }
 
         const visualSearch: VisualSearchSession = {

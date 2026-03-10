@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, VisualSearchSession } from '@/lib/types';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
 import { formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -14,6 +14,12 @@ const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
 const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
 const REVIEW_PREROLL_SECONDS = 2.5;
+const AGENT_MENU_ITEMS = [
+  { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
+  { id: 'highlights', label: 'Highlights Assistant', status: 'coming_soon' as const },
+  { id: 'story', label: 'Story Assistant', status: 'coming_soon' as const },
+  { id: 'sound', label: 'Sound Assistant', status: 'coming_soon' as const },
+];
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -937,12 +943,6 @@ function AssistantMessage({
         <MarkerAwareText text={msg.content} />
       </div>
 
-      {msg.visualSearch && (
-        <div style={{ marginTop: 10, marginLeft: 22 }}>
-          <VisualSearchPanel session={msg.visualSearch} />
-        </div>
-      )}
-
       {/* Action card */}
       {hasAction && meta && (
         <div style={{
@@ -1319,66 +1319,16 @@ function EmptyState({
   );
 }
 
-function VisualSearchPanel({ session }: { session: VisualSearchSession }) {
-  return (
-    <div style={{
-      padding: '10px 11px',
-      borderRadius: 8,
-      border: '1px solid rgba(56,189,248,0.18)',
-      background: 'rgba(56,189,248,0.06)',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <span style={{ fontSize: 11, color: '#7dd3fc', fontFamily: 'var(--font-serif)' }}>
-          Source visual retrieval
-        </span>
-        <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'capitalize' }}>
-          {session.confidenceBand} confidence
-        </span>
-      </div>
-      <p style={{ margin: 0, fontSize: 11, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
-        {session.query}
-      </p>
-      {session.followUpPrompt && (
-        <p style={{ margin: 0, fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
-          {session.followUpPrompt}
-        </p>
-      )}
-      {session.candidates.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {session.candidates.slice(0, 3).map((candidate, index) => (
-            <div
-              key={candidate.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-                fontSize: 10,
-                color: 'var(--fg-muted)',
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              <span>Finding {index + 1}</span>
-              <span>{formatChatTime(candidate.sourceStart)}-{formatChatTime(candidate.sourceEnd)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Main sidebar ──────────────────────────────────────────────────────────────
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
+  const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
+  const agentMenuRef = useRef<HTMLDivElement>(null);
 
   const messages = useEditorStore(s => s.messages);
   const isChatLoading = useEditorStore(s => s.isChatLoading);
@@ -1421,6 +1371,17 @@ export default function ChatSidebar() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isChatLoading]);
+
+  useEffect(() => {
+    if (!isAgentMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!agentMenuRef.current?.contains(event.target as Node)) {
+        setIsAgentMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [isAgentMenuOpen]);
 
   // Extract frames on first load, and re-extract in background when stale after edits
   useEffect(() => {
@@ -1842,47 +1803,95 @@ export default function ChatSidebar() {
     }}>
       {/* Header */}
       <div style={{
-        height: 44,
+        minHeight: 52,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 14px',
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <AutocutMark size={18} />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-              Cut assistant
+              Cut Assistant
             </span>
-            <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              Review edits only
-            </span>
+            <div ref={agentMenuRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => setIsAgentMenuOpen((open) => !open)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 8px',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 999,
+                  color: 'var(--fg-secondary)',
+                  fontSize: 10,
+                  fontFamily: 'var(--font-serif)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span>Agents</span>
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  style={{ transform: isAgentMenuOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              {isAgentMenuOpen && (
+                <div style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 8px)',
+                  right: 0,
+                  width: 210,
+                  maxWidth: 'calc(100vw - 32px)',
+                  padding: 6,
+                  borderRadius: 10,
+                  background: 'rgba(14,14,16,0.98)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  boxShadow: '0 18px 30px rgba(0,0,0,0.28)',
+                  zIndex: 20,
+                }}>
+                  {AGENT_MENU_ITEMS.map((agent) => {
+                    const active = agent.status === 'active';
+                    return (
+                      <div
+                        key={agent.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 12,
+                          padding: '9px 10px',
+                          borderRadius: 8,
+                          background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
+                          color: active ? 'var(--fg-primary)' : 'rgba(255,255,255,0.38)',
+                        }}
+                      >
+                        <span style={{ fontSize: 11, fontFamily: 'var(--font-serif)', fontWeight: active ? 600 : 500 }}>
+                          {agent.label}
+                        </span>
+                        <span style={{
+                          fontSize: 10,
+                          fontFamily: 'var(--font-serif)',
+                          color: active ? 'var(--accent-strong)' : 'rgba(255,255,255,0.34)',
+                        }}>
+                          {active ? 'Live' : 'Coming soon'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 5 }}>
-          <span style={{
-            padding: '3px 6px',
-            borderRadius: 999,
-            background: 'rgba(33,212,255,0.12)',
-            border: '1px solid rgba(33,212,255,0.18)',
-            fontSize: 10,
-            color: 'var(--accent-strong)',
-            fontFamily: 'var(--font-serif)',
-          }}>
-            Find cuts
-          </span>
-          <span style={{
-            padding: '3px 6px',
-            borderRadius: 999,
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            fontSize: 10,
-            color: 'var(--fg-muted)',
-            fontFamily: 'var(--font-serif)',
-          }}>
-            Highlights soon
-          </span>
         </div>
 
         {/* Non-blocking re-index badge */}
@@ -2038,18 +2047,7 @@ export default function ChatSidebar() {
               fontFamily: 'var(--font-serif)',
             }}
           />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--accent-strong)' }}>
-                Review edits
-              </span>
-              {canSendDespiteIndexing && (
-                <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--fg-muted)' }}>
-                  Source retrieval ready
-                </span>
-              )}
-            </div>
-
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
             {isChatLoading ? (
               <button
                 onClick={handleStop}

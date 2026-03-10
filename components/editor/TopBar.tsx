@@ -4,7 +4,6 @@ import { useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { exportClips } from '@/lib/ffmpegClient';
-import SaveIndicator from '@/components/editor/SaveIndicator';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
@@ -236,8 +235,6 @@ export default function TopBar({ onImportFile }: { onImportFile?: (file: File) =
       )}
 
       <div style={{ flex: 1 }} />
-
-      <SaveIndicator />
 
       {outputReady ? (
         <a
