@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
+import { CaptionEntry, ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
 import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext } from '@/lib/timelineUtils';
 import { extractAudioSegment, extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -321,8 +321,15 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
   );
 }
 
-function AssistantMessage({ msg }: { msg: ChatMessageType }) {
+function AssistantMessage({
+  msg,
+  onTranscriptReady,
+}: {
+  msg: ChatMessageType;
+  onTranscriptReady: (messageId: string) => Promise<void>;
+}) {
   const videoUrl = useEditorStore(s => s.videoUrl);
+  const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
@@ -341,6 +348,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const addMessage = useEditorStore(s => s.addMessage);
 
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
@@ -421,9 +429,11 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   }, [clearPreviewSnapshot, msg.id]);
 
   const handleTranscribe = useCallback(async () => {
-    if (!action || action.type !== 'transcribe_request' || !videoUrl) return;
+    if (!action || action.type !== 'transcribe_request') return;
     const seg = action.segments?.[0];
     if (!seg) return;
+    const source = videoData ?? videoFile ?? videoUrl;
+    if (!source) return;
 
     setIsTranscribing(true);
     setTranscribeError(null);
@@ -432,36 +442,39 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
       const sourceSegs = getSourceSegmentsForTimelineRange(clips, seg.startTime, seg.endTime);
       if (sourceSegs.length === 0) throw new Error('No source segments found for requested range');
 
-      let combinedTranscript = '';
+      const rawCaptions: CaptionEntry[] = [];
       for (const sourceSeg of sourceSegs) {
         const audioBlob = await extractAudioSegment(
-          videoData ?? videoUrl,
+          source,
           sourceSeg.sourceStart,
           sourceSeg.sourceStart + sourceSeg.sourceDuration,
         );
         const form = new FormData();
         form.append('audio', audioBlob, 'audio.mp3');
-        form.append('startTime', String(sourceSeg.timelineOffset));
+        // Store transcript timings in source time so they can be remapped after later cuts.
+        form.append('startTime', String(sourceSeg.sourceStart));
         form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
 
         const res = await fetch('/api/transcribe', { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-
-        const segText = (data.captions as Array<{ startTime: number; text: string }>)
-          .map(c => `[${formatTime(c.startTime)}] ${c.text}`)
-          .join('\n');
-        combinedTranscript += (combinedTranscript ? '\n' : '') + segText;
+        rawCaptions.push(...((data.captions as CaptionEntry[]) ?? []));
       }
 
-      setBackgroundTranscript(combinedTranscript, 'done', []);
+      const transcriptText = buildTranscriptContext(clips, rawCaptions);
+      setBackgroundTranscript(transcriptText, 'done', rawCaptions);
+      addMessage({
+        role: 'assistant',
+        content: `Transcript ready for ${formatTime(seg.startTime)} to ${formatTime(seg.endTime)}. Continuing with your request.`,
+      });
       setTranscriptionDone(true);
+      await onTranscriptReady(msg.id);
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, videoUrl, videoData, clips, setBackgroundTranscript]);
+  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -755,11 +768,8 @@ export default function ChatSidebar() {
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
-  const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
-  const aiSettings = useEditorStore(s => s.aiSettings);
-  const appliedActions = useEditorStore(s => s.appliedActions);
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
@@ -813,6 +823,82 @@ export default function ChatSidebar() {
     }
   }, [videoData, videoDuration, videoFile, videoFrames, videoUrl, setVideoFrames]);
 
+  const buildCurrentTranscript = useCallback(() => {
+    const freshState = useEditorStore.getState();
+    const rawCaptions = freshState.rawTranscriptCaptions;
+    if (rawCaptions && rawCaptions.length > 0) {
+      return buildTranscriptContext(freshState.clips, rawCaptions);
+    }
+    return freshState.backgroundTranscript;
+  }, []);
+
+  const runSingleTurn = useCallback(async (
+    history: Array<{ role: 'user' | 'assistant'; content: string }>,
+    ctrl: AbortController,
+  ) => {
+    let currentFrames = await ensureFramesExtracted();
+
+    for (let round = 0; round < 2; round++) {
+      if (stopRequestedRef.current) break;
+      const freshState = useEditorStore.getState();
+      const currentClips = freshState.clips;
+      const currentTranscript = buildCurrentTranscript();
+      const source = freshState.videoData ?? freshState.videoFile ?? freshState.videoUrl;
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          messages: history,
+          context: {
+            videoDuration: freshState.videoDuration,
+            clipCount: currentClips.length,
+            clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
+            selectedClip: selectedClipContext,
+            transcript: currentTranscript,
+            settings: freshState.aiSettings,
+            appliedActions: freshState.appliedActions,
+            frames: currentFrames,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        addMessage({ role: 'assistant', content: `Error: ${data.error ?? 'Unknown error'}` });
+        return;
+      }
+
+      const { message, action } = data;
+
+      if (action?.type === 'request_frames' && action.frameRequest) {
+        const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
+        const count = Math.min(req.count ?? freshState.aiSettings.frameInspection.defaultFrameCount, 30);
+        setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
+        const interval = (req.endTime - req.startTime) / count;
+        const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
+        const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
+        if (!source) throw new Error('No video source available for frame extraction');
+        const images = await extractVideoFrames(source, sourceTimestamps);
+        currentFrames = images.map((image, index) => ({
+          image,
+          timelineTime: timelineTimestamps[index],
+          sourceTime: sourceTimestamps[index],
+          kind: 'dense' as const,
+          rangeStart: req.startTime,
+          rangeEnd: req.endTime,
+        }));
+        setLoadingStatus('');
+        history.push({ role: 'assistant', content: message });
+        history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
+        continue;
+      }
+
+      addMessage({ role: 'assistant', content: message, action: action ?? undefined });
+      return;
+    }
+  }, [addMessage, buildCurrentTranscript, ensureFramesExtracted, selectedClipContext]);
+
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
     if (!text || isChatLoading || reviewLocked) return;
@@ -828,68 +914,11 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      let currentFrames = await ensureFramesExtracted();
       const history: Array<{ role: 'user' | 'assistant'; content: string }> = [
         ...messages.map(m => ({ role: m.role, content: m.content })),
         { role: 'user' as const, content: text },
       ];
-
-      // Allow one request_frames round-trip before the real answer
-      for (let round = 0; round < 2; round++) {
-        if (stopRequestedRef.current) break;
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: ctrl.signal,
-          body: JSON.stringify({
-            messages: history,
-            context: {
-              videoDuration,
-              clipCount: clips.length,
-              clips: clips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
-              selectedClip: selectedClipContext,
-              transcript: backgroundTranscript,
-              settings: aiSettings,
-              appliedActions,
-              frames: currentFrames,
-            },
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          addMessage({ role: 'assistant', content: `Error: ${data.error ?? 'Unknown error'}` });
-          break;
-        }
-
-        const { message, action } = data;
-
-        if (action?.type === 'request_frames' && action.frameRequest) {
-          const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-          const count = Math.min(req.count ?? aiSettings.frameInspection.defaultFrameCount, 30);
-          setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
-          const interval = (req.endTime - req.startTime) / count;
-          const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
-          const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(clips, t));
-          const source = videoData ?? videoFile ?? videoUrl;
-          if (!source) throw new Error('No video source available for frame extraction');
-          const images = await extractVideoFrames(source, sourceTimestamps);
-          currentFrames = images.map((image, index) => ({
-            image,
-            timelineTime: timelineTimestamps[index],
-            sourceTime: sourceTimestamps[index],
-            kind: 'dense' as const,
-            rangeStart: req.startTime,
-            rangeEnd: req.endTime,
-          }));
-          setLoadingStatus('');
-          history.push({ role: 'assistant', content: message });
-          history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
-          continue;
-        }
-
-        addMessage({ role: 'assistant', content: message, action: action ?? undefined });
-        break;
-      }
+      await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
         addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
@@ -898,7 +927,41 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [aiSettings, appliedActions, input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoData, videoFile, videoUrl, ensureFramesExtracted]);
+  }, [addMessage, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+
+  const handleTranscriptReady = useCallback(async (messageId: string) => {
+    if (isChatLoading || reviewLocked) return;
+    const currentMessages = useEditorStore.getState().messages;
+    const assistantIndex = currentMessages.findIndex(m => m.id === messageId);
+    if (assistantIndex === -1) return;
+
+    const triggeringUser = [...currentMessages.slice(0, assistantIndex)].reverse().find(m => m.role === 'user');
+    if (!triggeringUser) return;
+
+    setIsChatLoading(true);
+    setLoadingStatus('Continuing with transcript…');
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    stopRequestedRef.current = false;
+
+    try {
+      const history: Array<{ role: 'user' | 'assistant'; content: string }> = [
+        ...currentMessages.map(m => ({ role: m.role, content: m.content })),
+        {
+          role: 'user',
+          content: `Continue my previous request now that the requested transcript is available. Original request: "${triggeringUser.content}". Do not ask to transcribe the same section again.`,
+        },
+      ];
+      await runSingleTurn(history, ctrl);
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
+      }
+    } finally {
+      setIsChatLoading(false);
+      setLoadingStatus('');
+    }
+  }, [addMessage, isChatLoading, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleAgentSend = useCallback(async (text: string) => {
     if (!text || isChatLoading || reviewLocked) return;
@@ -1170,7 +1233,7 @@ export default function ChatSidebar() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {messages.map(msg => msg.role === 'user'
               ? <UserMessage key={msg.id} msg={msg} />
-              : <AssistantMessage key={msg.id} msg={msg} />
+              : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
             )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>

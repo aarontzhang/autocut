@@ -209,6 +209,46 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
   };
 }
 
+type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
+
+function sourceTimeToTimelineFromContext(clips: ClipSummary[], sourceTime: number): number | null {
+  let cursor = 0;
+  for (const clip of clips) {
+    const clipDuration = clip.sourceDuration / (clip.speed ?? 1);
+    if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
+      return cursor + (sourceTime - clip.sourceStart) / (clip.speed ?? 1);
+    }
+    cursor += clipDuration;
+  }
+  return null;
+}
+
+function extractMentionedTimes(messages: Array<{ role: string; content: string }>, clips: ClipSummary[]) {
+  const seen = new Set<number>();
+  const mentioned: Array<{ raw: string; seconds: number; currentTimeline: number | null }> = [];
+  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
+
+  for (const message of messages) {
+    if (message.role !== 'user') continue;
+    let match: RegExpExecArray | null;
+    while ((match = timePattern.exec(message.content)) !== null) {
+      const seconds = match[1] !== undefined
+        ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
+        : parseFloat(match[3] ?? '0');
+      if (seen.has(seconds)) continue;
+      seen.add(seconds);
+      mentioned.push({
+        raw: match[0],
+        seconds,
+        currentTimeline: sourceTimeToTimelineFromContext(clips, seconds),
+      });
+      if (mentioned.length >= 6) return mentioned;
+    }
+  }
+
+  return mentioned;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { messages, context } = await req.json();
@@ -237,16 +277,29 @@ Honor these defaults unless the user explicitly asks for something different in 
       `Number of clips: ${context?.clipCount ?? 1}`,
     ];
 
-    if (context?.clips && Array.isArray(context.clips) && context.clips.length > 0) {
-      type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
+    const clipSummaries = (context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[];
+
+    if (clipSummaries.length > 0) {
       let cursor = 0;
-      const summaries = (context.clips as ClipSummary[]).map(c => {
+      const summaries = clipSummaries.map(c => {
         const dur = c.sourceDuration / (c.speed ?? 1);
         const start = cursor;
         cursor += dur;
         return `clip ${c.index} timeline [${fmtSec(start)}–${fmtSec(cursor)}] from source [${fmtSec(c.sourceStart)}–${fmtSec(c.sourceStart + c.sourceDuration)}] at ${(c.speed ?? 1).toFixed(2)}x`;
       });
       contextLines.push(`Timeline: ${summaries.join(' | ')}`);
+    }
+
+    const mentionedTimes = extractMentionedTimes(messages, clipSummaries);
+    if (mentionedTimes.length > 0) {
+      contextLines.push(
+        'Previously mentioned timestamps remapped onto the current timeline: ' +
+        mentionedTimes.map((entry) => (
+          entry.currentTimeline === null
+            ? `${entry.raw} was cut out`
+            : `${entry.raw} source is now around ${fmtSec(entry.currentTimeline)}`
+        )).join(' | ')
+      );
     }
 
     if (context?.selectedClip != null) {
