@@ -16,6 +16,56 @@ type FrameDescriptionResponse = {
   error?: string;
 };
 
+type ChatResponse = {
+  message?: string;
+  action?: EditAction | null;
+  error?: string;
+};
+
+const CHAT_REQUEST_TIMEOUT_MS = 45000;
+
+async function parseJsonResponse<T>(res: Response): Promise<T | null> {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function postChatRequest(
+  payload: {
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    context: Record<string, unknown>;
+  },
+  ctrl: AbortController,
+): Promise<ChatResponse> {
+  const timeoutId = window.setTimeout(() => {
+    try {
+      ctrl.abort(new DOMException('The chat request timed out.', 'AbortError'));
+    } catch {
+      ctrl.abort();
+    }
+  }, CHAT_REQUEST_TIMEOUT_MS);
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonResponse<ChatResponse>(res);
+    if (!res.ok) {
+      throw new Error(data?.error ?? `Chat request failed (${res.status}).`);
+    }
+    return data ?? {};
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function serializeActionForComparison(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(serializeActionForComparison).join(',')}]`;
@@ -779,6 +829,9 @@ function ThinkingIndicator({ status }: { status?: string }) {
 
 // ─── Empty state ───────────────────────────────────────────────────────────────
 function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; indexingReason: string | null }) {
+  const indexingDetail = indexingReason?.includes('take a while')
+    ? null
+    : 'Deep indexing can take a while on longer videos.';
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
@@ -800,15 +853,17 @@ function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; index
           <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
             {indexingReason ?? 'Indexing…'}
           </span>
-          <span style={{
-            fontSize: 10,
-            color: 'rgba(255,255,255,0.38)',
-            fontFamily: 'var(--font-serif)',
-            lineHeight: 1.5,
-            maxWidth: 240,
-          }}>
-            Deep indexing can take a while on longer videos.
-          </span>
+          {indexingDetail && (
+            <span style={{
+              fontSize: 10,
+              color: 'rgba(255,255,255,0.38)',
+              fontFamily: 'var(--font-serif)',
+              lineHeight: 1.5,
+              maxWidth: 240,
+            }}>
+              {indexingDetail}
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -993,31 +1048,19 @@ export default function ChatSidebar() {
       const currentTranscript = buildCurrentTranscript();
       const source = freshState.videoData ?? freshState.videoFile ?? freshState.videoUrl;
 
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          messages: history,
-          context: {
-            videoDuration: freshState.videoDuration,
-            clipCount: currentClips.length,
-            clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
-            selectedClip: selectedClipContext,
-            transcript: currentTranscript,
-            settings: freshState.aiSettings,
-            appliedActions: freshState.appliedActions,
-            frames: buildFrameContextPayload(currentFrames),
-          },
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        addMessage({ role: 'assistant', content: `Error: ${data.error ?? 'Unknown error'}` });
-        return;
-      }
-
-      const { message, action } = data;
+      const { message = '', action } = await postChatRequest({
+        messages: history,
+        context: {
+          videoDuration: freshState.videoDuration,
+          clipCount: currentClips.length,
+          clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
+          selectedClip: selectedClipContext,
+          transcript: currentTranscript,
+          settings: freshState.aiSettings,
+          appliedActions: freshState.appliedActions,
+          frames: buildFrameContextPayload(currentFrames),
+        },
+      }, ctrl);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
         const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
@@ -1153,31 +1196,19 @@ export default function ChatSidebar() {
             : freshState.backgroundTranscript;
         suppressTranscriptNextIter = false;
 
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: ctrl.signal,
-          body: JSON.stringify({
-            messages: agentHistory,
-            context: {
-              videoDuration: currentDuration,
-              clipCount: currentClips.length,
-              clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
-              selectedClip: selectedClipContext,
-              transcript: currentTranscript,
-              settings: freshState.aiSettings,
-              appliedActions: freshState.appliedActions,
-              frames: buildFrameContextPayload(currentFrames),
-            },
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          addMessage({ role: 'assistant', content: `Error: ${data.error ?? 'Unknown error'}` });
-          break;
-        }
-
-        const { message, action } = data;
+        const { message = '', action } = await postChatRequest({
+          messages: agentHistory,
+          context: {
+            videoDuration: currentDuration,
+            clipCount: currentClips.length,
+            clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
+            selectedClip: selectedClipContext,
+            transcript: currentTranscript,
+            settings: freshState.aiSettings,
+            appliedActions: freshState.appliedActions,
+            frames: buildFrameContextPayload(currentFrames),
+          },
+        }, ctrl);
         addMessage({
           role: 'assistant',
           content: message,
@@ -1470,7 +1501,7 @@ export default function ChatSidebar() {
                       <path d="M12 2a10 10 0 0 1 10 10" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" strokeLinecap="round"/>
                     </svg>
                     <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'rgba(255,255,255,0.2)' }}>
-                      Indexing… may take a while
+                      Indexing…
                     </span>
                   </div>
                 );

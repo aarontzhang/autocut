@@ -216,6 +216,9 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
 }
 
 type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
+type ChatTurn = { role: string; content: string };
+
+const MAX_TRANSCRIPT_LINES = 160;
 
 function tokenizeForRetrieval(text: string): string[] {
   return text
@@ -224,9 +227,80 @@ function tokenizeForRetrieval(text: string): string[] {
     .filter((token) => token.length >= 3);
 }
 
+function selectRelevantTranscriptLines(
+  transcript: string,
+  messages: ChatTurn[],
+  maxLines = MAX_TRANSCRIPT_LINES,
+): { text: string; truncated: boolean } {
+  const lines = transcript
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length <= maxLines) {
+    return { text: lines.join('\n'), truncated: false };
+  }
+
+  const recentUserText = messages
+    .filter((message) => message.role === 'user')
+    .slice(-3)
+    .map((message) => message.content)
+    .join(' ');
+  const queryTokens = new Set(tokenizeForRetrieval(recentUserText));
+
+  if (queryTokens.size === 0) {
+    const headCount = Math.floor(maxLines / 2);
+    const tailCount = maxLines - headCount;
+    return {
+      text: [...lines.slice(0, headCount), ...lines.slice(-tailCount)].join('\n'),
+      truncated: true,
+    };
+  }
+
+  const scored = lines.map((line, index) => {
+    const lineTokens = new Set(tokenizeForRetrieval(line));
+    let score = 0;
+    for (const token of queryTokens) {
+      if (lineTokens.has(token)) score += 1;
+    }
+    return { index, score };
+  });
+
+  const selected = new Set<number>();
+  const topMatches = scored
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, Math.max(1, Math.floor(maxLines / 4)));
+
+  for (const match of topMatches) {
+    for (let offset = -2; offset <= 2; offset += 1) {
+      const candidate = match.index + offset;
+      if (candidate >= 0 && candidate < lines.length) {
+        selected.add(candidate);
+      }
+    }
+  }
+
+  if (selected.size < maxLines) {
+    const stride = Math.max(1, Math.floor(lines.length / maxLines));
+    for (let index = 0; index < lines.length && selected.size < maxLines; index += stride) {
+      selected.add(index);
+    }
+  }
+
+  return {
+    text: [...selected]
+      .sort((a, b) => a - b)
+      .slice(0, maxLines)
+      .map((index) => lines[index])
+      .join('\n'),
+    truncated: true,
+  };
+}
+
 function selectRelevantOverviewFrames(
   frames: IndexedVideoFrame[],
-  messages: Array<{ role: string; content: string }>,
+  messages: ChatTurn[],
   maxFrames = 60,
 ): IndexedVideoFrame[] {
   if (frames.length <= maxFrames) return frames;
@@ -297,7 +371,7 @@ function sourceTimeToTimelineFromContext(clips: ClipSummary[], sourceTime: numbe
   return null;
 }
 
-function extractMentionedTimes(messages: Array<{ role: string; content: string }>, clips: ClipSummary[]) {
+function extractMentionedTimes(messages: ChatTurn[], clips: ClipSummary[]) {
   const seen = new Set<number>();
   const mentioned: Array<{ raw: string; seconds: number; currentTimeline: number | null }> = [];
   const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
@@ -382,7 +456,12 @@ Honor these defaults unless the user explicitly asks for something different in 
       contextLines.push(`Selected clip: Clip ${sc.index + 1} (index ${sc.index}), duration ${sc.duration.toFixed(2)}s`);
     }
     if (context?.transcript) {
-      contextLines.push(`\nFull video transcript (spoken content only — do NOT copy as captions, use transcribe_request for that):\n<transcript>\n${context.transcript}\n</transcript>`);
+      const transcriptExcerpt = selectRelevantTranscriptLines(context.transcript, messages);
+      contextLines.push(
+        `\nVideo transcript (spoken content only — do NOT copy as captions, use transcribe_request for that)` +
+        `${transcriptExcerpt.truncated ? ' [excerpted for relevance]' : ''}:\n` +
+        `<transcript>\n${transcriptExcerpt.text}\n</transcript>`
+      );
     }
     contextLines.push(
       `\nCurrent AI defaults:\n` +
