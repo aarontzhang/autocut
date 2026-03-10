@@ -109,6 +109,27 @@ function formatEtaLabel(seconds?: number | null): string | null {
   return `about ${roundedMinutes} min left`;
 }
 
+function getProgressValue(progress: IndexingProgress | null): number | null {
+  if (!progress || progress.total <= 0) return null;
+  return clampProgress(progress.completed / progress.total);
+}
+
+function getIndexingStageTitle(progress: IndexingProgress | null, fallback?: string | null): string {
+  if (fallback) return fallback;
+  if (!progress) return 'Preparing media…';
+
+  switch (progress.stage) {
+    case 'extracting_frames':
+      return 'Sampling video frames…';
+    case 'describing_frames':
+      return 'Analyzing sampled frames…';
+    case 'transcribing':
+      return 'Transcribing audio…';
+    default:
+      return 'Preparing media…';
+  }
+}
+
 function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
   if (duration <= 0) return 0;
   const interval = duration <= preferredInterval * maxOverviewFrames
@@ -945,6 +966,88 @@ function ThinkingIndicator({ status }: { status?: string }) {
   );
 }
 
+function ProgressStatusCard({
+  title,
+  progress,
+  detail,
+}: {
+  title: string;
+  progress: IndexingProgress | null;
+  detail?: string | null;
+}) {
+  const targetProgress = getProgressValue(progress);
+  const etaLabel = formatEtaLabel(progress?.etaSeconds);
+
+  return (
+    <div style={{
+      marginLeft: 22,
+      padding: '12px 13px',
+      borderRadius: 10,
+      border: '1px solid rgba(255,255,255,0.08)',
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[0, 1, 2].map((index) => (
+            <div
+              key={index}
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: '50%',
+                background: 'rgba(33,212,255,0.9)',
+                opacity: 0.28,
+                animation: `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
+              }}
+            />
+          ))}
+        </div>
+        <span style={{ fontSize: 11, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
+          {title}
+        </span>
+      </div>
+      {targetProgress !== null && (
+        <div style={{
+          width: '100%',
+          height: 6,
+          borderRadius: 999,
+          background: 'rgba(255,255,255,0.06)',
+          overflow: 'hidden',
+          boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
+        }}>
+          <div style={{
+            width: `${Math.max((targetProgress ?? 0.06) * 100, 4)}%`,
+            height: '100%',
+            background: 'linear-gradient(90deg, rgba(33,212,255,0.78), rgba(125,211,252,1))',
+            boxShadow: '0 0 18px rgba(33,212,255,0.22)',
+            transition: 'width 0.45s cubic-bezier(0.22, 1, 0.36, 1)',
+          }} />
+        </div>
+      )}
+      {(progress?.label || etaLabel) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+            {progress?.label ?? ''}
+          </span>
+          {etaLabel && (
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
+              {etaLabel}
+            </span>
+          )}
+        </div>
+      )}
+      {detail && (
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.38)', fontFamily: 'var(--font-serif)', lineHeight: 1.5 }}>
+          {detail}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Empty state ───────────────────────────────────────────────────────────────
 function EmptyState({
   isIndexing,
@@ -958,10 +1061,6 @@ function EmptyState({
   const indexingDetail = indexingReason?.includes('take a while')
     ? null
     : 'Deep indexing can take a while on longer videos.';
-  const progressValue = indexingProgress && indexingProgress.total > 0
-    ? clampProgress(indexingProgress.completed / indexingProgress.total)
-    : null;
-  const etaLabel = formatEtaLabel(indexingProgress?.etaSeconds);
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
@@ -975,48 +1074,12 @@ function EmptyState({
         Describe what you want — trim silence, add captions, adjust speed, and more.
       </p>
       {isIndexing && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, marginTop: 8 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 1s linear infinite' }}>
-            <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,0.12)" strokeWidth="2.5"/>
-            <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"/>
-          </svg>
-          <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-            {indexingReason ?? 'Indexing…'}
-          </span>
-          {progressValue !== null && (
-            <>
-              <div style={{
-                width: 220,
-                height: 6,
-                borderRadius: 999,
-                background: 'rgba(255,255,255,0.08)',
-                overflow: 'hidden',
-                boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
-              }}>
-                <div style={{
-                  width: `${Math.max(progressValue * 100, 4)}%`,
-                  height: '100%',
-                  background: 'linear-gradient(90deg, rgba(33,212,255,0.7), rgba(33,212,255,1))',
-                  transition: 'width 0.2s ease',
-                }} />
-              </div>
-              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', fontFamily: 'var(--font-serif)' }}>
-                {indexingProgress?.label ?? ''}
-                {etaLabel ? ` • ${etaLabel}` : ''}
-              </span>
-            </>
-          )}
-          {indexingDetail && (
-            <span style={{
-              fontSize: 10,
-              color: 'rgba(255,255,255,0.38)',
-              fontFamily: 'var(--font-serif)',
-              lineHeight: 1.5,
-              maxWidth: 240,
-            }}>
-              {indexingDetail}
-            </span>
-          )}
+        <div style={{ width: '100%', maxWidth: 290, marginTop: 10 }}>
+          <ProgressStatusCard
+            title={getIndexingStageTitle(indexingProgress, indexingReason)}
+            progress={indexingProgress}
+            detail={indexingDetail}
+          />
         </div>
       )}
     </div>
@@ -1661,6 +1724,7 @@ export default function ChatSidebar() {
     : null;
   const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
   const canSendDespiteIndexing = pendingVisualQuery;
+  const composerDisabled = isChatLoading || reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing);
 
   useEffect(() => {
     if (agentContextReady) {
@@ -1750,6 +1814,13 @@ export default function ChatSidebar() {
               ? <UserMessage key={msg.id} msg={msg} />
               : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
             )}
+            {!isChatLoading && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
+              <ProgressStatusCard
+                title={getIndexingStageTitle(indexingProgress, agentNotReadyReason)}
+                progress={indexingProgress}
+                detail="Deep indexing can take a while on longer videos."
+              />
+            )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>
         )}
@@ -1766,10 +1837,11 @@ export default function ChatSidebar() {
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 6,
           background: 'var(--bg-elevated)',
-          border: '1px solid var(--border-mid)',
+          border: `1px solid ${composerDisabled ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
           borderRadius: 8,
           padding: '9px 11px 7px',
-          transition: 'border-color 0.15s',
+          transition: 'border-color 0.2s ease, opacity 0.2s ease',
+          opacity: composerDisabled ? 0.82 : 1,
         }}>
           {selectedClipContext && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -1808,28 +1880,6 @@ export default function ChatSidebar() {
               Finish the active edit review before sending another request.
             </p>
           )}
-          {!reviewLocked && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
-                {agentNotReadyReason ?? 'Finishing indexing…'}
-                {formatEtaLabel(indexingProgress?.etaSeconds) ? ` • ${formatEtaLabel(indexingProgress?.etaSeconds)}` : ''}
-              </p>
-              <div style={{
-                width: '100%',
-                height: 5,
-                borderRadius: 999,
-                background: 'rgba(255,255,255,0.06)',
-                overflow: 'hidden',
-              }}>
-                <div style={{
-                  width: `${Math.max((((indexingProgress?.completed ?? 0) / Math.max(indexingProgress?.total ?? 1, 1)) * 100), 6)}%`,
-                  height: '100%',
-                  background: 'linear-gradient(90deg, rgba(33,212,255,0.5), rgba(33,212,255,0.95))',
-                  transition: 'width 0.2s ease',
-                }} />
-              </div>
-            </div>
-          )}
           <textarea
             ref={textareaRef}
             value={input}
@@ -1838,17 +1888,19 @@ export default function ChatSidebar() {
             placeholder={
               reviewLocked
                 ? 'Complete the active review…'
-                : hasVideoSource && !agentContextReady && !canSendDespiteIndexing
-                  ? (indexingProgress?.label ?? agentNotReadyReason ?? 'Finishing indexing…')
+                : isChatLoading
+                  ? 'Autocut is working…'
+                  : hasVideoSource && !agentContextReady && !canSendDespiteIndexing
+                    ? 'Autocut is preparing the media…'
                   : 'Split, speed, filter, caption…'
             }
             rows={1}
-            disabled={reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing)}
+            disabled={composerDisabled}
             style={{
               resize: 'none',
               background: 'transparent',
               border: 'none',
-              color: reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing) ? 'var(--fg-muted)' : 'var(--fg-primary)',
+              color: composerDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
@@ -1869,17 +1921,7 @@ export default function ChatSidebar() {
                     </span>
                   );
                 }
-                return (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }}>
-                      <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,0.1)" strokeWidth="2.5"/>
-                      <path d="M12 2a10 10 0 0 1 10 10" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" strokeLinecap="round"/>
-                    </svg>
-                    <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'rgba(255,255,255,0.2)' }}>
-                      Indexing…
-                    </span>
-                  </div>
-                );
+                return <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'rgba(255,255,255,0.2)' }}>Composer locked</span>;
               }
               return (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -1933,19 +1975,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing) || reviewLocked}
+                disabled={!input.trim() || composerDisabled}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: input.trim() && !composerDisabled ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? 'pointer' : 'default',
+                  cursor: input.trim() && !composerDisabled ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !composerDisabled ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !composerDisabled ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>
