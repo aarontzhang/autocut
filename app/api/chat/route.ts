@@ -251,6 +251,50 @@ function isVisualSearchSession(value: unknown): value is VisualSearchSession {
     && Array.isArray(session.candidates);
 }
 
+function isAffirmativeVisualFollowUp(message: string): boolean {
+  const normalized = message
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s']/g, ' ')
+    .replace(/\s+/g, ' ');
+
+  if (!normalized) return false;
+
+  const exactMatches = new Set([
+    'yes',
+    'yep',
+    'yeah',
+    'correct',
+    'looks right',
+    'looks good',
+    'seems right',
+    'seems correct',
+    'thats right',
+    'that is right',
+    'thats correct',
+    'that is correct',
+    'apply it',
+    'do it',
+    'go ahead',
+    'cut it',
+    'remove it',
+  ]);
+
+  if (exactMatches.has(normalized)) return true;
+
+  return [
+    /\bapply\b/,
+    /\bgo ahead\b/,
+    /\blooks (right|good)\b/,
+    /\bseems (right|correct)\b/,
+    /\bthat's (right|correct)\b/,
+    /\bthat is (right|correct)\b/,
+    /\byes\b/,
+    /\bcut (it|that)\b/,
+    /\bremove (it|that)\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function tokenizeForRetrieval(text: string): string[] {
   return text
     .toLowerCase()
@@ -578,6 +622,29 @@ Honor these defaults unless the user explicitly asks for something different in 
     const priorVisualSearch = isVisualSearchSession(context?.visualSearchSession)
       ? context.visualSearchSession
       : null;
+
+    if (
+      priorVisualSearch
+      && context?.projectId
+      && priorVisualSearch.projectId === context.projectId
+      && isAffirmativeVisualFollowUp(latestUserMessage)
+      && priorVisualSearch.proposal?.intent.actionType === 'delete'
+      && priorVisualSearch.proposal.timelineRanges.length > 0
+    ) {
+      const action = makeDeleteRangesAction(priorVisualSearch.proposal);
+      const visualSearch: VisualSearchSession = {
+        ...priorVisualSearch,
+        confidenceBand: 'high',
+        followUpPrompt: undefined,
+        updatedAt: Date.now(),
+      };
+
+      return NextResponse.json({
+        message: action?.message ?? 'Applied the confirmed visual cut.',
+        action: action ?? { type: 'none', message: 'I could not apply the confirmed visual cut.' },
+        visualSearch,
+      });
+    }
 
     if (context?.projectId && typeof context.projectId === 'string' && isLikelyVisualQuery(latestUserMessage)) {
       const supabase = await getSupabaseServer();
