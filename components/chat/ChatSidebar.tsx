@@ -282,6 +282,47 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
   }
 }
 
+function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
+  return action?.type === 'add_marker'
+    || action?.type === 'add_markers'
+    || action?.type === 'update_marker'
+    || action?.type === 'remove_marker';
+}
+
+function getMarkerActionResult(action: EditAction): string {
+  if (action.type === 'add_marker') return 'Marker added.';
+  if (action.type === 'add_markers') {
+    const count = action.markers?.length ?? 0;
+    return `${count} marker${count === 1 ? '' : 's'} added.`;
+  }
+  if (action.type === 'update_marker') return 'Marker updated.';
+  if (action.type === 'remove_marker') return 'Marker removed.';
+  return 'Marker updated.';
+}
+
+function getMarkerActionSeekTime(
+  action: EditAction,
+  existingMarkers: MarkerEntry[],
+): number | null {
+  if (action.type === 'add_marker') {
+    return typeof action.marker?.timelineTime === 'number' ? action.marker.timelineTime : null;
+  }
+  if (action.type === 'add_markers') {
+    const firstMarker = action.markers?.find((marker) => typeof marker.timelineTime === 'number');
+    return typeof firstMarker?.timelineTime === 'number' ? firstMarker.timelineTime : null;
+  }
+  if (action.type === 'update_marker') {
+    if (typeof action.marker?.timelineTime === 'number') return action.marker.timelineTime;
+    if (!action.markerId) return null;
+    return existingMarkers.find((marker) => marker.id === action.markerId)?.timelineTime ?? null;
+  }
+  if (action.type === 'remove_marker') {
+    if (!action.markerId) return null;
+    return existingMarkers.find((marker) => marker.id === action.markerId)?.timelineTime ?? null;
+  }
+  return null;
+}
+
 function getDenseRequestTooBroadMessage(startTime: number, endTime: number): string {
   return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
 }
@@ -1408,6 +1449,8 @@ export default function ChatSidebar() {
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
+  const applyStoredAction = useEditorStore(s => s.applyAction);
+  const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
@@ -1670,8 +1713,10 @@ export default function ChatSidebar() {
         },
       }, ctrl);
       setVisualSearchSession(visualSearch ?? null);
-      upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
-      const markerAction = action?.type === 'add_marker' || action?.type === 'add_markers' || action?.type === 'update_marker' || action?.type === 'remove_marker';
+      const markerAction = isMarkerMutationAction(action);
+      if (!markerAction) {
+        upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
+      }
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
@@ -1711,11 +1756,29 @@ export default function ChatSidebar() {
         continue;
       }
 
+      const markerActionPreviouslyApplied = markerAction && action
+        ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
+        : false;
+
+      if (markerAction && action && !markerActionPreviouslyApplied) {
+        applyStoredAction(action);
+        recordAppliedAction(action, action.message);
+        const markerSeekTime = getMarkerActionSeekTime(action, freshState.markers);
+        if (markerSeekTime !== null) requestSeek(markerSeekTime);
+      }
+
       addMessage({
         role: 'assistant',
         content: assistantMessage,
-        action: markerAction ? undefined : action ?? undefined,
+        action: action ?? undefined,
         visualSearch: visualSearch ?? undefined,
+        autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
+        actionStatus: markerAction ? 'completed' : undefined,
+        actionResult: markerAction && action
+          ? markerActionPreviouslyApplied
+            ? 'Already applied.'
+            : getMarkerActionResult(action)
+          : undefined,
       });
       producedVisibleResponse = true;
       return;
@@ -1727,7 +1790,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext, selectedMarkerContext, setVisualSearchSession]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
