@@ -3,6 +3,12 @@ import { AnalysisJob, AnalysisJobStatus, AnalysisJobType, MediaAsset } from './t
 
 type JsonMap = Record<string, unknown>;
 
+function isMissingRelationError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code) : '';
+  const message = typeof error === 'object' && error !== null && 'message' in error ? String((error as { message?: unknown }).message) : '';
+  return code === '42P01' || /relation .* does not exist/i.test(message);
+}
+
 function mapJob(row: Record<string, unknown>): AnalysisJob {
   return {
     id: String(row.id),
@@ -82,7 +88,10 @@ export async function getPrimaryMediaAsset(
     .limit(1)
     .maybeSingle();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  }
   return data ? mapAsset(data) : null;
 }
 
@@ -125,6 +134,40 @@ export async function getAnalysisJob(
     .eq('id', jobId)
     .maybeSingle();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  }
   return data ? mapJob(data) : null;
+}
+
+export async function ensurePrimaryMediaAssetIfSupported(
+  supabase: SupabaseClient,
+  projectId: string,
+  storagePath: string,
+): Promise<MediaAsset | null> {
+  try {
+    return await ensurePrimaryMediaAsset(supabase, projectId, storagePath);
+  } catch (error) {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  }
+}
+
+export async function enqueueAnalysisJobIfSupported(
+  supabase: SupabaseClient,
+  input: {
+    projectId: string;
+    assetId?: string | null;
+    jobType: AnalysisJobType;
+    priority?: number;
+    payload?: JsonMap;
+  },
+): Promise<AnalysisJob | null> {
+  try {
+    return await enqueueAnalysisJob(supabase, input);
+  } catch (error) {
+    if (isMissingRelationError(error)) return null;
+    throw error;
+  }
 }

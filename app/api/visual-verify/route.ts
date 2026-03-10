@@ -10,6 +10,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
   const assetId = typeof body?.assetId === 'string' ? body.assetId : '';
+  const query = typeof body?.query === 'string' ? body.query : '';
   const candidateIds = Array.isArray(body?.candidateIds)
     ? body.candidateIds.filter((value: unknown): value is string => typeof value === 'string')
     : [];
@@ -40,6 +41,7 @@ export async function POST(req: NextRequest) {
     payload: {
       candidateIds,
       candidateWindows,
+      query,
     },
   });
 

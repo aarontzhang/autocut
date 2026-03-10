@@ -1,5 +1,9 @@
+import dotenv from 'dotenv';
 import process from 'node:process';
 import { createClient } from '@supabase/supabase-js';
+import { indexAssetFromStorage, verifyCandidatesAgainstQuery } from '../lib/server/visionIndexing.mjs';
+
+dotenv.config({ path: '.env.local' });
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -60,36 +64,39 @@ async function markAsset(assetId, patch) {
   if (error) throw error;
 }
 
+async function getAsset(assetId) {
+  const { data, error } = await supabase.from('media_assets').select('*').eq('id', assetId).single();
+  if (error || !data) throw error ?? new Error(`Asset ${assetId} not found`);
+  return {
+    id: String(data.id),
+    projectId: String(data.project_id),
+    storagePath: String(data.storage_path),
+    sourceDuration: data.duration_seconds == null ? null : Number(data.duration_seconds),
+    fps: data.fps == null ? null : Number(data.fps),
+    width: data.width == null ? null : Number(data.width),
+    height: data.height == null ? null : Number(data.height),
+    status: String(data.status),
+    createdAt: String(data.created_at),
+    indexedAt: data.indexed_at ? String(data.indexed_at) : null,
+  };
+}
+
 async function runIndexAsset(job) {
   const assetId = job.asset_id;
   if (!assetId) throw new Error('index_asset job missing asset_id');
 
   await markAsset(assetId, { status: 'indexing' });
   await updateJob(job.id, { progress: { completed: 1, total: 4, stage: 'metadata' } });
-
-  const payload = job.payload ?? {};
-  const duration = Number(payload.sourceDuration ?? 0);
-  const fps = Number(payload.fps ?? 30);
-
-  await markAsset(assetId, {
-    duration_seconds: Number.isFinite(duration) && duration > 0 ? duration : null,
-    fps: Number.isFinite(fps) && fps > 0 ? fps : 30,
-    width: Number(payload.width ?? 1920),
-    height: Number(payload.height ?? 1080),
-  });
-
-  await updateJob(job.id, { progress: { completed: 2, total: 4, stage: 'scenes' } });
-  await updateJob(job.id, { progress: { completed: 3, total: 4, stage: 'samples' } });
-
-  await markAsset(assetId, {
-    status: 'ready',
-    indexed_at: new Date().toISOString(),
-  });
+  const asset = await getAsset(assetId);
+  await updateJob(job.id, { progress: { completed: 2, total: 4, stage: 'extracting_samples' } });
+  const result = await indexAssetFromStorage(supabase, asset);
+  await updateJob(job.id, { progress: { completed: 3, total: 4, stage: 'persisted_index' } });
 
   await updateJob(job.id, {
     status: 'completed',
     result: {
-      summary: 'Asset indexing job completed. Worker skeleton populated metadata and marked asset ready.',
+      summary: 'Asset indexing job completed.',
+      ...result,
     },
     progress: { completed: 4, total: 4, stage: 'done' },
     locked_at: null,
@@ -98,22 +105,12 @@ async function runIndexAsset(job) {
 }
 
 async function runVerifyCandidates(job) {
+  const assetId = job.asset_id;
+  if (!assetId) throw new Error('verify_visual_candidates job missing asset_id');
+  const asset = await getAsset(assetId);
   const windows = Array.isArray(job.payload?.candidateWindows) ? job.payload.candidateWindows : [];
-  const verifiedRanges = windows.slice(0, 3).map((window, index) => {
-    const sourceStart = Number(window.sourceStart ?? 0);
-    const sourceEnd = Number(window.sourceEnd ?? sourceStart + 0.75);
-    return {
-      candidateId: window.id ?? `window-${index}`,
-      assetId: job.asset_id,
-      sourceStart,
-      sourceEnd,
-      frameStart: Math.round(sourceStart * 30),
-      frameEnd: Math.round(sourceEnd * 30),
-      verificationConfidence: 0.72,
-      boundaryConfidence: 0.7,
-      evidence: ['Worker verification placeholder'],
-    };
-  });
+  const query = typeof job.payload?.query === 'string' ? job.payload.query : '';
+  const verifiedRanges = await verifyCandidatesAgainstQuery(supabase, asset, query, windows);
 
   await updateJob(job.id, {
     status: 'completed',

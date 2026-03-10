@@ -18,6 +18,7 @@ import {
   projectVerifiedRangesToProposal,
   retrieveVisualCandidates,
 } from '@/lib/visualRetrieval';
+import { verifyCandidatesAgainstQuery } from '@/lib/server/visionIndexing.mjs';
 
 const client = new Anthropic();
 
@@ -505,80 +506,101 @@ Honor these defaults unless the user explicitly asks for something different in 
       if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
       if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
 
-      const asset = await getPrimaryMediaAsset(supabase, context.projectId);
+      let asset = null;
       const intent = parseVisualQuery(latestUserMessage);
+      try {
+        asset = await getPrimaryMediaAsset(supabase, context.projectId);
+      } catch (error) {
+        console.error('[chat.visual] failed to load primary media asset, falling back to legacy flow', error);
+        asset = null;
+      }
 
       if (!asset) {
+        // Fall back to the existing transcript/frame-summary workflow when
+        // the new source-index tables are not available yet.
+      } else {
+        let candidates;
+        try {
+          candidates = await retrieveVisualCandidates(supabase, asset, intent, 5);
+        } catch (error) {
+          console.error('[chat.visual] failed to retrieve visual candidates, falling back to legacy flow', error);
+          candidates = null;
+        }
+        if (!candidates) {
+          // Fall back to the existing transcript/frame-summary workflow when
+          // the visual sample table is not available yet.
+        } else {
+        let confidenceBand = confidenceBandForCandidates(candidates);
+        let proposal = null;
+        let action: EditAction | null = { type: 'none', message: 'No timeline edit was applied.' };
+        let followUpPrompt: string | undefined;
+        let verifiedRanges: VerifiedSourceRange[] = [];
+
+        if (candidates.length > 0) {
+          try {
+            verifiedRanges = await verifyCandidatesAgainstQuery(supabase, asset, latestUserMessage, candidates);
+          } catch (error) {
+            console.error('[chat.visual] candidate verification failed', error);
+          }
+        }
+
+        if (verifiedRanges.length > 0) {
+          proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges);
+          confidenceBand = proposal.confidenceBand;
+        }
+
+        if (!proposal && confidenceBand === 'high' && candidates[0]) {
+          const seed = candidates[0];
+          verifiedRanges = [{
+            assetId: asset.id,
+            sourceStart: seed.sourceStart,
+            sourceEnd: seed.sourceEnd,
+            frameStart: Math.round(seed.sourceStart * (asset.fps ?? 30)),
+            frameEnd: Math.round(seed.sourceEnd * (asset.fps ?? 30)),
+            verificationConfidence: Math.max(seed.retrievalScore, intent.confidenceThreshold),
+            boundaryConfidence: 0.82,
+            evidence: seed.retrievalReasons,
+            candidateId: seed.id,
+          }];
+          proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges);
+          confidenceBand = proposal.confidenceBand;
+        }
+
+        if (proposal && proposal.confidenceBand === 'high') {
+          const deleteAction = intent.actionType === 'delete' ? makeDeleteRangesAction(proposal) : null;
+          if (deleteAction) {
+            action = {
+              ...deleteAction,
+              message: deleteAction.message,
+            };
+          } else {
+            action = { type: 'none', message: 'I found a strong source-anchored visual match.' };
+          }
+        } else {
+          followUpPrompt = confidenceBand === 'medium'
+            ? 'I found a few plausible source windows. Choose one, or give me an approximate timestamp for tighter verification.'
+            : 'I am not confident enough to cut automatically. Please give me a more specific visual description or an approximate timestamp.';
+        }
+
         const visualSearch: VisualSearchSession = {
           projectId: context.projectId,
-          assetId: null,
+          assetId: asset.id,
           query: latestUserMessage,
-          confidenceBand: 'low',
+          confidenceBand,
           intent,
-          candidates: [],
-          proposal: null,
-          followUpPrompt: 'This project does not have a source asset index yet.',
+          candidates,
+          proposal,
+          followUpPrompt,
           updatedAt: Date.now(),
         };
+
         return NextResponse.json({
-          message: visualSearch.followUpPrompt,
-          action: { type: 'none', message: visualSearch.followUpPrompt },
+          message: formatVisualCandidateMessage(visualSearch),
+          action,
           visualSearch,
         });
-      }
-
-      const candidates = await retrieveVisualCandidates(supabase, asset, intent, 5);
-      const confidenceBand = confidenceBandForCandidates(candidates);
-      let proposal = null;
-      let action: EditAction | null = { type: 'none', message: 'No timeline edit was applied.' };
-      let followUpPrompt: string | undefined;
-
-      if (confidenceBand === 'high' && candidates[0]) {
-        const seed = candidates[0];
-        const verifiedRanges: VerifiedSourceRange[] = [{
-          assetId: asset.id,
-          sourceStart: seed.sourceStart,
-          sourceEnd: seed.sourceEnd,
-          frameStart: Math.round(seed.sourceStart * (asset.fps ?? 30)),
-          frameEnd: Math.round(seed.sourceEnd * (asset.fps ?? 30)),
-          verificationConfidence: Math.max(seed.retrievalScore, intent.confidenceThreshold),
-          boundaryConfidence: 0.82,
-          evidence: seed.retrievalReasons,
-          candidateId: seed.id,
-        }];
-        proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges);
-        const deleteAction = intent.actionType === 'delete' ? makeDeleteRangesAction(proposal) : null;
-        if (deleteAction) {
-          action = {
-            ...deleteAction,
-            message: deleteAction.message,
-          };
-        } else {
-          action = { type: 'none', message: 'I found a strong source-anchored visual match.' };
         }
-      } else {
-        followUpPrompt = confidenceBand === 'medium'
-          ? 'I found a few plausible source windows. Choose one, or give me an approximate timestamp for tighter verification.'
-          : 'I am not confident enough to cut automatically. Please give me a more specific visual description or an approximate timestamp.';
       }
-
-      const visualSearch: VisualSearchSession = {
-        projectId: context.projectId,
-        assetId: asset.id,
-        query: latestUserMessage,
-        confidenceBand,
-        intent,
-        candidates,
-        proposal,
-        followUpPrompt,
-        updatedAt: Date.now(),
-      };
-
-      return NextResponse.json({
-        message: formatVisualCandidateMessage(visualSearch),
-        action,
-        visualSearch,
-      });
     }
 
     if (clipSummaries.length > 0) {

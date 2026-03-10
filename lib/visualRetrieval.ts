@@ -10,6 +10,7 @@ import {
   VisualQueryIntent,
 } from './types';
 import { sourceRangeToTimelineRanges } from './timelineUtils';
+import { embedQueryText, scoreVisualSample } from './server/visionIndexing.mjs';
 
 type JsonMap = Record<string, unknown>;
 
@@ -97,10 +98,18 @@ export async function retrieveVisualCandidates(
   if (error) throw error;
   const queryTokens = tokenize(intent.normalizedQuery);
   const samples = ((data ?? []) as Record<string, unknown>[]).map(mapSample);
+  const queryEmbedding = await embedQueryText(intent.normalizedQuery);
 
   const scored = samples.map((sample) => {
-    let score = 0.05;
-    const reasons: string[] = [];
+    const base = scoreVisualSample({
+      ...sample,
+      ocr_text: sample.ocrText,
+      darkness_score: sample.darknessScore,
+      fog_score: sample.fogScore,
+      embedding: sample.embedding,
+    }, intent.normalizedQuery, queryEmbedding);
+    let score = base.score;
+    const reasons: string[] = [...base.reasons];
     const ocrText = normalize(sample.ocrText ?? '');
     const metadataText = normalize(JSON.stringify(sample.metadata ?? {}));
 

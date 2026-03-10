@@ -1,5 +1,5 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { enqueueAnalysisJob, ensurePrimaryMediaAsset } from '@/lib/analysisJobs';
+import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import { NextResponse } from 'next/server';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -50,10 +50,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   let indexingJobId: string | null = null;
   if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
     try {
-      const asset = await ensurePrimaryMediaAsset(supabase, id, body.video_path);
-      assetId = asset.id;
-      if (asset.status === 'pending' || asset.status === 'error') {
-        const job = await enqueueAnalysisJob(supabase, {
+      const asset = await ensurePrimaryMediaAssetIfSupported(supabase, id, body.video_path);
+      assetId = asset?.id ?? null;
+      if (asset && (asset.status === 'pending' || asset.status === 'error')) {
+        const job = await enqueueAnalysisJobIfSupported(supabase, {
           projectId: id,
           assetId: asset.id,
           jobType: 'index_asset',
@@ -62,13 +62,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
             videoFilename: body.video_filename ?? null,
           },
         });
-        indexingJobId = job.id;
+        indexingJobId = job?.id ?? null;
       }
     } catch (assetError) {
-      return NextResponse.json({
-        ok: false,
-        error: assetError instanceof Error ? assetError.message : 'Failed to create source media asset',
-      }, { status: 500 });
+      console.error('[projects.patch] failed to initialize source asset indexing', assetError);
     }
   }
   return NextResponse.json({ ok: true, assetId, indexingJobId });
