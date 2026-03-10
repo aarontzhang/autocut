@@ -20,6 +20,8 @@ const VISUAL_MOTIF_TERMS = [
   'see', 'looks', 'look', 'image',
 ];
 
+const CANDIDATE_CLUSTER_GAP_SECONDS = 0.75;
+
 function normalize(text: string): string {
   return text.trim().toLowerCase();
 }
@@ -46,6 +48,94 @@ function mapSample(row: Record<string, unknown>): AssetVisualSample {
     darknessScore: row.darkness_score == null ? null : Number(row.darkness_score),
     metadata: (row.metadata as JsonMap | null) ?? null,
   };
+}
+
+type RawCandidate = {
+  sample: AssetVisualSample;
+  score: number;
+  reasons: string[];
+  sourceStart: number;
+  sourceEnd: number;
+};
+
+function rangesShouldCluster(
+  a: { sourceStart: number; sourceEnd: number },
+  b: { sourceStart: number; sourceEnd: number },
+): boolean {
+  const overlap = Math.min(a.sourceEnd, b.sourceEnd) - Math.max(a.sourceStart, b.sourceStart);
+  if (overlap > 0) return true;
+  const gap = Math.max(a.sourceStart, b.sourceStart) - Math.min(a.sourceEnd, b.sourceEnd);
+  return gap <= CANDIDATE_CLUSTER_GAP_SECONDS;
+}
+
+function clusterRawCandidates(
+  rawCandidates: RawCandidate[],
+  assetId: string,
+  maxCandidates: number,
+): VisualCandidateWindow[] {
+  const clusters: Array<{
+    members: RawCandidate[];
+    minStart: number;
+    maxEnd: number;
+    bestScore: number;
+  }> = [];
+
+  for (const candidate of rawCandidates) {
+    const cluster = clusters.find((entry) => (
+      rangesShouldCluster(
+        { sourceStart: entry.minStart, sourceEnd: entry.maxEnd },
+        candidate,
+      )
+    ));
+    if (!cluster) {
+      clusters.push({
+        members: [candidate],
+        minStart: candidate.sourceStart,
+        maxEnd: candidate.sourceEnd,
+        bestScore: candidate.score,
+      });
+      continue;
+    }
+    cluster.members.push(candidate);
+    cluster.minStart = Math.min(cluster.minStart, candidate.sourceStart);
+    cluster.maxEnd = Math.max(cluster.maxEnd, candidate.sourceEnd);
+    cluster.bestScore = Math.max(cluster.bestScore, candidate.score);
+  }
+
+  return clusters
+    .map((cluster) => {
+      const best = cluster.members.reduce((winner, candidate) => (
+        candidate.score > winner.score ? candidate : winner
+      ));
+      const totalWeight = cluster.members.reduce((sum, candidate) => sum + Math.max(candidate.score, 0.01), 0);
+      const weightedStart = cluster.members.reduce(
+        (sum, candidate) => sum + candidate.sourceStart * Math.max(candidate.score, 0.01),
+        0,
+      ) / totalWeight;
+      const weightedEnd = cluster.members.reduce(
+        (sum, candidate) => sum + candidate.sourceEnd * Math.max(candidate.score, 0.01),
+        0,
+      ) / totalWeight;
+      return {
+        id: best.sample.id,
+        assetId,
+        sourceStart: Number(weightedStart.toFixed(3)),
+        sourceEnd: Number(weightedEnd.toFixed(3)),
+        retrievalScore: Number(cluster.bestScore.toFixed(3)),
+        retrievalReasons: [
+          ...new Set([
+            ...best.reasons,
+            ...(cluster.members.length > 1 ? [`Merged ${cluster.members.length} overlapping retrieval windows`] : []),
+          ]),
+        ],
+        thumbnailPath: best.sample.thumbnailPath,
+        ocrText: best.sample.ocrText,
+        verificationStatus: 'not_requested' as const,
+        confidenceBand: cluster.bestScore >= 0.85 ? 'high' as const : cluster.bestScore >= 0.45 ? 'medium' as const : 'low' as const,
+      };
+    })
+    .sort((a, b) => b.retrievalScore - a.retrievalScore || a.sourceStart - b.sourceStart)
+    .slice(0, Math.max(1, maxCandidates));
 }
 
 export function isLikelyVisualQuery(query: string): boolean {
@@ -100,7 +190,7 @@ export async function retrieveVisualCandidates(
   const samples = ((data ?? []) as Record<string, unknown>[]).map(mapSample);
   const queryEmbedding = await embedQueryText(intent.normalizedQuery);
 
-  const scored = samples.map((sample) => {
+  const scored: RawCandidate[] = samples.map((sample) => {
     const base = scoreVisualSample({
       ...sample,
       ocr_text: sample.ocrText,
@@ -141,24 +231,20 @@ export async function retrieveVisualCandidates(
       reasons.push('Contrast heuristic matched');
     }
 
-    return { sample, score, reasons };
-  });
-
-  return scored
-    .sort((a, b) => b.score - a.score || a.sample.sourceTime - b.sample.sourceTime)
-    .slice(0, Math.max(1, maxCandidates))
-    .map(({ sample, score, reasons }) => ({
-      id: sample.id,
-      assetId: asset.id,
+    return {
+      sample,
+      score,
+      reasons,
       sourceStart: Math.max(0, sample.sourceTime - 0.5),
       sourceEnd: sample.sourceTime + Math.max(sample.windowDuration, intent.expectedDurationSeconds) + 0.5,
-      retrievalScore: Number(score.toFixed(3)),
-      retrievalReasons: reasons.length > 0 ? reasons : ['Fallback visual retrieval score'],
-      thumbnailPath: sample.thumbnailPath,
-      ocrText: sample.ocrText,
-      verificationStatus: 'not_requested',
-      confidenceBand: score >= 0.85 ? 'high' : score >= 0.45 ? 'medium' : 'low',
-    }));
+    };
+  });
+
+  const rawCandidates = scored
+    .sort((a, b) => b.score - a.score || a.sample.sourceTime - b.sample.sourceTime)
+    .slice(0, Math.max(8, maxCandidates * 4));
+
+  return clusterRawCandidates(rawCandidates, asset.id, maxCandidates);
 }
 
 export function confidenceBandForCandidates(candidates: VisualCandidateWindow[]): VisualConfidenceBand {
