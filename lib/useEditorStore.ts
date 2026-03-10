@@ -14,6 +14,7 @@ import {
   TrackClip,
   IndexedVideoFrame,
   AIEditingSettings,
+  AppliedActionRecord,
 } from './types';
 import {
   actionChangesTimelineStructure,
@@ -130,6 +131,7 @@ interface EditorState {
   messages: ChatMessage[];
   isChatLoading: boolean;
   aiSettings: AIEditingSettings;
+  appliedActions: AppliedActionRecord[];
 
   // FFmpeg
   ffmpegJob: FFmpegJob;
@@ -184,12 +186,13 @@ interface EditorState {
   setIsChatLoading: (v: boolean) => void;
   clearMessages: () => void;
   setAISettings: (settings: Partial<AIEditingSettings>) => void;
+  recordAppliedAction: (action: EditAction, summary: string) => void;
 
   // FFmpeg
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; aiSettings?: unknown }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -254,6 +257,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   messages: [],
   isChatLoading: false,
   aiSettings: DEFAULT_AI_EDITING_SETTINGS,
+  appliedActions: [],
   ffmpegJob: { status: 'idle' },
   currentProjectId: null,
   storagePath: null,
@@ -286,6 +290,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
+      appliedActions: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
@@ -559,6 +564,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   clearMessages: () => set(s => ({
     messages: [],
+    appliedActions: [],
     pendingAction: null,
     clips: s.videoDuration > 0 ? [makeClip(0, s.videoDuration)] : [],
     captions: [],
@@ -574,6 +580,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     aiSettings: mergeAISettings(state.aiSettings, settings),
   })),
 
+  recordAppliedAction: (action, summary) => set(state => ({
+    appliedActions: [
+      ...state.appliedActions.slice(-24),
+      { id: uuidv4(), timestamp: Date.now(), action, summary },
+    ],
+  })),
+
   // ── FFmpeg ──────────────────────────────────────────────────────────────────
 
   setFFmpegJob: (job) => set({ ffmpegJob: job }),
@@ -586,6 +599,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
+      appliedActions: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
@@ -604,6 +618,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       previewSnapshot: null, previewOwnerId: null,
       extraTracks: (editState.extraTracks as MediaTrack[] | undefined) ?? [],
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
+      appliedActions: (editState.appliedActions as AppliedActionRecord[] | undefined) ?? [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
@@ -633,6 +648,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       previewSnapshot: null, previewOwnerId: null,
       messages: [], isChatLoading: false,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
+      appliedActions: [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,

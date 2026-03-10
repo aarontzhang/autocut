@@ -28,6 +28,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 ### 2b. Delete Range (delete_range)
 - Remove everything between two timeline times, automatically trimming or removing any clips in that region
 - Use when user says: "delete between X and Y", "remove from 0:20 to 0:30", "cut out the section from X to Y", etc.
+- After any structural edit, earlier chat messages may refer to pre-edit timeline times. Use the clip source ranges and applied-action history in context to translate those old references onto the current timeline instead of reusing stale timestamps.
 
 ### 2d. Delete Multiple Ranges (delete_ranges) — USE THIS for silence removal
 - Remove ALL non-speaking / silent sections in one single action
@@ -165,6 +166,7 @@ No action:
 - ALWAYS express times in M:SS format in your messages (e.g., "4:03", "1:20") — never use plain seconds like "243 seconds" or "80s"
 - Never use markdown formatting (no **bold**, no *italic*, no bullet points). Plain text only.
 - If context says "Selected clip: Clip N (index I)", and the user says "this clip", "it", "the selected clip" — use clipIndex I for the operation.
+- Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
 - You are a single-action editor per request. Complete ONE operation unless the user explicitly asked for multiple distinct edits in one message. After executing any edit, return type:none immediately unless more work is clearly required by the original request.
 
 ## Visual and audio context
@@ -242,7 +244,7 @@ Honor these defaults unless the user explicitly asks for something different in 
         const dur = c.sourceDuration / (c.speed ?? 1);
         const start = cursor;
         cursor += dur;
-        return `clip ${c.index} [${fmtSec(start)}–${fmtSec(cursor)}]`;
+        return `clip ${c.index} timeline [${fmtSec(start)}–${fmtSec(cursor)}] from source [${fmtSec(c.sourceStart)}–${fmtSec(c.sourceStart + c.sourceDuration)}] at ${(c.speed ?? 1).toFixed(2)}x`;
       });
       contextLines.push(`Timeline: ${summaries.join(' | ')}`);
     }
@@ -264,6 +266,17 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Caption defaults: ${settings.captions.wordsPerCaption} words per caption\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
+    );
+    if (context?.appliedActions && Array.isArray(context.appliedActions) && context.appliedActions.length > 0) {
+      const recentActions = (context.appliedActions as Array<{ summary?: string; timestamp?: number; action?: { type?: string } }>).slice(-8);
+      contextLines.push(
+        `\nRecently applied edits (most recent last):\n` +
+        recentActions.map((entry, index) => `${index + 1}. ${entry.summary ?? entry.action?.type ?? 'edit'}`).join('\n')
+      );
+    }
+    contextLines.push(
+      `\nTime-mapping rule:\n` +
+      `Use source ranges as the stable identity for moments discussed earlier in the chat. If an earlier message referred to a moment before cuts were made, first find that moment in source time, then convert it to the current timeline using the clip mapping above.`
     );
     const contextText = contextLines.join('\n');
 

@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useRef, useState, useEffect } from 'react';
 import type { Project } from '@/app/projects/page';
 
@@ -23,7 +24,9 @@ function formatSize(bytes: number | null) {
 }
 
 function VideoThumbnail({ src }: { src: string | null }) {
-  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [thumbnail, setThumbnail] = useState<{ src: string; dataUrl: string } | null>(null);
+  const [videoReadySrc, setVideoReadySrc] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     if (!src) return;
@@ -32,7 +35,8 @@ function VideoThumbnail({ src }: { src: string | null }) {
     const video = document.createElement('video');
     video.crossOrigin = 'anonymous';
     video.muted = true;
-    video.preload = 'metadata';
+    video.preload = 'auto';
+    video.playsInline = true;
 
     const onSeeked = () => {
       if (cancelled) return;
@@ -43,25 +47,75 @@ function VideoThumbnail({ src }: { src: string | null }) {
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(video, 0, 0, 480, 270);
         const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
-        setImgSrc(dataUrl);
+        setThumbnail({ src, dataUrl });
       } catch {
-        // CORS tainted canvas — leave imgSrc null, fallback renders below
+        // CORS-tainted canvases can't export, so the inline video fallback
+        // below seeks to the first frame and renders that directly.
       }
       video.src = '';
     };
 
-    video.addEventListener('loadedmetadata', () => {
+    const onLoadedMetadata = () => {
       // Seek to first real frame (slightly past 0 for black-frame safety)
       video.currentTime = 0.001;
-    });
+    };
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
     video.addEventListener('seeked', onSeeked, { once: true });
     video.src = src;
 
     return () => {
       cancelled = true;
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
       video.src = '';
     };
   }, [src]);
+
+  useEffect(() => {
+    if (!src || thumbnail?.src === src) return;
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    let cancelled = false;
+
+    const seekToFirstFrame = () => {
+      if (cancelled) return;
+      try {
+        video.currentTime = 0.001;
+      } catch {
+        setVideoReadySrc(src);
+      }
+    };
+
+    const onSeeked = () => {
+      if (cancelled) return;
+      video.pause();
+      setVideoReadySrc(src);
+    };
+
+    const onLoadedData = () => {
+      if (cancelled) return;
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        seekToFirstFrame();
+      }
+    };
+
+    video.addEventListener('loadeddata', onLoadedData);
+    video.addEventListener('seeked', onSeeked);
+
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      seekToFirstFrame();
+    } else {
+      video.load();
+    }
+
+    return () => {
+      cancelled = true;
+      video.removeEventListener('loadeddata', onLoadedData);
+      video.removeEventListener('seeked', onSeeked);
+    };
+  }, [src, thumbnail]);
 
   if (!src) {
     return (
@@ -77,18 +131,35 @@ function VideoThumbnail({ src }: { src: string | null }) {
     );
   }
 
-  if (imgSrc) {
-    return <img src={imgSrc} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} alt="" />;
+  if (thumbnail?.src === src) {
+    return (
+      <Image
+        src={thumbnail.dataUrl}
+        alt=""
+        fill
+        unoptimized
+        sizes="(max-width: 768px) 100vw, 320px"
+        style={{ objectFit: 'cover' }}
+      />
+    );
   }
 
   // CORS fallback: render video element directly — browser shows first frame
   return (
     <video
+      ref={videoRef}
       src={src}
-      preload="metadata"
+      preload="auto"
       muted
       playsInline
-      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+      style={{
+        width: '100%',
+        height: '100%',
+        objectFit: 'cover',
+        display: 'block',
+        opacity: videoReadySrc === src ? 1 : 0,
+        transition: 'opacity 0.12s ease',
+      }}
     />
   );
 }

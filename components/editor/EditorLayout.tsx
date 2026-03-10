@@ -14,12 +14,6 @@ import { useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
 
-function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sourceUrl'> {
-  const copy = { ...item };
-  delete copy.sourceUrl;
-  return copy;
-}
-
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
@@ -182,6 +176,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         const data = await res.json();
         const editState = structuredClone(data.edit_state ?? {});
         const videoUrl = data.signedUrl ?? '';
+        loadProject(editState, videoUrl, data.video_path ?? null, projectId);
+        setIsProjectLoading(false);
+
         const clipPaths = (editState.clips ?? [])
           .map((clip: { sourcePath?: string }) => clip.sourcePath)
           .filter(Boolean);
@@ -189,30 +186,30 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           (track.clips ?? []).map(clip => clip.sourcePath).filter(Boolean)
         );
         const allAssetPaths = [...clipPaths, ...extraTrackPaths] as string[];
-        const signedPaths = allAssetPaths.length > 0 ? await createSignedUrls(allAssetPaths) : new Map<string, string>();
-
-        if (editState.clips?.length) {
-          editState.clips = editState.clips.map((clip: { sourcePath?: string; sourceUrl?: string }) => {
-            const rest = stripSourceUrl(clip);
-            return clip.sourcePath && signedPaths.has(clip.sourcePath)
-              ? { ...rest, sourceUrl: signedPaths.get(clip.sourcePath) }
-              : rest;
-          });
+        if (allAssetPaths.length > 0) {
+          const signedPaths = await createSignedUrls(allAssetPaths);
+          if (signedPaths.size > 0 && useEditorStore.getState().currentProjectId === projectId) {
+            useEditorStore.setState((state) => ({
+              clips: Array.isArray(state.clips)
+                ? state.clips.map((clip) => (
+                  clip.sourcePath && signedPaths.has(clip.sourcePath)
+                    ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+                    : clip
+                ))
+                : state.clips,
+              extraTracks: Array.isArray(state.extraTracks)
+                ? state.extraTracks.map((track) => ({
+                  ...track,
+                  clips: (track.clips ?? []).map((clip) => (
+                    clip.sourcePath && signedPaths.has(clip.sourcePath)
+                      ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+                      : clip
+                  )),
+                }))
+                : state.extraTracks,
+            }));
+          }
         }
-
-        if (editState.extraTracks?.length) {
-          editState.extraTracks = editState.extraTracks.map((track: { clips?: Array<{ sourcePath?: string; sourceUrl?: string }> }) => ({
-            ...track,
-            clips: (track.clips ?? []).map((clip: { sourcePath?: string; sourceUrl?: string }) => {
-              const rest = stripSourceUrl(clip);
-              return clip.sourcePath && signedPaths.has(clip.sourcePath)
-                ? { ...rest, sourceUrl: signedPaths.get(clip.sourcePath) }
-                : rest;
-            }),
-          }));
-        }
-
-        loadProject(editState, videoUrl, data.video_path ?? null, projectId);
       } catch (e) {
         console.error('Failed to load project', e);
       } finally {

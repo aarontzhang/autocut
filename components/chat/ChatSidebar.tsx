@@ -330,6 +330,7 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
   const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
   const applyStoredAction = useEditorStore(s => s.applyAction);
+  const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
@@ -354,12 +355,15 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   const finishReview = useCallback((draft: EditSnapshot, accepted: number, skipped: number) => {
     clearPreviewSnapshot(msg.id);
     if (accepted > 0) commitPreviewSnapshot(draft);
+    if (accepted > 0 && action) {
+      recordAppliedAction(action, action.message);
+    }
     setReviewDraft(null);
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
     setSkippedSteps(skipped);
     setReviewResult(accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.');
-  }, [clearPreviewSnapshot, commitPreviewSnapshot, msg.id, reviewSteps.length]);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length]);
 
   const startReview = useCallback(() => {
     if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
@@ -462,8 +466,9 @@ function AssistantMessage({ msg }: { msg: ChatMessageType }) {
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
     applyStoredAction(action);
+    recordAppliedAction(action, action.message);
     setReviewResult('AI settings updated.');
-  }, [action, applyStoredAction]);
+  }, [action, applyStoredAction, recordAppliedAction]);
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -754,9 +759,11 @@ export default function ChatSidebar() {
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const aiSettings = useEditorStore(s => s.aiSettings);
+  const appliedActions = useEditorStore(s => s.appliedActions);
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
+  const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
 
@@ -843,6 +850,7 @@ export default function ChatSidebar() {
               selectedClip: selectedClipContext,
               transcript: backgroundTranscript,
               settings: aiSettings,
+              appliedActions,
               frames: currentFrames,
             },
           }),
@@ -890,7 +898,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [aiSettings, input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoData, videoFile, videoUrl, ensureFramesExtracted]);
+  }, [aiSettings, appliedActions, input, isChatLoading, reviewLocked, messages, videoDuration, clips, selectedClipContext, addMessage, setIsChatLoading, backgroundTranscript, videoData, videoFile, videoUrl, ensureFramesExtracted]);
 
   const handleAgentSend = useCallback(async (text: string) => {
     if (!text || isChatLoading || reviewLocked) return;
@@ -946,6 +954,7 @@ export default function ChatSidebar() {
               selectedClip: selectedClipContext,
               transcript: currentTranscript,
               settings: freshState.aiSettings,
+              appliedActions: freshState.appliedActions,
               frames: currentFrames,
             },
           }),
@@ -1024,6 +1033,7 @@ export default function ChatSidebar() {
           if (madeStructuralEdit) break;
           madeStructuralEdit = true;
           applyAction(action);
+          recordAppliedAction(action, action.message);
           // Re-extract frames in background if structural edit made them stale
           if (!useEditorStore.getState().videoFramesFresh && (videoFile || videoUrl || videoData)) {
             currentFrames = await ensureFramesExtracted(true);
@@ -1046,11 +1056,24 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFramesExtracted]);
+  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFramesExtracted]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
-    abortRef.current?.abort();
+    const ctrl = abortRef.current;
+    abortRef.current = null;
+    if (ctrl) {
+      try {
+        ctrl.abort(new DOMException('User stopped the current request', 'AbortError'));
+      } catch {
+        // Some runtimes reject custom abort reasons; fall back to a plain abort.
+        try {
+          ctrl.abort();
+        } catch {
+          // Ignore stop failures and just reset local loading state.
+        }
+      }
+    }
     setIsChatLoading(false);
     setLoadingStatus('');
   }, [setIsChatLoading]);

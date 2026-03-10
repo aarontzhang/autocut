@@ -82,6 +82,13 @@ export interface ChatMessage {
   autoApplied?: boolean;
 }
 
+export interface AppliedActionRecord {
+  id: string;
+  timestamp: number;
+  action: EditAction;
+  summary: string;
+}
+
 export interface IndexedVideoFrame {
   image: string;
   timelineTime: number;

@@ -16,6 +16,7 @@ export function useAutoSave() {
   const textOverlays = useEditorStore(s => s.textOverlays);
   const extraTracks = useEditorStore(s => s.extraTracks);
   const messages = useEditorStore(s => s.messages);
+  const appliedActions = useEditorStore(s => s.appliedActions);
   const aiSettings = useEditorStore(s => s.aiSettings);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
@@ -42,6 +43,7 @@ export function useAutoSave() {
           transitions: state.transitions,
           textOverlays: state.textOverlays,
           messages: state.messages,
+          appliedActions: state.appliedActions,
           aiSettings: state.aiSettings,
           extraTracks: state.extraTracks.map(track => ({
             ...track,
@@ -66,5 +68,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, textOverlays, extraTracks, messages, aiSettings, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, currentProjectId, setSaveStatus]);
 }
