@@ -48,6 +48,12 @@ function findActiveTrackClip(clips: TrackClip[], timelineTime: number): TrackCli
   }) ?? null;
 }
 
+function findTimelineEntryAtTime(schedule: ReturnType<typeof buildClipSchedule>, timelineTime: number) {
+  let targetEntry = schedule.find(entry => timelineTime >= entry.timelineStart && timelineTime <= entry.timelineEnd);
+  if (!targetEntry && schedule.length > 0) targetEntry = schedule[schedule.length - 1];
+  return targetEntry ?? null;
+}
+
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [sourceDimensions, setSourceDimensions] = useState<Record<string, { width: number; height: number }>>({});
@@ -72,8 +78,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const sched = buildClipSchedule(clips);
     if (sched.length === 0) return;
     const ct = useEditorStore.getState().currentTime;
-    let targetEntry = sched.find(e => ct >= e.timelineStart && ct <= e.timelineEnd);
-    if (!targetEntry) targetEntry = sched[sched.length - 1];
+    const targetEntry = findTimelineEntryAtTime(sched, ct);
     if (!targetEntry) return;
     const offsetInTimeline = Math.max(0, ct - targetEntry.timelineStart);
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
@@ -91,6 +96,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const sourceVideoMapRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const activeSourceUrlRef = useRef<string>('');
   const [activeSourceUrl, setActiveSourceUrl] = useState('');
+  const currentTimeRef = useRef(currentTime);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
 
   // Ref for the inner video container div (for ResizeObserver)
   const videoContainerRef = useRef<HTMLDivElement>(null);
@@ -252,7 +259,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const sourceTime = videoRef.current.currentTime;
     const curClips = clipsRef.current;
     if (curClips.length === 0) {
-      setCurrentTime(sourceTime);
+      if (Math.abs(currentTimeRef.current - sourceTime) > 1 / 240) {
+        currentTimeRef.current = sourceTime;
+        setCurrentTime(sourceTime);
+      }
       syncExtraTracks(sourceTime, videoRef.current.paused);
       return;
     }
@@ -275,7 +285,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
     if (activeEntry) {
       const timelineTime = activeEntry.timelineStart + (sourceTime - activeEntry.sourceStart) / activeEntry.speed;
-      setCurrentTime(timelineTime);
+      if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
+        currentTimeRef.current = timelineTime;
+        setCurrentTime(timelineTime);
+      }
       syncExtraTracks(timelineTime, videoRef.current.paused);
       return;
     }
@@ -307,6 +320,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
           nextEl.currentTime = nextEntry.sourceStart;
           if (wasPlaying) nextEl.play().catch(() => {});
         }
+        currentTimeRef.current = nextEntry.timelineStart;
         setCurrentTime(nextEntry.timelineStart);
       } else {
         // Same source, gap between clips — jump to next clip's source start
@@ -326,33 +340,90 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const lastEl = sourceVideoMapRef.current.get(lastSource);
       if (lastEl) lastEl.currentTime = lastEntry.sourceStart + lastEntry.sourceDuration - 0.001;
     }
+    currentTimeRef.current = totalTimelineDuration;
     setCurrentTime(totalTimelineDuration);
   }, [applyClipEffects, videoRef, videoUrl, setCurrentTime, syncExtraTracks, activateSource, totalTimelineDuration]);
+
+  useEffect(() => {
+    const activeVideo = videoRef.current;
+    if (!activeVideo) return;
+
+    let frameHandle = 0;
+    let rafHandle = 0;
+    let cancelled = false;
+
+    const tick = () => {
+      if (cancelled) return;
+      const video = videoRef.current;
+      if (!video) return;
+      if (!video.paused && !video.ended && !video.seeking && video.readyState >= 2) {
+        handleTimeUpdate();
+      }
+      schedule();
+    };
+
+    const schedule = () => {
+      const video = videoRef.current;
+      if (!video || cancelled) return;
+      if ('requestVideoFrameCallback' in video) {
+        frameHandle = (video as HTMLVideoElement & {
+          requestVideoFrameCallback: (cb: () => void) => number;
+        }).requestVideoFrameCallback(() => tick());
+      } else {
+        rafHandle = window.requestAnimationFrame(tick);
+      }
+    };
+
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (rafHandle) window.cancelAnimationFrame(rafHandle);
+      if (frameHandle && 'cancelVideoFrameCallback' in activeVideo) {
+        (activeVideo as HTMLVideoElement & {
+          cancelVideoFrameCallback: (handle: number) => void;
+        }).cancelVideoFrameCallback(frameHandle);
+      }
+    };
+  }, [activeSourceUrl, handleTimeUpdate, videoRef]);
 
   useImperativeHandle(ref, () => ({
     seekTo: (timelineTime: number) => {
       const sched = buildClipSchedule(clipsRef.current);
-      let targetEntry = sched.find(e => timelineTime >= e.timelineStart && timelineTime <= e.timelineEnd);
-      if (!targetEntry && sched.length > 0) targetEntry = sched[sched.length - 1];
+      const targetEntry = findTimelineEntryAtTime(sched, timelineTime);
       if (!targetEntry) return;
 
-      const clip = clipsRef.current.find(c => c.id === targetEntry!.clipId);
+      const clip = clipsRef.current.find(c => c.id === targetEntry.clipId);
       const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
-      const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
-      for (const el of sourceVideoMapRef.current.values()) {
-        if (!el.paused) el.pause();
-      }
-      activateSource(targetSourceUrl);
-
       const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
       if (!activeEl) return;
+      const previousActiveEl = videoRef.current;
+      const switchingSource = previousActiveEl !== activeEl;
+      const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
       const offsetInTimeline = timelineTime - targetEntry.timelineStart;
       const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-      activeEl.currentTime = Math.max(0, sourceTime);
-      setCurrentTime(timelineTime);
+      const shouldApplySeek =
+        switchingSource ||
+        activeEl.seeking ||
+        Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
+
+      if (switchingSource) {
+        for (const el of sourceVideoMapRef.current.values()) {
+          if (!el.paused) el.pause();
+        }
+        activateSource(targetSourceUrl);
+      }
+
+      if (shouldApplySeek) {
+        activeEl.currentTime = Math.max(0, sourceTime);
+      }
+      if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
+        currentTimeRef.current = timelineTime;
+        setCurrentTime(timelineTime);
+      }
       applyClipEffects(sourceTime);
       syncExtraTracks(timelineTime, !wasPlaying);
-      if (wasPlaying) activeEl.play().catch(() => {});
+      if (switchingSource && wasPlaying) activeEl.play().catch(() => {});
 
       // Seek extra tracks
       for (const track of extraTracksRef.current) {

@@ -98,7 +98,7 @@ export function getRulerTicks(duration: number, width: number): { time: number; 
   const targetMajor = Math.max(4, Math.floor(width / 80));
   const rawInterval = duration / targetMajor;
 
-  const candidates = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  const candidates = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
   let majorInterval = candidates[candidates.length - 1];
   for (const c of candidates) {
     if (c >= rawInterval) { majorInterval = c; break; }

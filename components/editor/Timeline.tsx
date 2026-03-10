@@ -1,8 +1,8 @@
 'use client';
 
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { getRulerTicks, formatTime, formatTimeDetailed, generateWaveform } from '@/lib/timelineUtils';
+import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
 import { EditSnapshot } from '@/lib/useEditorStore';
 import { buildClipSchedule } from '@/lib/playbackEngine';
 import ClipBlock from './ClipBlock';
@@ -92,7 +92,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const [snapIndicatorX, setSnapIndicatorX] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
 
-  const currentTime = useEditorStore(s => s.currentTime);
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
@@ -163,6 +162,16 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
 
   const totalW = trackWidth * zoom;
   const ticks = getRulerTicks(totalTimelineDuration, totalW);
+  const majorTickInterval = useMemo(() => {
+    const majorTimes = ticks.filter((tick) => tick.major).map((tick) => tick.time);
+    if (majorTimes.length < 2) return totalTimelineDuration;
+    return majorTimes[1] - majorTimes[0];
+  }, [ticks, totalTimelineDuration]);
+  const formatRulerLabel = useCallback((time: number) => {
+    if (majorTickInterval <= 0.1) return formatTimePrecise(time);
+    if (majorTickInterval <= 1) return formatTimeDetailed(time);
+    return formatTime(time);
+  }, [majorTickInterval]);
 
   const hasCaptions = captions.length > 0;
   const hasTextOverlays = textOverlays.length > 0;
@@ -287,20 +296,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     const startByEnd = byEnd.snapped - clipDuration;
     return Math.abs(byStart.snapped - clamped) <= Math.abs(startByEnd - clamped) ? byStart.snapped : startByEnd;
   }, [snapEnabled, totalTimelineDuration, totalW]);
-
-  // Auto-scroll playhead into view (suppressed during drag)
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || totalTimelineDuration <= 0) return;
-    if (playheadDragRef.current) return;
-    const playheadX = tPx(currentTime);
-    const viewLeft = el.scrollLeft;
-    const viewRight = viewLeft + el.clientWidth - HEADER_W;
-    const margin = 80;
-    if (playheadX < viewLeft + margin || playheadX > viewRight - margin) {
-      el.scrollLeft = Math.max(0, playheadX - (el.clientWidth - HEADER_W) / 2);
-    }
-  }, [currentTime, totalTimelineDuration, tPx]);
 
   // ── Drag handlers ──────────────────────────────────────────────────────────
 
@@ -725,13 +720,11 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     };
   }, [scrubPlayhead, snapEnabled]);
 
-  const playheadX = tPx(currentTime);
-
   // Handle right-click on video track to split at playhead
   const handleVideoTrackContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    splitClipAtTime(currentTime);
-  }, [splitClipAtTime, currentTime]);
+    splitClipAtTime(useEditorStore.getState().currentTime);
+  }, [splitClipAtTime]);
 
   const px = (t: number) => tPx(t);
 
@@ -887,20 +880,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
           {/* Extended playhead hit area */}
           <div
             className="playhead-hitbox"
-            style={{
-              position: 'absolute',
-              left: Math.max(0, playheadX - 12),
-              top: 0,
-              bottom: 0,
-              width: 24,
-              zIndex: 15,
-              cursor: 'ew-resize',
-            }}
-            onMouseDown={e => {
-              e.stopPropagation();
-              e.preventDefault();
-              beginPlayheadDrag(e.clientX);
-            }}
+            style={{ display: 'none' }}
           />
 
           {/* Ruler */}
@@ -924,34 +904,18 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                     marginTop: major ? 6 : 10,
                   }} />
                   {major && (
-                    <span style={{
+                  <span style={{
                       position: 'absolute', top: 5, left: 4,
                       fontSize: 9, fontFamily: 'var(--font-serif)',
                       color: 'rgba(255,255,255,0.3)',
                       whiteSpace: 'nowrap',
                     }}>
-                      {zoom > 8 ? formatTimeDetailed(time) : formatTime(time)}
+                      {formatRulerLabel(time)}
                     </span>
                   )}
                 </div>
               );
             })}
-            <div
-              className="playhead-dot"
-              style={{
-                position: 'absolute', top: 1, left: playheadX - 7,
-                width: 14, height: 14, borderRadius: '50%',
-                background: 'var(--accent)',
-                cursor: 'ew-resize',
-                zIndex: 16,
-                boxShadow: '0 0 0 3px rgba(33,212,255,0.12)',
-              }}
-              onMouseDown={e => {
-                e.stopPropagation();
-                e.preventDefault();
-                beginPlayheadDrag(e.clientX);
-              }}
-            />
           </div>
 
           {/* Video track — clip blocks */}
@@ -977,7 +941,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                 />
               );
             })}
-            <Playhead x={playheadX} height={TRACK_HEIGHT} />
           </TrackRow>
 
           {/* Extra video tracks */}
@@ -987,7 +950,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
               height={TRACK_HEIGHT}
               track={track}
               tPx={tPx}
-              playheadX={playheadX}
               selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
@@ -1044,7 +1006,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                 </div>
               );
             })}
-            <Playhead x={playheadX} height={TRACK_HEIGHT} />
           </TrackRow>
 
           {/* Extra audio tracks */}
@@ -1054,7 +1015,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
               height={TRACK_HEIGHT}
               track={track}
               tPx={tPx}
-              playheadX={playheadX}
               selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
@@ -1097,7 +1057,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                   </div>
                 );
               })}
-              <Playhead x={playheadX} height={EFFECT_TRACK_H} />
             </EffectTrackRow>
           )}
 
@@ -1133,7 +1092,6 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                   </div>
                 );
               })}
-              <Playhead x={playheadX} height={EFFECT_TRACK_H} />
             </EffectTrackRow>
           )}
 
@@ -1165,9 +1123,18 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                   </div>
                 );
               })}
-              <Playhead x={playheadX} height={EFFECT_TRACK_H} />
             </EffectTrackRow>
           )}
+
+          <TimelinePlayheadOverlay
+            scrollRef={scrollRef}
+            totalTimelineDuration={totalTimelineDuration}
+            totalW={totalW}
+            headerWidth={HEADER_W}
+            rulerHeight={RULER_H}
+            playheadDragRef={playheadDragRef}
+            onBeginDrag={beginPlayheadDrag}
+          />
         </div>
       </div>
     </div>
@@ -1211,17 +1178,96 @@ function EffectTrackRow({ height, children }: { height: number; children: React.
   );
 }
 
-function Playhead({ x, height }: { x: number; height: number }) {
+const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
+  scrollRef,
+  totalTimelineDuration,
+  totalW,
+  headerWidth,
+  rulerHeight,
+  playheadDragRef,
+  onBeginDrag,
+}: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  totalTimelineDuration: number;
+  totalW: number;
+  headerWidth: number;
+  rulerHeight: number;
+  playheadDragRef: React.MutableRefObject<PlayheadDragInfo | null>;
+  onBeginDrag: (clientX: number) => void;
+}) {
+  const currentTime = useEditorStore(s => s.currentTime);
+
+  const playheadX = useMemo(() => {
+    if (totalTimelineDuration <= 0) return 0;
+    return (currentTime / totalTimelineDuration) * totalW;
+  }, [currentTime, totalTimelineDuration, totalW]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || totalTimelineDuration <= 0 || playheadDragRef.current) return;
+    const viewLeft = el.scrollLeft;
+    const viewRight = viewLeft + el.clientWidth - headerWidth;
+    const margin = 80;
+    if (playheadX < viewLeft + margin || playheadX > viewRight - margin) {
+      el.scrollLeft = Math.max(0, playheadX - (el.clientWidth - headerWidth) / 2);
+    }
+  }, [currentTime, headerWidth, playheadDragRef, playheadX, scrollRef, totalTimelineDuration]);
+
   return (
-    <div style={{
-      position: 'absolute', top: -2, left: x,
-      width: 2, height: height + 4,
-      background: 'rgba(255,255,255,0.92)',
-      boxShadow: '0 0 0 1px rgba(255,255,255,0.12)',
-      zIndex: 4, pointerEvents: 'none',
-    }} />
+    <>
+      <div
+        className="playhead-hitbox"
+        style={{
+          position: 'absolute',
+          left: Math.max(0, playheadX - 12),
+          top: 0,
+          bottom: 0,
+          width: 24,
+          zIndex: 15,
+          cursor: 'ew-resize',
+        }}
+        onMouseDown={e => {
+          e.stopPropagation();
+          e.preventDefault();
+          onBeginDrag(e.clientX);
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: playheadX,
+          top: rulerHeight - 2,
+          bottom: 0,
+          width: 2,
+          background: 'rgba(255,255,255,0.92)',
+          boxShadow: '0 0 0 1px rgba(255,255,255,0.12)',
+          zIndex: 14,
+          pointerEvents: 'none',
+        }}
+      />
+      <div
+        className="playhead-dot"
+        style={{
+          position: 'absolute',
+          top: 1,
+          left: playheadX - 7,
+          width: 14,
+          height: 14,
+          borderRadius: '50%',
+          background: 'var(--accent)',
+          cursor: 'ew-resize',
+          zIndex: 16,
+          boxShadow: '0 0 0 3px rgba(33,212,255,0.12)',
+        }}
+        onMouseDown={e => {
+          e.stopPropagation();
+          e.preventDefault();
+          onBeginDrag(e.clientX);
+        }}
+      />
+    </>
   );
-}
+});
 
 function TrackHeader({ icon, label, height, color, onRemove }: {
   icon: React.ReactNode; label: string; height: number; color: string; onRemove?: () => void;
@@ -1266,11 +1312,10 @@ function TrackHeader({ icon, label, height, color, onRemove }: {
 
 const EXTRA_CLIP_COLOR = { bg: 'rgba(59,130,246,0.35)', border: 'rgba(96,165,250,0.6)' };
 
-function ExtraTrackRow({ height, track, tPx, playheadX, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
+const ExtraTrackRow = memo(function ExtraTrackRow({ height, track, tPx, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
   height: number;
   track: import('@/lib/types').MediaTrack;
   tPx: (t: number) => number;
-  playheadX: number;
   selectedTrackClipId?: string | null;
   onDrop: (e: React.DragEvent) => void;
   onClipDrag: (e: React.MouseEvent, clipId: string) => void;
@@ -1385,10 +1430,9 @@ function ExtraTrackRow({ height, track, tPx, playheadX, selectedTrackClipId, onD
           </div>
         );
       })}
-      <Playhead x={playheadX} height={height} />
     </div>
   );
-}
+});
 
 function EffectHeader({ label, color }: { label: string; color: string }) {
   return (

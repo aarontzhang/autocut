@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, VisualSearchSession } from '@/lib/types';
-import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
+import { formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -224,6 +224,12 @@ function getDenseRequestTooBroadMessage(startTime: number, endTime: number): str
   return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
 }
 
+function formatChatTime(seconds: number): string {
+  return Math.abs(seconds - Math.round(seconds)) < 0.001
+    ? formatTime(seconds)
+    : formatTimePrecise(seconds);
+}
+
 function looksLikeVisualSearchQuery(text: string): boolean {
   return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
 }
@@ -235,7 +241,7 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
       return {
         label: 'Split clip',
         color: '#f59e0b',
-        summary: action.splitTime !== undefined ? `at ${formatTime(action.splitTime)}` : '',
+        summary: action.splitTime !== undefined ? `at ${formatChatTime(action.splitTime)}` : '',
       };
     case 'delete_clip':
       return {
@@ -248,7 +254,7 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         label: 'Cut range',
         color: '#ef4444',
         summary: action.deleteStartTime !== undefined && action.deleteEndTime !== undefined
-          ? `${formatTime(action.deleteStartTime)} → ${formatTime(action.deleteEndTime)}`
+          ? `${formatChatTime(action.deleteStartTime)} → ${formatChatTime(action.deleteEndTime)}`
           : '',
       };
     case 'delete_ranges':
@@ -284,7 +290,7 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
       return {
         label: 'Transcribe audio',
         color: '#f59e0b',
-        summary: seg ? `${formatTime(seg.startTime)} → ${formatTime(seg.endTime)}` : '',
+        summary: seg ? `${formatChatTime(seg.startTime)} → ${formatChatTime(seg.endTime)}` : '',
       };
     }
     case 'request_frames': {
@@ -292,7 +298,7 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
       return {
         label: 'Inspect frames',
         color: '#60a5fa',
-        summary: req ? `${formatTime(req.startTime)} → ${formatTime(req.endTime)}` : '',
+        summary: req ? `${formatChatTime(req.startTime)} → ${formatChatTime(req.endTime)}` : '',
       };
     }
     case 'update_ai_settings':
@@ -341,7 +347,7 @@ function ActionDetails({ action }: { action: EditAction }) {
             borderBottom: i < Math.min(ranges.length - 1, 4) ? '1px solid rgba(255,255,255,0.04)' : 'none',
           }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)' }}>
-              {formatTime(r.start)} – {formatTime(r.end)}
+              {formatChatTime(r.start)} – {formatChatTime(r.end)}
             </span>
           </div>
         ))}
@@ -358,7 +364,7 @@ function ActionDetails({ action }: { action: EditAction }) {
     return (
       <div style={{ padding: '6px 12px 8px' }}>
         <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
-          Split at {action.splitTime !== undefined ? formatTime(action.splitTime) : '—'}
+          Split at {action.splitTime !== undefined ? formatChatTime(action.splitTime) : '—'}
         </span>
       </div>
     );
@@ -368,7 +374,7 @@ function ActionDetails({ action }: { action: EditAction }) {
     return (
       <div style={{ padding: '6px 12px 8px' }}>
         <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
-          Remove {action.deleteStartTime !== undefined ? formatTime(action.deleteStartTime) : '—'} – {action.deleteEndTime !== undefined ? formatTime(action.deleteEndTime) : '—'}
+          Remove {action.deleteStartTime !== undefined ? formatChatTime(action.deleteStartTime) : '—'} – {action.deleteEndTime !== undefined ? formatChatTime(action.deleteEndTime) : '—'}
         </span>
       </div>
     );
@@ -438,7 +444,7 @@ function ActionDetails({ action }: { action: EditAction }) {
             borderBottom: i < Math.min((action.captions ?? []).length - 1, 2) ? '1px solid rgba(255,255,255,0.04)' : 'none',
           }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)', marginRight: 6 }}>
-              {formatTime(c.startTime)}
+              {formatChatTime(c.startTime)}
             </span>
             <span style={{ fontSize: 11, color: 'var(--fg-secondary)' }}>{c.text}</span>
           </div>
@@ -478,7 +484,7 @@ function ActionDetails({ action }: { action: EditAction }) {
         {(action.transitions ?? []).map((t, i) => (
           <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)' }}>
-              {formatTime(t.atTime)}
+              {formatChatTime(t.atTime)}
             </span>
             <span style={{ fontSize: 10, color: 'var(--fg-secondary)' }}>{t.type}</span>
             <span style={{ fontSize: 10, color: 'var(--fg-muted)' }}>{t.duration}s</span>
@@ -494,7 +500,7 @@ function ActionDetails({ action }: { action: EditAction }) {
         {(action.textOverlays ?? []).slice(0, 3).map((t, i) => (
           <div key={i} style={{ padding: '2px 0' }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)', marginRight: 6 }}>
-              {formatTime(t.startTime)}–{formatTime(t.endTime)}
+              {formatChatTime(t.startTime)}–{formatChatTime(t.endTime)}
             </span>
             <span style={{ fontSize: 11, color: 'var(--fg-secondary)' }}>{t.text}</span>
             <span style={{ fontSize: 10, color: 'var(--fg-muted)', marginLeft: 5 }}>({t.position})</span>
@@ -1129,7 +1135,7 @@ function VisualSearchPanel({ session }: { session: VisualSearchSession }) {
               }}
             >
               <span>Candidate {index + 1}</span>
-              <span>{formatTime(candidate.sourceStart)}-{formatTime(candidate.sourceEnd)}</span>
+              <span>{formatChatTime(candidate.sourceStart)}-{formatChatTime(candidate.sourceEnd)}</span>
             </div>
           ))}
         </div>
