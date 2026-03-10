@@ -13,6 +13,8 @@ import ExportProgress from './ExportProgress';
 import { useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
+import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
+import { useStorageQuota } from '@/lib/useStorageQuota';
 
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -23,6 +25,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const [timelineHeight, setTimelineHeight] = useState(300);
   const [mediaPanelWidth, setMediaPanelWidth] = useState(200);
   const [isProjectLoading, setIsProjectLoading] = useState(false);
+  const [storageNotice, setStorageNotice] = useState<string | null>(null);
 
   const startChatResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -96,8 +99,19 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const { user } = useAuth();
+  const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   useAutoSave();
+
+  const handleStorageUploadSuccess = useCallback(() => {
+    setStorageNotice(null);
+    void refreshQuota();
+  }, [refreshQuota]);
+
+  const handleStorageUploadError = useCallback((error: unknown) => {
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    setStorageNotice(message);
+  }, []);
 
   const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
     const state = useEditorStore.getState();
@@ -273,17 +287,14 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     // Background upload to storage so the project persists on reload
     const { currentProjectId, storagePath } = useEditorStore.getState();
     if (!currentProjectId || !user || storagePath) return; // skip if already uploaded
-    uploadProjectMedia(file, user.id, currentProjectId, 'main').then((path) => {
-      fetch(`/api/projects/${currentProjectId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_path: path, video_filename: file.name, video_size: file.size }),
-      });
+    uploadProjectMedia(file, currentProjectId, 'main').then((path) => {
       setStoragePath(path);
+      handleStorageUploadSuccess();
     }).catch((error: Error) => {
       console.warn('Background upload failed:', error.message);
+      handleStorageUploadError(error);
     });
-  }, [setVideoFile, user, setStoragePath]);
+  }, [setVideoFile, user, setStoragePath, handleStorageUploadError, handleStorageUploadSuccess]);
 
   const importLibraryFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -300,14 +311,16 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     let sourcePath: string | undefined;
     if (user && currentProjectId) {
       try {
-        sourcePath = await uploadProjectMedia(file, user.id, currentProjectId, 'sources');
+        sourcePath = await uploadProjectMedia(file, currentProjectId, 'sources');
+        handleStorageUploadSuccess();
       } catch (error) {
         console.warn('Library upload failed:', error);
+        handleStorageUploadError(error);
       }
     }
 
     addMediaLibraryItem({ url: blobUrl, name: file.name, duration, sourcePath });
-  }, [addMediaLibraryItem, user]);
+  }, [addMediaLibraryItem, user, handleStorageUploadError, handleStorageUploadSuccess]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -330,6 +343,17 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     >
       {/* ── Top bar ── */}
       <TopBar onImportFile={importFile} />
+      {(storageNotice || quotaLoading || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (
+        <div style={{ padding: '10px 14px 0', flexShrink: 0 }}>
+          <StorageQuotaBanner
+            quota={quota}
+            loading={quotaLoading}
+            title="Storage status"
+            message={storageNotice}
+            compact
+          />
+        </div>
+      )}
 
       {/* ── Main area below topbar ── */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
@@ -379,7 +403,13 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               onMouseLeave={e => { e.currentTarget.style.borderTopColor = 'var(--border)'; }}
             />
             <div style={{ height: timelineHeight }}>
-              <Timeline videoRef={videoRef} playerRef={playerRef} onImportFile={importFile} />
+              <Timeline
+                videoRef={videoRef}
+                playerRef={playerRef}
+                onImportFile={importFile}
+                onStorageUploadError={handleStorageUploadError}
+                onStorageUploadSuccess={handleStorageUploadSuccess}
+              />
             </div>
           </div>
         </div>

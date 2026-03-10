@@ -1,15 +1,55 @@
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { STORAGE_FILE_LIMIT_BYTES, getFileSizeErrorMessage } from '@/lib/storageQuota';
 
-function sanitizeName(name: string) {
-  return name.replace(/[^\w.\-]+/g, '_');
+async function readErrorMessage(response: Response) {
+  const data = await response.json().catch(() => null);
+  return typeof data?.error === 'string' ? data.error : `Request failed with HTTP ${response.status}`;
 }
 
-export async function uploadProjectMedia(file: File, userId: string, projectId: string, folder = 'sources') {
+export async function uploadProjectMedia(
+  file: File,
+  projectId: string,
+  folder: 'main' | 'sources' | 'tracks' = 'sources'
+) {
+  if (file.size > STORAGE_FILE_LIMIT_BYTES) {
+    throw new Error(getFileSizeErrorMessage());
+  }
+
   const supabase = getSupabaseBrowser();
-  const fileName = `${Date.now()}_${sanitizeName(file.name)}`;
-  const storagePath = `${userId}/${projectId}/${folder}/${fileName}`;
-  const { error } = await supabase.storage.from('videos').upload(storagePath, file, { upsert: true });
+  const initiateRes = await fetch('/api/uploads/initiate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      kind: folder,
+      projectId,
+      fileName: file.name,
+      fileSize: file.size,
+      contentType: file.type || 'video/mp4',
+    }),
+  });
+  if (!initiateRes.ok) throw new Error(await readErrorMessage(initiateRes));
+
+  const initiated = await initiateRes.json();
+  const storagePath = initiated.storagePath as string;
+  const { error } = await supabase.storage.from('videos').uploadToSignedUrl(storagePath, initiated.token, file, {
+    upsert: false,
+    contentType: file.type || 'video/mp4',
+  });
   if (error) throw error;
+
+  const finalizeRes = await fetch('/api/uploads/finalize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      kind: folder,
+      projectId,
+      storagePath,
+      fileName: file.name,
+      fileSize: file.size,
+    }),
+  });
+  if (!finalizeRes.ok) throw new Error(await readErrorMessage(finalizeRes));
+
   return storagePath;
 }
 

@@ -7,6 +7,8 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import { uploadVideoToSupabase } from '@/lib/uploadVideo';
 import AutocutMark from '@/components/branding/AutocutMark';
+import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
+import { useStorageQuota } from '@/lib/useStorageQuota';
 
 export default function UploadScreen() {
   const setVideoCloud = useEditorStore(s => s.setVideoCloud);
@@ -17,6 +19,7 @@ export default function UploadScreen() {
   const inputRef = useRef<HTMLInputElement>(null);
   const { user } = useAuth();
   const router = useRouter();
+  const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -36,9 +39,9 @@ export default function UploadScreen() {
     try {
       const { projectId, storagePath } = await uploadVideoToSupabase(
         file,
-        user.id,
         (pct) => setUploadProgress(pct)
       );
+      await refreshQuota();
       console.log('Upload success:', { projectId, storagePath });
       const blobUrl = URL.createObjectURL(file);
       setVideoCloud(file, blobUrl, storagePath, projectId);
@@ -48,7 +51,7 @@ export default function UploadScreen() {
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
       setUploadProgress(null);
     }
-  }, [router, user, setVideoCloud, setUploadProgress]);
+  }, [router, user, setVideoCloud, setUploadProgress, refreshQuota]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -73,6 +76,15 @@ export default function UploadScreen() {
         <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>
           Autocut
         </span>
+      </div>
+
+      <div style={{ width: 480, marginBottom: 16 }}>
+        <StorageQuotaBanner
+          quota={quota}
+          loading={quotaLoading}
+          title="Account storage"
+          compact
+        />
       </div>
 
       {/* Drop zone */}
@@ -161,7 +173,7 @@ export default function UploadScreen() {
 
       {/* Bottom hint */}
       <p style={{ marginTop: 28, fontSize: 12, color: 'var(--fg-muted)' }}>
-        Powered by Claude AI · Supports uploads up to 2 GB
+        Powered by Claude AI · 10 GB total storage per account
       </p>
     </div>
   );

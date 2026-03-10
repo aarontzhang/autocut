@@ -1,73 +1,92 @@
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import {
+  STORAGE_FILE_LIMIT_BYTES,
+  getFileSizeErrorMessage,
+  type StorageQuotaSnapshot,
+} from '@/lib/storageQuota';
 
 export interface UploadResult {
   projectId: string;
   storagePath: string;
+  quota: StorageQuotaSnapshot | null;
+}
+
+async function readErrorMessage(response: Response) {
+  const data = await response.json().catch(() => null);
+  return typeof data?.error === 'string' ? data.error : `Request failed with HTTP ${response.status}`;
 }
 
 export async function uploadVideoToSupabase(
   file: File,
-  userId: string,
   onProgress?: (pct: number) => void
 ): Promise<UploadResult> {
-  // 1. Create project row
-  const createRes = await fetch('/api/projects', {
+  let projectId: string | null = null;
+
+  if (file.size > STORAGE_FILE_LIMIT_BYTES) {
+    throw new Error(getFileSizeErrorMessage());
+  }
+
+  const initiateRes = await fetch('/api/uploads/initiate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: file.name.replace(/\.[^.]+$/, ''),
-      video_filename: file.name,
-      video_size: file.size,
+      kind: 'project-main',
+      fileName: file.name,
+      fileSize: file.size,
+      contentType: file.type || 'video/mp4',
     }),
   });
-  if (!createRes.ok) throw new Error('Failed to create project');
-  const { id: projectId } = await createRes.json();
-
-  const storagePath = `${userId}/${projectId}/${file.name}`;
+  if (!initiateRes.ok) throw new Error(await readErrorMessage(initiateRes));
+  const initiated = await initiateRes.json();
+  projectId = initiated.projectId;
+  if (!projectId) {
+    throw new Error('Upload initialization failed to return a project ID');
+  }
+  const storagePath = initiated.storagePath as string;
   const supabase = getSupabaseBrowser();
 
   onProgress?.(5);
 
-  // 2. Get a signed upload URL for real progress tracking
-  const { data: signedData, error: signErr } = await supabase.storage
-    .from('videos')
-    .createSignedUploadUrl(storagePath, { upsert: true });
-
-  if (signErr || !signedData) {
-    console.error('[uploadVideo] Failed to get signed URL:', signErr);
-    throw new Error(`Failed to get upload URL: ${signErr?.message ?? 'unknown error'}. Check that your Supabase Storage "videos" bucket has INSERT/SELECT policies for authenticated users.`);
-  }
-
-  // 3. Complete the signed upload using the token returned by Supabase.
-  // Raw PUTs against the signed URL do not match the storage client contract here.
   onProgress?.(15);
   const { error: uploadErr } = await supabase.storage
     .from('videos')
-    .uploadToSignedUrl(storagePath, signedData.token, file, {
-      upsert: true,
+    .uploadToSignedUrl(storagePath, initiated.token, file, {
+      upsert: false,
       contentType: file.type || 'video/mp4',
     });
 
   if (uploadErr) {
     console.error('[uploadVideo] Signed upload failed:', uploadErr);
+    if (projectId) {
+      await fetch(`/api/projects/${projectId}`, { method: 'DELETE' }).catch(() => undefined);
+    }
     if ('status' in uploadErr && uploadErr.status === 413) {
-      throw new Error('File too large — increase the max file size in Supabase Dashboard -> Storage -> Settings');
+      throw new Error(getFileSizeErrorMessage());
     }
     throw new Error(`Upload failed: ${uploadErr.message}. Check that the "videos" bucket exists and allows authenticated uploads.`);
   }
   onProgress?.(100);
 
-  // 4. Update project with video_path
-  const patchRes = await fetch(`/api/projects/${projectId}`, {
-    method: 'PATCH',
+  const finalizeRes = await fetch('/api/uploads/finalize', {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ video_path: storagePath }),
+    body: JSON.stringify({
+      kind: 'project-main',
+      projectId,
+      storagePath,
+      fileName: file.name,
+      fileSize: file.size,
+    }),
   });
-  if (!patchRes.ok) {
-    const errText = await patchRes.text().catch(() => 'unknown');
-    console.error('[uploadVideo] Failed to save video_path:', patchRes.status, errText);
-    throw new Error(`Video uploaded but failed to link to your account (HTTP ${patchRes.status}). Please try again.`);
+  if (!finalizeRes.ok) {
+    const errorMessage = await readErrorMessage(finalizeRes);
+    console.error('[uploadVideo] Failed to finalize upload:', finalizeRes.status, errorMessage);
+    if (projectId && finalizeRes.status !== 413) {
+      await fetch(`/api/projects/${projectId}`, { method: 'DELETE' }).catch(() => undefined);
+    }
+    throw new Error(errorMessage);
   }
+  const finalized = await finalizeRes.json();
 
-  return { projectId, storagePath };
+  return { projectId, storagePath, quota: finalized.quota ?? null };
 }

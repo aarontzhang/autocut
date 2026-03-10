@@ -1,0 +1,110 @@
+import { NextResponse } from 'next/server';
+import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { getStorageObjectSize, getUserStorageQuotaSnapshot, removeStorageObjects } from '@/lib/server/storageQuota';
+import { getSupabaseServer } from '@/lib/supabase/server';
+import { STORAGE_QUOTA_BYTES, getQuotaErrorMessage, type ManagedUploadKind } from '@/lib/storageQuota';
+
+function isUploadKind(value: unknown): value is ManagedUploadKind {
+  return value === 'project-main' || value === 'main' || value === 'sources' || value === 'tracks';
+}
+
+function isExpectedStoragePath(userId: string, projectId: string, kind: ManagedUploadKind, storagePath: string) {
+  if (!storagePath.startsWith(`${userId}/${projectId}/`)) return false;
+  if (kind === 'project-main') {
+    const remainder = storagePath.slice(`${userId}/${projectId}/`.length);
+    return remainder.length > 0 && !remainder.includes('/');
+  }
+  return storagePath.includes(`/${kind}/`);
+}
+
+export async function POST(request: Request) {
+  const supabase = await getSupabaseServer();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const body = await request.json().catch(() => ({}));
+  const kind = body.kind;
+  const projectId = typeof body.projectId === 'string' ? body.projectId : '';
+  const storagePath = typeof body.storagePath === 'string' ? body.storagePath : '';
+  const fileName = typeof body.fileName === 'string' ? body.fileName : null;
+  const fileSize = typeof body.fileSize === 'number' && Number.isFinite(body.fileSize) ? Math.max(0, body.fileSize) : null;
+
+  if (!isUploadKind(kind) || !projectId || !storagePath || !isExpectedStoragePath(user.id, projectId, kind, storagePath)) {
+    return NextResponse.json({ error: 'Invalid finalize request' }, { status: 400 });
+  }
+
+  const { data: project, error: projectError } = await supabase
+    .from('projects')
+    .select('id')
+    .eq('id', projectId)
+    .eq('user_id', user.id)
+    .single();
+
+  if (projectError || !project) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
+  }
+
+  const uploadedSize = await getStorageObjectSize(storagePath);
+  if (uploadedSize <= 0) {
+    return NextResponse.json({ error: 'Uploaded file not found' }, { status: 404 });
+  }
+
+  const quota = await getUserStorageQuotaSnapshot(user.id);
+  if (quota.usedBytes > STORAGE_QUOTA_BYTES) {
+    await removeStorageObjects([storagePath]);
+
+    if (kind === 'project-main') {
+      await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
+    }
+
+    return NextResponse.json({
+      error: getQuotaErrorMessage(quota),
+      quota,
+    }, { status: 413 });
+  }
+
+  let assetId: string | null = null;
+  let indexingJobId: string | null = null;
+  if (kind === 'project-main' || kind === 'main') {
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update({
+        video_path: storagePath,
+        video_filename: fileName,
+        video_size: fileSize ?? uploadedSize,
+      })
+      .eq('id', projectId)
+      .eq('user_id', user.id);
+
+    if (updateError) {
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+
+    try {
+      const asset = await ensurePrimaryMediaAssetIfSupported(supabase, projectId, storagePath);
+      assetId = asset?.id ?? null;
+      if (asset && (asset.status === 'pending' || asset.status === 'error')) {
+        const job = await enqueueAnalysisJobIfSupported(supabase, {
+          projectId,
+          assetId: asset.id,
+          jobType: 'index_asset',
+          payload: {
+            storagePath,
+            videoFilename: fileName,
+          },
+        });
+        indexingJobId = job?.id ?? null;
+      }
+    } catch (assetError) {
+      console.error('[uploads.finalize] failed to initialize source asset indexing', assetError);
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    quota,
+    uploadedSize,
+    assetId,
+    indexingJobId,
+  });
+}

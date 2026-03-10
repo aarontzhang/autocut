@@ -1,5 +1,6 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextResponse } from 'next/server';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -77,9 +78,16 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { data: project } = await supabase.from('projects').select('video_path').eq('id', id).eq('user_id', user.id).single();
-  if (project?.video_path) {
-    await supabase.storage.from('videos').remove([project.video_path]);
+  const { data: project } = await supabase.from('projects').select('id').eq('id', id).eq('user_id', user.id).single();
+  if (!project) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
+  }
+
+  try {
+    await removeProjectStorageObjects(user.id, id);
+  } catch (storageError) {
+    console.error('[projects.delete] failed to delete project storage objects', storageError);
+    return NextResponse.json({ error: 'Failed to delete project media' }, { status: 500 });
   }
 
   const { error } = await supabase.from('projects').delete().eq('id', id).eq('user_id', user.id);

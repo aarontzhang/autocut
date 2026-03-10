@@ -3,10 +3,14 @@
 import Image from 'next/image';
 import { useRef, useState, useEffect } from 'react';
 import type { Project } from '@/app/projects/page';
+import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
+import type { StorageQuotaSnapshot } from '@/lib/storageQuota';
 
 interface Props {
   projects: Project[];
   loading: boolean;
+  storageQuota: StorageQuotaSnapshot | null;
+  storageQuotaLoading: boolean;
   onNew: () => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
@@ -338,7 +342,16 @@ function ProjectCard({
   );
 }
 
-export default function ProjectDashboard({ projects, loading, onNew, onOpen, onDelete, onRename }: Props) {
+export default function ProjectDashboard({
+  projects,
+  loading,
+  storageQuota,
+  storageQuotaLoading,
+  onNew,
+  onOpen,
+  onDelete,
+  onRename,
+}: Props) {
   return (
     <div style={{ padding: '32px 32px 0' }}>
       {/* Header */}
@@ -368,6 +381,14 @@ export default function ProjectDashboard({ projects, loading, onNew, onOpen, onD
           </svg>
           New Project
         </button>
+      </div>
+
+      <div style={{ marginBottom: 20, maxWidth: 520 }}>
+        <StorageQuotaBanner
+          quota={storageQuota}
+          loading={storageQuotaLoading}
+          title="Account storage"
+        />
       </div>
 
       {loading ? (

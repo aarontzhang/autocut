@@ -6,6 +6,7 @@ import ProjectDashboard from '@/components/projects/ProjectDashboard';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
+import { useStorageQuota } from '@/lib/useStorageQuota';
 
 export interface Project {
   id: string;
@@ -23,6 +24,7 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
   const router = useRouter();
+  const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   useEffect(() => {
     fetch('/api/projects')
@@ -48,6 +50,7 @@ export default function ProjectsPage() {
   const handleDelete = async (id: string) => {
     await fetch(`/api/projects/${id}`, { method: 'DELETE' });
     setProjects(prev => prev.filter(p => p.id !== id));
+    await refreshQuota();
   };
 
   const handleRename = async (id: string, name: string) => {
@@ -75,6 +78,8 @@ export default function ProjectsPage() {
       <ProjectDashboard
         projects={projects}
         loading={loading}
+        storageQuota={quota}
+        storageQuotaLoading={quotaLoading}
         onNew={handleNew}
         onOpen={handleOpen}
         onDelete={handleDelete}

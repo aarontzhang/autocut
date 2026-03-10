@@ -76,9 +76,17 @@ interface TimelineProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   playerRef?: React.RefObject<VideoPlayerHandle | null>;
   onImportFile?: (file: File) => void;
+  onStorageUploadError?: (error: unknown) => void;
+  onStorageUploadSuccess?: () => void;
 }
 
-export default function Timeline({ videoRef, playerRef, onImportFile }: TimelineProps) {
+export default function Timeline({
+  videoRef,
+  playerRef,
+  onImportFile,
+  onStorageUploadError,
+  onStorageUploadSuccess,
+}: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [trackWidth, setTrackWidth] = useState(800);
   const dragRef = useRef<DragInfo | null>(null);
@@ -527,10 +535,12 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
 
     const { currentProjectId } = useEditorStore.getState();
     if (user && currentProjectId) {
-      uploadProjectMedia(file, user.id, currentProjectId, 'tracks').then((storagePath) => {
+      uploadProjectMedia(file, currentProjectId, 'tracks').then((storagePath) => {
         updateTrackClipSourcePath(trackId, clipId, storagePath);
+        onStorageUploadSuccess?.();
       }).catch((error: Error) => {
         console.warn('Track clip upload failed:', error.message);
+        onStorageUploadError?.(error);
       });
     }
   };
@@ -579,10 +589,12 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
 
     const { currentProjectId } = useEditorStore.getState();
     if (user && currentProjectId) {
-      uploadProjectMedia(file, user.id, currentProjectId, 'sources').then((storagePath) => {
+      uploadProjectMedia(file, currentProjectId, 'sources').then((storagePath) => {
         updateClipSourcePath(clipId, storagePath);
+        onStorageUploadSuccess?.();
       }).catch((error: Error) => {
         console.warn('Main timeline clip upload failed:', error.message);
+        onStorageUploadError?.(error);
       });
     }
   };
