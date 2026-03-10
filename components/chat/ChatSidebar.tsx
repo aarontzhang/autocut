@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, VisualSearchSession } from '@/lib/types';
-import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
+import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -232,7 +232,7 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
       };
     case 'delete_ranges':
       return {
-        label: `Cut ${action.ranges?.length ?? 0} silent section${(action.ranges?.length ?? 0) !== 1 ? 's' : ''}`,
+        label: `Cut ${action.ranges?.length ?? 0} section${(action.ranges?.length ?? 0) !== 1 ? 's' : ''}`,
         color: '#ef4444',
         summary: `${action.ranges?.length ?? 0} range${(action.ranges?.length ?? 0) !== 1 ? 's' : ''}`,
       };
@@ -548,6 +548,7 @@ function AssistantMessage({
   const [skippedSteps, setSkippedSteps] = useState(0);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
+  const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<Array<{ sourceStart: number; sourceEnd: number }>>([]);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
@@ -573,11 +574,16 @@ function AssistantMessage({
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
   }, [actionCompleted, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
-  const finishReview = useCallback((draft: EditSnapshot, accepted: number, skipped: number) => {
+  const finishReview = useCallback((
+    draft: EditSnapshot,
+    accepted: number,
+    skipped: number,
+    committedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
+  ) => {
     clearPreviewSnapshot(msg.id);
     if (accepted > 0) commitPreviewSnapshot(draft);
     if (accepted > 0 && action) {
-      recordAppliedAction(action, action.message);
+      recordAppliedAction(action, action.message, { sourceRanges: committedSourceRanges });
     }
     const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: result });
@@ -585,6 +591,7 @@ function AssistantMessage({
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
     setSkippedSteps(skipped);
+    setAcceptedSourceRanges([]);
     setReviewResult(result);
   }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
 
@@ -603,37 +610,44 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
+    setAcceptedSourceRanges([]);
     setReviewResult(null);
     setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstStep));
   }, [action, anotherReviewActive, msg.id, reviewSteps, setPreviewSnapshot]);
 
   const handleApplyStep = useCallback(() => {
     if (!reviewDraft || !reviewSteps[reviewIndex]) return;
-    const nextDraft = applyActionToSnapshot(reviewDraft, reviewSteps[reviewIndex]);
+    const stepAction = reviewSteps[reviewIndex];
+    const nextCommittedSourceRanges = [
+      ...acceptedSourceRanges,
+      ...sourceRangesForAction(reviewDraft.clips, stepAction),
+    ];
+    const nextDraft = applyActionToSnapshot(reviewDraft, stepAction);
     const accepted = acceptedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      finishReview(nextDraft, accepted, skippedSteps);
+      finishReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
       return;
     }
     setReviewDraft(nextDraft);
     setReviewIndex(nextIndex);
     setAcceptedSteps(accepted);
+    setAcceptedSourceRanges(nextCommittedSourceRanges);
     setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, reviewSteps[nextIndex]));
-  }, [acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const handleSkipStep = useCallback(() => {
     if (!reviewDraft || !reviewSteps[reviewIndex]) return;
     const skipped = skippedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      finishReview(reviewDraft, acceptedSteps, skipped);
+      finishReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
       return;
     }
     setReviewIndex(nextIndex);
     setSkippedSteps(skipped);
     setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, reviewSteps[nextIndex]));
-  }, [acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
@@ -641,6 +655,7 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
+    setAcceptedSourceRanges([]);
   }, [clearPreviewSnapshot, msg.id]);
 
   const handleTranscribe = useCallback(async () => {
@@ -706,6 +721,12 @@ function AssistantMessage({
       }}>
         {renderMarkdown(msg.content)}
       </div>
+
+      {msg.visualSearch && (
+        <div style={{ marginTop: 10, marginLeft: 22 }}>
+          <VisualSearchPanel session={msg.visualSearch} />
+        </div>
+      )}
 
       {/* Action card */}
       {hasAction && meta && (
@@ -1088,7 +1109,6 @@ export default function ChatSidebar() {
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
-  const visualSearchSession = useEditorStore(s => s.visualSearchSession);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
@@ -1293,6 +1313,7 @@ export default function ChatSidebar() {
         messages: history,
         context: {
           projectId: freshState.currentProjectId,
+          visualSearchSession: freshState.visualSearchSession,
           videoDuration: freshState.videoDuration,
           clipCount: currentClips.length,
           clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
@@ -1321,7 +1342,7 @@ export default function ChatSidebar() {
           req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
           60,
         );
-        addMessage({ role: 'assistant', content: assistantMessage });
+        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
         producedVisibleResponse = true;
         setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
         const interval = (req.endTime - req.startTime) / count;
@@ -1343,7 +1364,12 @@ export default function ChatSidebar() {
         continue;
       }
 
-      addMessage({ role: 'assistant', content: assistantMessage, action: action ?? undefined });
+      addMessage({
+        role: 'assistant',
+        content: assistantMessage,
+        action: action ?? undefined,
+        visualSearch: visualSearch ?? undefined,
+      });
       producedVisibleResponse = true;
       return;
     }
@@ -1469,6 +1495,7 @@ export default function ChatSidebar() {
           messages: agentHistory,
           context: {
             projectId: freshState.currentProjectId,
+            visualSearchSession: freshState.visualSearchSession,
             videoDuration: currentDuration,
             clipCount: currentClips.length,
             clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
@@ -1492,6 +1519,7 @@ export default function ChatSidebar() {
           role: 'assistant',
           content: assistantMessage,
           action: requestTooBroad ? undefined : action ?? undefined,
+          visualSearch: visualSearch ?? undefined,
           autoApplied: true,
           actionStatus: requestTooBroad ? undefined : action && action.type !== 'none' ? 'completed' : undefined,
           actionResult: requestTooBroad ? undefined : action && action.type !== 'none' ? 'Auto-applied ✓' : undefined,
@@ -1555,8 +1583,9 @@ export default function ChatSidebar() {
           // the first edit already fulfilled the request.
           if (madeStructuralEdit) break;
           madeStructuralEdit = true;
+          const actionSourceRanges = sourceRangesForAction(currentClips, action);
           applyAction(action);
-          recordAppliedAction(action, action.message);
+          recordAppliedAction(action, action.message, { sourceRanges: actionSourceRanges });
           if (action.type === 'delete_ranges') {
             // Batch silence removal is a complete, one-shot operation.
             // Suppress transcript next iteration so the agent can't see remapped
@@ -1709,11 +1738,6 @@ export default function ChatSidebar() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
-        {visualSearchSession && currentProjectId && visualSearchSession.projectId === currentProjectId && (
-          <div style={{ marginBottom: 12 }}>
-            <VisualSearchPanel session={visualSearchSession} />
-          </div>
-        )}
         {messages.length === 0 ? (
           <EmptyState
             isIndexing={hasVideoSource && !agentContextReady}

@@ -196,7 +196,11 @@ interface EditorState {
   setIsChatLoading: (v: boolean) => void;
   clearMessages: () => void;
   setAISettings: (settings: Partial<AIEditingSettings>) => void;
-  recordAppliedAction: (action: EditAction, summary: string) => void;
+  recordAppliedAction: (
+    action: EditAction,
+    summary: string,
+    metadata?: { sourceRanges?: Array<{ assetId?: string | null; sourceStart: number; sourceEnd: number }> },
+  ) => void;
 
   // FFmpeg
   setFFmpegJob: (job: FFmpegJob) => void;
@@ -602,10 +606,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     aiSettings: mergeAISettings(state.aiSettings, settings),
   })),
 
-  recordAppliedAction: (action, summary) => set(state => ({
+  recordAppliedAction: (action, summary, metadata) => set(state => ({
     appliedActions: [
       ...state.appliedActions.slice(-24),
-      { id: uuidv4(), timestamp: Date.now(), action, summary },
+      { id: uuidv4(), timestamp: Date.now(), action, summary, sourceRanges: metadata?.sourceRanges },
     ],
   })),
 

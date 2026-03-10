@@ -79,6 +79,7 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   action?: EditAction;
+  visualSearch?: VisualSearchSession | null;
   autoApplied?: boolean;
   actionStatus?: 'pending' | 'completed';
   actionResult?: string;
@@ -89,6 +90,7 @@ export interface AppliedActionRecord {
   timestamp: number;
   action: EditAction;
   summary: string;
+  sourceRanges?: Array<{ assetId?: string | null; sourceStart: number; sourceEnd: number }>;
 }
 
 export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error';

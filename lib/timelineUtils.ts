@@ -1,4 +1,4 @@
-import { VideoClip, CaptionEntry } from './types';
+import { VideoClip, CaptionEntry, EditAction } from './types';
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
@@ -193,6 +193,76 @@ export function sourceRangeToTimelineRanges(
     cursor += clipDuration;
   }
   return ranges;
+}
+
+export function mergeSourceRanges(
+  ranges: Array<{ sourceStart: number; sourceEnd: number }>,
+): Array<{ sourceStart: number; sourceEnd: number }> {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges]
+    .filter((range) => range.sourceEnd > range.sourceStart)
+    .sort((a, b) => a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd);
+  if (sorted.length === 0) return [];
+
+  const merged = [sorted[0]];
+  for (const range of sorted.slice(1)) {
+    const current = merged[merged.length - 1];
+    if (range.sourceStart <= current.sourceEnd + 1e-6) {
+      current.sourceEnd = Math.max(current.sourceEnd, range.sourceEnd);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+export function subtractSourceRanges(
+  target: { sourceStart: number; sourceEnd: number },
+  removed: Array<{ sourceStart: number; sourceEnd: number }>,
+): Array<{ sourceStart: number; sourceEnd: number }> {
+  let remaining = [{ ...target }];
+  for (const cut of mergeSourceRanges(removed)) {
+    remaining = remaining.flatMap((range) => {
+      if (cut.sourceEnd <= range.sourceStart || cut.sourceStart >= range.sourceEnd) {
+        return [range];
+      }
+      const next: Array<{ sourceStart: number; sourceEnd: number }> = [];
+      if (cut.sourceStart > range.sourceStart) {
+        next.push({ sourceStart: range.sourceStart, sourceEnd: Math.min(cut.sourceStart, range.sourceEnd) });
+      }
+      if (cut.sourceEnd < range.sourceEnd) {
+        next.push({ sourceStart: Math.max(cut.sourceEnd, range.sourceStart), sourceEnd: range.sourceEnd });
+      }
+      return next;
+    });
+    if (remaining.length === 0) break;
+  }
+  return remaining.filter((range) => range.sourceEnd - range.sourceStart > 1e-3);
+}
+
+export function sourceRangesForAction(
+  clips: VideoClip[],
+  action: EditAction,
+): Array<{ sourceStart: number; sourceEnd: number }> {
+  if (action.type === 'delete_range') {
+    if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return [];
+    return getSourceSegmentsForTimelineRange(clips, action.deleteStartTime, action.deleteEndTime)
+      .map((segment) => ({
+        sourceStart: segment.sourceStart,
+        sourceEnd: segment.sourceStart + segment.sourceDuration,
+      }));
+  }
+
+  if (action.type === 'delete_ranges') {
+    return (action.ranges ?? []).flatMap((range) => (
+      getSourceSegmentsForTimelineRange(clips, range.start, range.end).map((segment) => ({
+        sourceStart: segment.sourceStart,
+        sourceEnd: segment.sourceStart + segment.sourceDuration,
+      }))
+    ));
+  }
+
+  return [];
 }
 
 /**

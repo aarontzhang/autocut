@@ -9,7 +9,7 @@ import {
   VisualEditProposal,
   VisualQueryIntent,
 } from './types';
-import { sourceRangeToTimelineRanges } from './timelineUtils';
+import { mergeSourceRanges, sourceRangeToTimelineRanges, subtractSourceRanges } from './timelineUtils';
 import { embedQueryText, scoreVisualSample } from './server/visionIndexing.mjs';
 
 type JsonMap = Record<string, unknown>;
@@ -173,13 +173,26 @@ export function projectVerifiedRangesToProposal(
   assetId: string,
   intent: VisualQueryIntent,
   sourceRanges: VerifiedSourceRange[],
+  options?: { excludedSourceRanges?: Array<{ sourceStart: number; sourceEnd: number }> },
 ): VisualEditProposal {
-  const timelineRanges = sourceRanges.flatMap((range) => (
+  const excluded = mergeSourceRanges(options?.excludedSourceRanges ?? []);
+  const adjustedSourceRanges = sourceRanges.flatMap((range) => (
+    subtractSourceRanges(
+      { sourceStart: range.sourceStart, sourceEnd: range.sourceEnd },
+      excluded,
+    ).map((remaining, index) => ({
+      ...range,
+      sourceStart: remaining.sourceStart,
+      sourceEnd: remaining.sourceEnd,
+      candidateId: index === 0 ? range.candidateId : `${range.candidateId ?? 'range'}:${index}`,
+    }))
+  ));
+  const timelineRanges = adjustedSourceRanges.flatMap((range) => (
     sourceRangeToTimelineRanges(clips, range.sourceStart, range.sourceEnd)
   ));
   const bestConfidence = Math.max(
     0,
-    ...sourceRanges.map((range) => Math.min(range.verificationConfidence, range.boundaryConfidence)),
+    ...adjustedSourceRanges.map((range) => Math.min(range.verificationConfidence, range.boundaryConfidence)),
   );
 
   return {
@@ -190,10 +203,12 @@ export function projectVerifiedRangesToProposal(
       : bestConfidence >= 0.5
         ? 'medium'
         : 'low',
-    sourceRanges,
+    sourceRanges: adjustedSourceRanges,
     timelineRanges,
-    followUpPrompt: timelineRanges.length === 0
-      ? 'I found this in source media, but it is already cut out of the current timeline.'
+    followUpPrompt: adjustedSourceRanges.length === 0
+      ? 'I found this in source media, but it has already been removed from the current edit.'
+      : timelineRanges.length === 0
+        ? 'I found this in source media, but it is already cut out of the current timeline.'
       : undefined,
   };
 }
