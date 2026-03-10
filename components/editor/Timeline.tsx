@@ -99,6 +99,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
   const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
+  const markers = useEditorStore(s => s.previewSnapshot?.markers ?? s.markers);
   const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
   const extraTracks = useEditorStore(s => s.extraTracks);
   const addClipToTrack = useEditorStore(s => s.addClipToTrack);
@@ -110,6 +111,10 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const selectedItem = useEditorStore(s => s.selectedItem);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
+  const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
+  const updateMarker = useEditorStore(s => s.updateMarker);
+  const removeMarker = useEditorStore(s => s.removeMarker);
+  const requestSeek = useEditorStore(s => s.requestSeek);
   const { user } = useAuth();
 
   // Delete key: remove selected extra-track clip (and its linked partner)
@@ -176,6 +181,9 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const hasCaptions = captions.length > 0;
   const hasTextOverlays = textOverlays.length > 0;
   const hasTransitions = transitions.length > 0;
+  const selectedMarker = selectedItem?.type === 'marker'
+    ? markers.find((marker) => marker.id === selectedItem.id) ?? null
+    : null;
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -314,6 +322,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
       clips: state.clips,
       captions: state.captions,
       transitions: state.transitions,
+      markers: state.markers,
       textOverlays: state.textOverlays,
     };
     dragRef.current = { type, id, startX: e.clientX, origStart, origEnd, snapTotalW: totalW, snapDuration: totalTimelineDuration, preDragSnap };
@@ -327,7 +336,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     if (!clip) return;
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'clip-trim-left', id: clipId,
@@ -348,7 +357,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     if (!clip) return;
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'clip-trim-right', id: clipId,
@@ -370,7 +379,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     if (!entry) return;
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'clip-move', id: clipId,
@@ -413,7 +422,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
 
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'track-clip-move', id: clipId, trackId,
@@ -438,7 +447,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     if (!clip) return;
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'track-clip-trim-left', id: clipId, trackId,
@@ -460,7 +469,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     if (!clip) return;
     const preDragSnap: EditSnapshot = {
       clips: state.clips, captions: state.captions,
-      transitions: state.transitions, textOverlays: state.textOverlays,
+      transitions: state.transitions, markers: state.markers, textOverlays: state.textOverlays,
     };
     dragRef.current = {
       type: 'track-clip-trim-right', id: clipId, trackId,
@@ -758,6 +767,83 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
           </span>
         )}
 
+        <button
+          onClick={() => {
+            const label = window.prompt('Marker label (optional)')?.trim();
+            createMarkerAtTime(useEditorStore.getState().currentTime, {
+              label: label || undefined,
+              createdBy: 'human',
+            });
+          }}
+          style={{
+            height: 22,
+            padding: '0 9px',
+            borderRadius: 999,
+            border: '1px solid rgba(255,255,255,0.12)',
+            background: 'rgba(255,255,255,0.04)',
+            color: 'var(--fg-secondary)',
+            cursor: 'pointer',
+            fontSize: 10,
+            fontFamily: 'var(--font-serif)',
+            letterSpacing: '0.05em',
+            textTransform: 'uppercase',
+          }}
+        >
+          Add marker
+        </button>
+
+        {selectedMarker && (
+          <>
+            <span style={{
+              fontSize: 10,
+              padding: '1px 7px',
+              borderRadius: 999,
+              background: 'rgba(250,204,21,0.12)',
+              border: '1px solid rgba(250,204,21,0.24)',
+              color: '#fde68a',
+              fontFamily: 'var(--font-serif)',
+            }}>
+              Marker {selectedMarker.number}
+            </span>
+            <button
+              onClick={() => {
+                const label = window.prompt('Rename marker', selectedMarker.label ?? '')?.trim();
+                if (label === undefined) return;
+                updateMarker(selectedMarker.id, { label: label || undefined });
+              }}
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: 'var(--fg-secondary)',
+                cursor: 'pointer',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Rename
+            </button>
+            <button
+              onClick={() => removeMarker(selectedMarker.id)}
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(248,113,113,0.2)',
+                background: 'rgba(248,113,113,0.08)',
+                color: '#fca5a5',
+                cursor: 'pointer',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Delete
+            </button>
+          </>
+        )}
+
         <div style={{ flex: 1 }} />
 
         <button
@@ -914,6 +1000,39 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                     </span>
                   )}
                 </div>
+              );
+            })}
+            {markers.map((marker) => {
+              const x = tPx(marker.timelineTime);
+              const isSelected = selectedItem?.type === 'marker' && selectedItem.id === marker.id;
+              return (
+                <button
+                  key={marker.id}
+                  title={`Marker ${marker.number}${marker.label ? `: ${marker.label}` : ''}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSelectedItem({ type: 'marker', id: marker.id });
+                    requestSeek(marker.timelineTime);
+                  }}
+                  style={{
+                    position: 'absolute',
+                    left: Math.max(0, x - 10),
+                    top: 2,
+                    width: 20,
+                    height: 20,
+                    borderRadius: 999,
+                    border: isSelected ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
+                    background: isSelected ? 'rgba(250,204,21,0.24)' : 'rgba(250,204,21,0.12)',
+                    color: isSelected ? '#fef08a' : '#fde68a',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    fontFamily: 'var(--font-serif)',
+                    cursor: 'pointer',
+                    zIndex: 2,
+                  }}
+                >
+                  {marker.number}
+                </button>
               );
             })}
           </div>

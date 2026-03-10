@@ -105,6 +105,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
     const paths = new Set<string>();
     if (state.storagePath) paths.add(state.storagePath);
+    state.mediaLibrary.forEach((item) => {
+      if (item.sourcePath) paths.add(item.sourcePath);
+    });
     state.clips.forEach((clip) => {
       if (clip.sourcePath) paths.add(clip.sourcePath);
     });
@@ -123,6 +126,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       videoUrl: currentState.storagePath && signedPaths.get(currentState.storagePath)
         ? signedPaths.get(currentState.storagePath)!
         : currentState.videoUrl,
+      mediaLibrary: currentState.mediaLibrary.map((item, index) => {
+        if (item.sourcePath && signedPaths.get(item.sourcePath)) {
+          return { ...item, url: signedPaths.get(item.sourcePath)! };
+        }
+        if (index === 0 && currentState.storagePath && signedPaths.get(currentState.storagePath)) {
+          return { ...item, url: signedPaths.get(currentState.storagePath)! };
+        }
+        return item;
+      }),
       clips: currentState.clips.map((clip) => (
         clip.sourcePath && signedPaths.get(clip.sourcePath)
           ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
@@ -217,8 +229,12 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         if (!res.ok) return;
         const data = await res.json();
         const editState = structuredClone(data.edit_state ?? {});
-        const videoUrl = data.signedUrl ?? '';
-        loadProject(editState, videoUrl, data.video_path ?? null, projectId);
+        loadProject(editState, {
+          projectId,
+          videoUrl: data.signedUrl ?? '',
+          storagePath: data.video_path ?? null,
+          videoFilename: data.video_filename ?? null,
+        });
         setIsProjectLoading(false);
         await refreshSignedMediaUrls(projectId);
       } catch (e) {

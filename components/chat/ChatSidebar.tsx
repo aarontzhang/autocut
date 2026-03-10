@@ -7,11 +7,13 @@ import { formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsF
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
+import { buildClipSchedule } from '@/lib/playbackEngine';
 import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
 const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
+const REVIEW_PREROLL_SECONDS = 2.5;
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -222,6 +224,52 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
 
 function getDenseRequestTooBroadMessage(startTime: number, endTime: number): string {
   return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
+}
+
+function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number | null {
+  if (action.type === 'split_clip') {
+    return action.splitTime ?? null;
+  }
+
+  if (action.type === 'delete_range') {
+    return action.deleteStartTime ?? null;
+  }
+
+  if (action.type === 'add_captions') {
+    return action.captions?.[0]?.startTime ?? null;
+  }
+
+  if (action.type === 'add_transition') {
+    return action.transitions?.[0]?.atTime ?? null;
+  }
+
+  if (action.type === 'add_text_overlay') {
+    return action.textOverlays?.[0]?.startTime ?? null;
+  }
+
+  if (action.type === 'replace_text_overlay') {
+    return action.textOverlays?.[0]?.startTime ?? null;
+  }
+
+  if (
+    action.type === 'delete_clip'
+    || action.type === 'reorder_clip'
+    || action.type === 'set_clip_speed'
+    || action.type === 'set_clip_volume'
+    || action.type === 'set_clip_filter'
+  ) {
+    const clipIndex = action.clipIndex ?? 0;
+    const schedule = buildClipSchedule(snapshot.clips);
+    return schedule[clipIndex]?.timelineStart ?? null;
+  }
+
+  return null;
+}
+
+function getReviewSeekTime(snapshot: EditSnapshot, action: EditAction): number | null {
+  const anchor = getReviewAnchorTime(snapshot, action);
+  if (anchor === null) return null;
+  return Math.max(0, anchor - REVIEW_PREROLL_SECONDS);
 }
 
 function formatChatTime(seconds: number): string {
@@ -563,6 +611,7 @@ function AssistantMessage({
   const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
   const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
   const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
+  const requestSeek = useEditorStore(s => s.requestSeek);
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const updateMessage = useEditorStore(s => s.updateMessage);
@@ -573,6 +622,7 @@ function AssistantMessage({
   const [reviewIndex, setReviewIndex] = useState(0);
   const [acceptedSteps, setAcceptedSteps] = useState(0);
   const [skippedSteps, setSkippedSteps] = useState(0);
+  const [reviewReadyToCommit, setReviewReadyToCommit] = useState(false);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
   const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<Array<{ sourceStart: number; sourceEnd: number }>>([]);
@@ -584,7 +634,7 @@ function AssistantMessage({
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
-  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
+  const reviewInProgress = reviewDraft !== null && !reviewReadyToCommit && reviewIndex < reviewSteps.length;
   const activeReviewAction = reviewInProgress ? reviewSteps[reviewIndex] : action ?? null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
@@ -601,7 +651,7 @@ function AssistantMessage({
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
   }, [actionCompleted, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
-  const finishReview = useCallback((
+  const finalizeReview = useCallback((
     draft: EditSnapshot,
     accepted: number,
     skipped: number,
@@ -618,9 +668,25 @@ function AssistantMessage({
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
     setSkippedSteps(skipped);
+    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
     setReviewResult(result);
   }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
+
+  const completeReviewSteps = useCallback((
+    draft: EditSnapshot,
+    accepted: number,
+    skipped: number,
+    nextCommittedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
+  ) => {
+    setReviewDraft(draft);
+    setReviewIndex(reviewSteps.length);
+    setAcceptedSteps(accepted);
+    setSkippedSteps(skipped);
+    setAcceptedSourceRanges(nextCommittedSourceRanges);
+    setReviewReadyToCommit(true);
+    setPreviewSnapshot(msg.id, draft);
+  }, [msg.id, reviewSteps.length, setPreviewSnapshot]);
 
   const startReview = useCallback(() => {
     if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
@@ -637,10 +703,13 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
+    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
     setReviewResult(null);
     setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstStep));
-  }, [action, anotherReviewActive, msg.id, reviewSteps, setPreviewSnapshot]);
+    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstStep);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [action, anotherReviewActive, msg.id, requestSeek, reviewSteps, setPreviewSnapshot]);
 
   const handleApplyStep = useCallback(() => {
     if (!reviewDraft || !reviewSteps[reviewIndex]) return;
@@ -653,28 +722,39 @@ function AssistantMessage({
     const accepted = acceptedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      finishReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
+      completeReviewSteps(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
       return;
     }
+    const nextStep = reviewSteps[nextIndex];
     setReviewDraft(nextDraft);
     setReviewIndex(nextIndex);
     setAcceptedSteps(accepted);
     setAcceptedSourceRanges(nextCommittedSourceRanges);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, reviewSteps[nextIndex]));
-  }, [acceptedSourceRanges, acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextStep));
+    const reviewSeekTime = getReviewSeekTime(nextDraft, nextStep);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [acceptedSourceRanges, acceptedSteps, completeReviewSteps, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const handleSkipStep = useCallback(() => {
     if (!reviewDraft || !reviewSteps[reviewIndex]) return;
     const skipped = skippedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      finishReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
+      completeReviewSteps(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
       return;
     }
+    const nextStep = reviewSteps[nextIndex];
     setReviewIndex(nextIndex);
     setSkippedSteps(skipped);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, reviewSteps[nextIndex]));
-  }, [acceptedSourceRanges, acceptedSteps, finishReview, msg.id, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextStep));
+    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextStep);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [acceptedSourceRanges, acceptedSteps, completeReviewSteps, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+
+  const handleCommitReview = useCallback(() => {
+    if (!reviewDraft) return;
+    finalizeReview(reviewDraft, acceptedSteps, skippedSteps, acceptedSourceRanges);
+  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, reviewDraft, skippedSteps]);
 
   const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
@@ -682,6 +762,7 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
+    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
   }, [clearPreviewSnapshot, msg.id]);
 
@@ -814,7 +895,9 @@ function AssistantMessage({
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   {reviewInProgress
                     ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
-                    : `Review ${reviewSteps.length} proposed changes before committing them.`}
+                    : reviewReadyToCommit
+                      ? `Review complete. ${acceptedSteps} accepted, ${skippedSteps} skipped. Commit the accepted changes or discard them.`
+                      : `Review ${reviewSteps.length} proposed changes before committing them.`}
                 </p>
               )}
               {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && (
@@ -911,6 +994,43 @@ function AssistantMessage({
                     }}
                   >
                     Cancel
+                  </button>
+                </div>
+              ) : reviewReadyToCommit ? (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={handleCommitReview}
+                    style={{
+                      flex: 1,
+                      padding: '5px 0',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      background: 'var(--accent)',
+                      border: 'none',
+                      color: '#000',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Commit changes
+                  </button>
+                  <button
+                    onClick={cancelReview}
+                    style={{
+                      flex: 1,
+                      padding: '5px 0',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      background: 'rgba(255,255,255,0.06)',
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      color: 'var(--fg-secondary)',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Discard review
                   </button>
                 </div>
               ) : (

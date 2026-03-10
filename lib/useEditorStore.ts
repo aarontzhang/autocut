@@ -15,6 +15,7 @@ import {
   IndexedVideoFrame,
   AIEditingSettings,
   AppliedActionRecord,
+  MarkerEntry,
   VisualSearchSession,
 } from './types';
 import {
@@ -47,7 +48,7 @@ export type FFmpegJob =
   | { status: 'error'; message: string };
 
 export type SelectedItem = {
-  type: 'clip' | 'caption' | 'text' | 'transition';
+  type: 'clip' | 'caption' | 'text' | 'transition' | 'marker';
   id: string;
 } | null;
 
@@ -110,6 +111,7 @@ interface EditorState {
   videoData: Uint8Array | null;
   videoDuration: number;
   currentTime: number;  // timeline time
+  requestedSeekTime: number | null;
 
   // Pending Claude action
   pendingAction: EditAction | null;
@@ -120,6 +122,7 @@ interface EditorState {
   // Effects (reference timeline time)
   captions: CaptionEntry[];
   transitions: TransitionEntry[];
+  markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
   previewSnapshot: EditSnapshot | null;
   previewOwnerId: string | null;
@@ -166,6 +169,8 @@ interface EditorState {
   setVideoFile: (file: File) => void;
   setVideoDuration: (duration: number) => void;
   setCurrentTime: (time: number) => void;
+  requestSeek: (time: number) => void;
+  clearRequestedSeek: () => void;
   setPendingAction: (action: EditAction | null) => void;
   setPreviewSnapshot: (ownerId: string, snapshot: EditSnapshot) => void;
   clearPreviewSnapshot: (ownerId?: string) => void;
@@ -206,7 +211,31 @@ interface EditorState {
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown; backgroundTranscript?: unknown; transcriptStatus?: unknown; rawTranscriptCaptions?: unknown[]; videoFrames?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
+  loadProject: (
+    editState: {
+      clips?: unknown[];
+      captions?: unknown[];
+      transitions?: unknown[];
+      markers?: unknown[];
+      textOverlays?: unknown[];
+      extraTracks?: unknown[];
+      messages?: unknown[];
+      appliedActions?: unknown[];
+      aiSettings?: unknown;
+      backgroundTranscript?: unknown;
+      transcriptStatus?: unknown;
+      rawTranscriptCaptions?: unknown[];
+      videoFrames?: unknown[];
+      mediaLibrary?: unknown[];
+    },
+    project: {
+      projectId: string;
+      videoUrl: string;
+      storagePath: string | null;
+      videoFilename?: string | null;
+      duration?: number;
+    }
+  ) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -218,6 +247,10 @@ interface EditorState {
   setTranscriptProgress: (progress: TranscriptProgress) => void;
   setVideoFrames: (frames: IndexedVideoFrame[]) => void;
   setVisualSearchSession: (session: VisualSearchSession | null) => void;
+  addMarker: (marker: Omit<MarkerEntry, 'id' | 'number'> & { id?: string; number?: number }) => string;
+  updateMarker: (id: string, patch: Partial<Omit<MarkerEntry, 'id'>>) => void;
+  removeMarker: (id: string) => void;
+  createMarkerAtTime: (timelineTime: number, options?: { label?: string; createdBy?: 'ai' | 'human'; linkedMessageId?: string | null }) => string;
 
   // Media library (multi-source V1)
   mediaLibrary: MediaLibraryItem[];
@@ -259,10 +292,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   videoData: null,
   videoDuration: 0,
   currentTime: 0,
+  requestedSeekTime: null,
   pendingAction: null,
   clips: [],
   captions: [],
   transitions: [],
+  markers: [],
   textOverlays: [],
   previewSnapshot: null,
   previewOwnerId: null,
@@ -295,6 +330,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       clips: s.clips,
       captions: s.captions,
       transitions: s.transitions,
+      markers: s.markers,
       textOverlays: s.textOverlays,
     };
   },
@@ -302,9 +338,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setVideoFile: (file) => {
     const url = URL.createObjectURL(file);
     set({
-      videoFile: file, videoUrl: url, videoData: null, videoDuration: 0, currentTime: 0,
+      videoFile: file, videoUrl: url, videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
       pendingAction: null, clips: [],
-      captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
@@ -330,6 +366,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setCurrentTime: (time) => set({ currentTime: time }),
+  requestSeek: (time) => set({ requestedSeekTime: Math.max(0, time) }),
+  clearRequestedSeek: () => set({ requestedSeekTime: null }),
   setPendingAction: (action) => set({ pendingAction: action }),
   setPreviewSnapshot: (ownerId, snapshot) => set({ previewSnapshot: snapshot, previewOwnerId: ownerId }),
   clearPreviewSnapshot: (ownerId) => set(state => {
@@ -595,6 +633,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     clips: s.videoDuration > 0 ? [makeClip(0, s.videoDuration)] : [],
     captions: [],
     transitions: [],
+    markers: [],
     textOverlays: [],
     previewSnapshot: null,
     previewOwnerId: null,
@@ -619,9 +658,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setVideoCloud: (file, blobUrl, storagePath, projectId) => {
     set({
-      videoFile: file, videoUrl: blobUrl, videoData: null, videoDuration: 0, currentTime: 0,
+      videoFile: file, videoUrl: blobUrl, videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
       pendingAction: null, clips: [],
-      captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
@@ -630,13 +669,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
-      mediaLibrary: [],
+      mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourcePath: storagePath }],
     });
   },
 
-  loadProject: (editState, blobUrl, storagePath, projectId, duration) => {
+  loadProject: (editState, project) => {
+    const { videoUrl, storagePath, projectId, videoFilename, duration } = project;
     const clips = (editState.clips as VideoClip[] | undefined) ?? [];
     const rawTranscriptCaptions = (editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null;
+    const persistedMediaLibrary = Array.isArray(editState.mediaLibrary)
+      ? (editState.mediaLibrary as Array<Partial<MediaLibraryItem>>)
+          .filter((item) => (
+            typeof item?.name === 'string'
+            && typeof item.duration === 'number'
+          ))
+          .map((item) => ({
+            id: uuidv4(),
+            url: '',
+            name: item.name as string,
+            duration: item.duration as number,
+            sourcePath: typeof item.sourcePath === 'string' ? item.sourcePath : undefined,
+          }))
+      : [];
     const persistedVideoFrames = Array.isArray(editState.videoFrames)
       ? (editState.videoFrames as Array<Partial<IndexedVideoFrame>>)
           .filter((frame) => (
@@ -661,16 +715,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       : editState.transcriptStatus === 'error'
         ? 'error'
         : 'idle';
+    const mediaLibraryByPath = new Map(
+      persistedMediaLibrary
+        .filter((item) => item.sourcePath)
+        .map((item) => [item.sourcePath as string, item]),
+    );
+    const hydratedClips = clips.map((clip) => {
+      const sourceItem = clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null;
+      return sourceItem?.url ? { ...clip, sourceUrl: sourceItem.url } : clip;
+    });
+    const hydratedTracks = ((editState.extraTracks as MediaTrack[] | undefined) ?? []).map((track) => ({
+      ...track,
+      clips: track.clips.map((clip) => {
+        const sourceItem = clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null;
+        return sourceItem?.url ? { ...clip, sourceUrl: sourceItem.url } : clip;
+      }),
+    }));
+    const mainLibraryItem = videoUrl
+      ? [{
+          id: uuidv4(),
+          url: videoUrl,
+          name: videoFilename?.trim() || 'Main video',
+          duration: duration ?? 0,
+          ...(storagePath ? { sourcePath: storagePath } : {}),
+        }]
+      : [];
+    const mediaLibrary = [
+      ...mainLibraryItem,
+      ...persistedMediaLibrary.filter((item) => item.sourcePath !== storagePath),
+    ];
 
     set({
-      videoUrl: blobUrl, videoData: null, videoFile: null, videoDuration: duration ?? 0,
-      currentTime: 0, pendingAction: null,
-      clips,
+      videoUrl, videoData: null, videoFile: null, videoDuration: duration ?? 0,
+      currentTime: 0, requestedSeekTime: null, pendingAction: null,
+      clips: hydratedClips,
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
       transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],
+      markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
       previewSnapshot: null, previewOwnerId: null,
-      extraTracks: (editState.extraTracks as MediaTrack[] | undefined) ?? [],
+      extraTracks: hydratedTracks,
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
       appliedActions: (editState.appliedActions as AppliedActionRecord[] | undefined) ?? [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
@@ -681,7 +765,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFramesFresh: persistedVideoFrames ? persistedVideoFrames.length > 0 : true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
-      mediaLibrary: [],
+      mediaLibrary,
     });
   },
 
@@ -699,9 +783,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { videoUrl } = get();
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     set({
-      videoFile: null, videoUrl: '', videoData: null, videoDuration: 0, currentTime: 0,
+      videoFile: null, videoUrl: '', videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
       pendingAction: null, clips: [],
-      captions: [], transitions: [], textOverlays: [], extraTracks: [],
+      captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
       messages: [], isChatLoading: false,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
@@ -733,6 +817,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ history: newHistory, future: [], textOverlays: s.textOverlays.filter(c => c.id !== id), selectedItem: null });
     } else if (type === 'transition') {
       set({ history: newHistory, future: [], transitions: s.transitions.filter(c => c.id !== id), selectedItem: null });
+    } else if (type === 'marker') {
+      set({ history: newHistory, future: [], markers: s.markers.filter(marker => marker.id !== id), selectedItem: null });
     }
   },
 
@@ -749,6 +835,69 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateTransition: (id, patch) => set(s => ({
     transitions: s.transitions.map(t => t.id === id ? { ...t, ...patch } : t),
   })),
+
+  addMarker: (marker) => {
+    const id = marker.id ?? uuidv4();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const nextNumber = marker.number ?? (
+      get().markers.length === 0
+        ? 1
+        : Math.max(...get().markers.map((entry) => entry.number)) + 1
+    );
+    set(s => ({
+      history: [...s.history, snap],
+      future: [],
+      markers: [
+        ...s.markers,
+        {
+          id,
+          number: nextNumber,
+          timelineTime: marker.timelineTime,
+          label: marker.label,
+          createdBy: marker.createdBy,
+          status: marker.status,
+          linkedRange: marker.linkedRange,
+          linkedMessageId: marker.linkedMessageId ?? undefined,
+          confidence: marker.confidence ?? null,
+          note: marker.note,
+        },
+      ],
+      selectedItem: { type: 'marker', id },
+    }));
+    return id;
+  },
+
+  updateMarker: (id, patch) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    set(s => ({
+      history: [...s.history, snap],
+      future: [],
+      markers: s.markers.map((marker) => (
+        marker.id === id
+          ? { ...marker, ...patch, number: patch.number ?? marker.number, timelineTime: patch.timelineTime ?? marker.timelineTime }
+          : marker
+      )),
+    }));
+  },
+
+  removeMarker: (id) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    set(s => ({
+      history: [...s.history, snap],
+      future: [],
+      markers: s.markers.filter((marker) => marker.id !== id),
+      selectedItem: s.selectedItem?.type === 'marker' && s.selectedItem.id === id ? null : s.selectedItem,
+    }));
+  },
+
+  createMarkerAtTime: (timelineTime, options) => get().addMarker({
+    timelineTime,
+    label: options?.label,
+    createdBy: options?.createdBy ?? 'human',
+    status: 'open',
+    linkedMessageId: options?.linkedMessageId ?? undefined,
+    confidence: null,
+  }),
 
   // ── Extra track actions ─────────────────────────────────────────────────────
 

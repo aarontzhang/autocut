@@ -3,6 +3,7 @@ import { buildClipSchedule } from './playbackEngine';
 import type {
   CaptionEntry,
   EditAction,
+  MarkerEntry,
   TextOverlayEntry,
   TransitionEntry,
   VideoClip,
@@ -12,6 +13,7 @@ export interface EditSnapshot {
   clips: VideoClip[];
   captions: CaptionEntry[];
   transitions: TransitionEntry[];
+  markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
 }
 
@@ -187,6 +189,83 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     };
   }
 
+  if (action.type === 'add_marker') {
+    const marker = action.marker;
+    if (marker?.timelineTime === undefined) return snapshot;
+    const nextNumber = snapshot.markers.length === 0
+      ? 1
+      : Math.max(...snapshot.markers.map((entry) => entry.number)) + 1;
+    return {
+      ...snapshot,
+      markers: [
+        ...snapshot.markers,
+        {
+          id: marker.id ?? uuidv4(),
+          number: marker.number ?? nextNumber,
+          timelineTime: marker.timelineTime,
+          label: marker.label,
+          createdBy: marker.createdBy ?? 'ai',
+          status: marker.status ?? 'open',
+          linkedRange: marker.linkedRange,
+          linkedMessageId: marker.linkedMessageId,
+          confidence: marker.confidence ?? null,
+          note: marker.note,
+        },
+      ],
+    };
+  }
+
+  if (action.type === 'add_markers') {
+    const markers = (action.markers ?? []).filter((marker) => marker.timelineTime !== undefined);
+    if (markers.length === 0) return snapshot;
+    let nextNumber = snapshot.markers.length === 0
+      ? 1
+      : Math.max(...snapshot.markers.map((entry) => entry.number)) + 1;
+    return {
+      ...snapshot,
+      markers: [
+        ...snapshot.markers,
+        ...markers.map((marker) => ({
+          id: marker.id ?? uuidv4(),
+          number: marker.number ?? nextNumber++,
+          timelineTime: marker.timelineTime!,
+          label: marker.label,
+          createdBy: marker.createdBy ?? 'ai',
+          status: marker.status ?? 'open',
+          linkedRange: marker.linkedRange,
+          linkedMessageId: marker.linkedMessageId,
+          confidence: marker.confidence ?? null,
+          note: marker.note,
+        })),
+      ],
+    };
+  }
+
+  if (action.type === 'update_marker') {
+    if (!action.markerId) return snapshot;
+    return {
+      ...snapshot,
+      markers: snapshot.markers.map((marker) => (
+        marker.id === action.markerId
+          ? {
+              ...marker,
+              ...action.marker,
+              timelineTime: action.marker?.timelineTime ?? marker.timelineTime,
+              number: action.marker?.number ?? marker.number,
+            }
+          : marker
+      )),
+    };
+  }
+
+  if (action.type === 'remove_marker') {
+    if (!action.markerId) return snapshot;
+    return {
+      ...snapshot,
+      markers: snapshot.markers.filter((marker) => marker.id !== action.markerId),
+    };
+  }
+
   if (action.type === 'add_text_overlay') {
     return {
       ...snapshot,
@@ -230,6 +309,14 @@ export function expandActionForReview(action: EditAction): EditAction[] {
     return (action.transitions ?? []).map(transition => ({
       type: 'add_transition' as const,
       transitions: [transition],
+      message: action.message,
+    }));
+  }
+
+  if (action.type === 'add_markers') {
+    return (action.markers ?? []).map((marker) => ({
+      type: 'add_marker' as const,
+      marker,
       message: action.message,
     }));
   }

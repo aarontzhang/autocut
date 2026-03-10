@@ -23,10 +23,23 @@ function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sou
   return copy;
 }
 
+function persistMediaLibraryItem(item: {
+  name: string;
+  duration: number;
+  sourcePath?: string;
+}) {
+  return {
+    name: item.name,
+    duration: item.duration,
+    ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}),
+  };
+}
+
 export function useAutoSave() {
   const clips = useEditorStore(s => s.clips);
   const captions = useEditorStore(s => s.captions);
   const transitions = useEditorStore(s => s.transitions);
+  const markers = useEditorStore(s => s.markers);
   const textOverlays = useEditorStore(s => s.textOverlays);
   const extraTracks = useEditorStore(s => s.extraTracks);
   const messages = useEditorStore(s => s.messages);
@@ -38,6 +51,7 @@ export function useAutoSave() {
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
+  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,6 +74,7 @@ export function useAutoSave() {
           clips: state.clips.map(stripSourceUrl),
           captions: state.captions,
           transitions: state.transitions,
+          markers: state.markers,
           textOverlays: state.textOverlays,
           messages: state.messages,
           appliedActions: state.appliedActions,
@@ -76,6 +91,9 @@ export function useAutoSave() {
             ...track,
             clips: track.clips.map(stripSourceUrl),
           })),
+          mediaLibrary: state.mediaLibrary
+            .filter(item => item.sourcePath)
+            .map(persistMediaLibraryItem),
         };
         const res = await fetch(`/api/projects/${currentProjectId}`, {
           method: 'PATCH',
@@ -95,5 +113,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, mediaLibrary, setSaveStatus]);
 }

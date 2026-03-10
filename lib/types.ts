@@ -33,8 +33,24 @@ export interface CaptionEntry {
 export interface TransitionEntry {
   id?: string;
   atTime: number;
-  type: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
+  type: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe' | 'glitch_flash';
   duration: number;
+}
+
+export interface MarkerEntry {
+  id: string;
+  number: number;
+  timelineTime: number;
+  label?: string;
+  createdBy: 'ai' | 'human';
+  status: 'open' | 'accepted' | 'rejected';
+  linkedRange?: {
+    startTime: number;
+    endTime: number;
+  };
+  linkedMessageId?: string;
+  confidence?: number | null;
+  note?: string;
 }
 
 export interface TextOverlayEntry {
@@ -272,7 +288,7 @@ export interface AIEditingSettings {
   };
   transitions: {
     defaultDuration: number;
-    defaultType: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
+    defaultType: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe' | 'glitch_flash';
   };
   textOverlays: {
     defaultPosition: 'top' | 'center' | 'bottom';
@@ -294,6 +310,10 @@ export interface EditAction {
     | 'transcribe_request'
     | 'request_frames'
     | 'add_transition'
+    | 'add_marker'
+    | 'add_markers'
+    | 'update_marker'
+    | 'remove_marker'
     | 'add_text_overlay'
     | 'replace_text_overlay'
     | 'update_ai_settings'
@@ -325,6 +345,10 @@ export interface EditAction {
   frameRequest?: { startTime: number; endTime: number; count?: number };
   // transitions
   transitions?: TransitionEntry[];
+  // markers
+  marker?: Partial<MarkerEntry>;
+  markers?: Array<Partial<MarkerEntry>>;
+  markerId?: string;
   // text overlays
   textOverlays?: TextOverlayEntry[];
   // replace_text_overlay

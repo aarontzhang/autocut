@@ -60,6 +60,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [isActiveSourceReady, setIsActiveSourceReady] = useState(false);
   const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
+  const requestedSeekTime = useEditorStore(s => s.requestedSeekTime);
+  const clearRequestedSeek = useEditorStore(s => s.clearRequestedSeek);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const currentTime = useEditorStore(s => s.currentTime);
   const videoDuration = useEditorStore(s => s.videoDuration);
@@ -387,55 +389,65 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     };
   }, [activeSourceUrl, handleTimeUpdate, videoRef]);
 
+  const seekToTimelineTime = useCallback((timelineTime: number) => {
+    const sched = buildClipSchedule(clipsRef.current);
+    const targetEntry = findTimelineEntryAtTime(sched, timelineTime);
+    if (!targetEntry) return;
+
+    const clip = clipsRef.current.find(c => c.id === targetEntry.clipId);
+    const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
+    const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
+    if (!activeEl) return;
+    const previousActiveEl = videoRef.current;
+    const switchingSource = previousActiveEl !== activeEl;
+    const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
+    const offsetInTimeline = timelineTime - targetEntry.timelineStart;
+    const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+    const shouldApplySeek =
+      switchingSource ||
+      activeEl.seeking ||
+      Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
+
+    if (switchingSource) {
+      for (const el of sourceVideoMapRef.current.values()) {
+        if (!el.paused) el.pause();
+      }
+      activateSource(targetSourceUrl);
+    }
+
+    if (shouldApplySeek) {
+      activeEl.currentTime = Math.max(0, sourceTime);
+    }
+    if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
+      currentTimeRef.current = timelineTime;
+      setCurrentTime(timelineTime);
+    }
+    applyClipEffects(sourceTime);
+    syncExtraTracks(timelineTime, !wasPlaying);
+    if (switchingSource && wasPlaying) activeEl.play().catch(() => {});
+
+    for (const track of extraTracksRef.current) {
+      const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
+      const el = map.get(track.id);
+      if (!el) continue;
+      const activeClip = findActiveTrackClip(track.clips, timelineTime);
+      if (activeClip) {
+        el.currentTime = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
+      }
+    }
+  }, [activateSource, applyClipEffects, setCurrentTime, syncExtraTracks, videoRef, videoUrl]);
+
+  useEffect(() => {
+    if (requestedSeekTime === null) return;
+    const frameId = window.requestAnimationFrame(() => {
+      seekToTimelineTime(requestedSeekTime);
+      clearRequestedSeek();
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [clearRequestedSeek, requestedSeekTime, seekToTimelineTime]);
+
   useImperativeHandle(ref, () => ({
-    seekTo: (timelineTime: number) => {
-      const sched = buildClipSchedule(clipsRef.current);
-      const targetEntry = findTimelineEntryAtTime(sched, timelineTime);
-      if (!targetEntry) return;
-
-      const clip = clipsRef.current.find(c => c.id === targetEntry.clipId);
-      const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
-      const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
-      if (!activeEl) return;
-      const previousActiveEl = videoRef.current;
-      const switchingSource = previousActiveEl !== activeEl;
-      const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
-      const offsetInTimeline = timelineTime - targetEntry.timelineStart;
-      const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-      const shouldApplySeek =
-        switchingSource ||
-        activeEl.seeking ||
-        Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
-
-      if (switchingSource) {
-        for (const el of sourceVideoMapRef.current.values()) {
-          if (!el.paused) el.pause();
-        }
-        activateSource(targetSourceUrl);
-      }
-
-      if (shouldApplySeek) {
-        activeEl.currentTime = Math.max(0, sourceTime);
-      }
-      if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
-        currentTimeRef.current = timelineTime;
-        setCurrentTime(timelineTime);
-      }
-      applyClipEffects(sourceTime);
-      syncExtraTracks(timelineTime, !wasPlaying);
-      if (switchingSource && wasPlaying) activeEl.play().catch(() => {});
-
-      // Seek extra tracks
-      for (const track of extraTracksRef.current) {
-        const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
-        const el = map.get(track.id);
-        if (!el) continue;
-        const activeClip = findActiveTrackClip(track.clips, timelineTime);
-        if (activeClip) {
-          el.currentTime = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
-        }
-      }
-    },
+    seekTo: seekToTimelineTime,
     togglePlay: () => {
       const video = videoRef.current;
       if (!video) return;
@@ -453,7 +465,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         }
       }
     },
-  }), [activateSource, applyClipEffects, setCurrentTime, setupAudio, syncExtraTracks, videoRef, videoUrl]);
+  }), [seekToTimelineTime, setupAudio, videoRef]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
