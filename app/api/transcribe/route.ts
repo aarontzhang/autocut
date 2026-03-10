@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { CaptionEntry } from '@/lib/types';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+type WhisperWord = { start: number; end: number; word: string };
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,19 +24,31 @@ export async function POST(req: NextRequest) {
     });
 
     const words = transcription.words ?? [];
+    const wordEntries: CaptionEntry[] = words
+      .map((word) => {
+        const typedWord = word as WhisperWord;
+        const text = typedWord.word.trim();
+        if (!text) return null;
+        return {
+          startTime: startTime + typedWord.start,
+          endTime: startTime + typedWord.end,
+          text,
+        };
+      })
+      .filter((entry): entry is CaptionEntry => entry !== null);
     const captions: CaptionEntry[] = [];
 
-    for (let i = 0; i < words.length; i += wordsPerCaption) {
-      const chunk = words.slice(i, i + wordsPerCaption);
+    for (let i = 0; i < wordEntries.length; i += wordsPerCaption) {
+      const chunk = wordEntries.slice(i, i + wordsPerCaption);
       if (chunk.length === 0) continue;
       captions.push({
-        startTime: startTime + chunk[0].start,
-        endTime: startTime + chunk[chunk.length - 1].end,
-        text: chunk.map((w: { word: string }) => w.word.trim()).join(' '),
+        startTime: chunk[0].startTime,
+        endTime: chunk[chunk.length - 1].endTime,
+        text: chunk.map((w) => w.text).join(' '),
       });
     }
 
-    return NextResponse.json({ captions });
+    return NextResponse.json({ captions, words: wordEntries });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }

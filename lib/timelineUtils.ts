@@ -76,6 +76,17 @@ export function formatTimeDetailed(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 }
 
+export function formatTimePrecise(seconds: number): string {
+  const safeSeconds = Math.max(0, seconds);
+  const m = Math.floor(safeSeconds / 60);
+  const s = Math.floor(safeSeconds % 60);
+  const ms = Math.round((safeSeconds % 1) * 1000);
+  if (ms === 1000) {
+    return formatTimePrecise(safeSeconds + 0.001);
+  }
+  return `${m}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+}
+
 export function formatTimeShort(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -141,12 +152,54 @@ export function sourceTimeToTimeline(clips: VideoClip[], sourceTime: number): nu
  * Captions whose source time falls in deleted segments are omitted.
  */
 export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionEntry[]): string {
+  const mapped = rawCaptions
+    .map((cap) => {
+      const timelineStart = sourceTimeToTimeline(clips, cap.startTime);
+      const timelineEnd = sourceTimeToTimeline(clips, cap.endTime);
+      if (timelineStart === null || timelineEnd === null) return null;
+      return {
+        startTime: timelineStart,
+        endTime: timelineEnd,
+        text: cap.text.trim(),
+      };
+    })
+    .filter((entry): entry is { startTime: number; endTime: number; text: string } => !!entry && !!entry.text);
+
   const lines: string[] = [];
-  for (const cap of rawCaptions) {
-    const timelineTime = sourceTimeToTimeline(clips, cap.startTime);
-    if (timelineTime === null) continue;
-    lines.push(`[${formatTime(timelineTime)}] ${cap.text}`);
+  let active: { startTime: number; endTime: number; parts: string[] } | null = null;
+
+  for (const entry of mapped) {
+    const pauseSinceLast = active ? entry.startTime - active.endTime : Infinity;
+    const nextWordCount = (active?.parts.length ?? 0) + 1;
+    const nextTextLength = active
+      ? active.parts.join(' ').length + 1 + entry.text.length
+      : entry.text.length;
+    const shouldFlush = !!active && (
+      pauseSinceLast > 0.45 ||
+      nextWordCount > 10 ||
+      nextTextLength > 72
+    );
+
+    if (!active || shouldFlush) {
+      if (active) {
+        lines.push(`[${formatTimePrecise(active.startTime)}-${formatTimePrecise(active.endTime)}] ${active.parts.join(' ')}`);
+      }
+      active = {
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+        parts: [entry.text],
+      };
+      continue;
+    }
+
+    active.endTime = entry.endTime;
+    active.parts.push(entry.text);
   }
+
+  if (active) {
+    lines.push(`[${formatTimePrecise(active.startTime)}-${formatTimePrecise(active.endTime)}] ${active.parts.join(' ')}`);
+  }
+
   return lines.join('\n');
 }
 

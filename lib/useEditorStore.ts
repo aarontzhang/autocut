@@ -62,13 +62,13 @@ function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
 
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   silenceRemoval: {
-    paddingSeconds: 2,
-    minDurationSeconds: 6,
-    preserveShortPauses: true,
+    paddingSeconds: 0.12,
+    minDurationSeconds: 0.08,
+    preserveShortPauses: false,
     requireSpeakerAbsence: true,
   },
   frameInspection: {
-    defaultFrameCount: 15,
+    defaultFrameCount: 24,
   },
   captions: {
     wordsPerCaption: 4,

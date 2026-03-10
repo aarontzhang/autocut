@@ -490,7 +490,7 @@ function AssistantMessage({
         const res = await fetch('/api/transcribe', { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-        rawCaptions.push(...((data.captions as CaptionEntry[]) ?? []));
+        rawCaptions.push(...((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? []));
       }
 
       const transcriptText = buildTranscriptContext(clips, rawCaptions);
@@ -839,9 +839,12 @@ export default function ChatSidebar() {
     try {
       const currentClips = useEditorStore.getState().clips;
       const currentDuration = useEditorStore.getState().videoDuration;
-      const interval = Math.max(1, Math.ceil(currentDuration / 20));
+      const interval = Math.max(0.5, currentDuration / 30);
       const timelineTimestamps: number[] = [];
       for (let t = 0; t < currentDuration; t += interval) timelineTimestamps.push(t);
+      if (timelineTimestamps[timelineTimestamps.length - 1] !== currentDuration) {
+        timelineTimestamps.push(currentDuration);
+      }
       const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
       const images = await extractVideoFrames(source, sourceTimestamps);
       const frames = images.map((image, index) => ({
@@ -1101,7 +1104,7 @@ export default function ChatSidebar() {
             try {
               setLoadingStatus(`Transcribing audio (${formatTime(seg.startTime)}–${formatTime(seg.endTime)})…`);
               const sourceSegs = getSourceSegmentsForTimelineRange(currentClips, seg.startTime, seg.endTime);
-              let combinedTranscript = '';
+              const rawCaptions: CaptionEntry[] = [];
               for (const sourceSeg of sourceSegs) {
                 const audioBlob = await extractAudioSegment(
                   videoData ?? videoUrl,
@@ -1110,21 +1113,16 @@ export default function ChatSidebar() {
                 );
                 const form = new FormData();
                 form.append('audio', audioBlob, 'audio.mp3');
-                form.append('startTime', String(sourceSeg.timelineOffset));
+                form.append('startTime', String(sourceSeg.sourceStart));
                 form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
                 const tRes = await fetch('/api/transcribe', { method: 'POST', body: form });
                 const tData = await tRes.json();
                 if (!tRes.ok) throw new Error(tData.error ?? 'Transcription failed');
-                const segText = (tData.captions as Array<{ startTime: number; text: string }>)
-                  .map((c) => `[${formatTime(c.startTime)}] ${c.text}`)
-                  .join('\n');
-                combinedTranscript += (combinedTranscript ? '\n' : '') + segText;
+                rawCaptions.push(...((tData.words as CaptionEntry[]) ?? (tData.captions as CaptionEntry[]) ?? []));
               }
-              // Pass empty rawCaptions to clear the sparse auto-transcript so subsequent
-              // iterations use this Whisper result directly (no remapping). The Whisper
-              // transcript has accurate per-word timestamps with no artificial gaps.
-              setBackgroundTranscript(combinedTranscript, 'done', []);
-              resultSummary = `Transcription complete. Full transcript:\n${combinedTranscript}`;
+              const remappedTranscript = buildTranscriptContext(useEditorStore.getState().clips, rawCaptions);
+              setBackgroundTranscript(remappedTranscript, 'done', rawCaptions);
+              resultSummary = `Transcription complete. Full transcript:\n${remappedTranscript}`;
             } catch (err) {
               resultSummary = `Transcription failed: ${err instanceof Error ? err.message : 'Unknown error'}`;
             } finally {

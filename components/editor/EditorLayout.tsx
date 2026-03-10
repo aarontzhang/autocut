@@ -3,7 +3,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { extractAudioSegment } from '@/lib/ffmpegClient';
-import { formatTime } from '@/lib/timelineUtils';
+import { buildTranscriptContext } from '@/lib/timelineUtils';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
 import MediaPanel from './MediaPanel';
@@ -156,9 +156,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         const res = await fetch('/api/transcribe', { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-        const rawCaptions = data.captions as Array<{ startTime: number; endTime: number; text: string }>;
-        const text = rawCaptions.map(c => `[${formatTime(c.startTime)}] ${c.text}`).join('\n');
-        setBackgroundTranscript(text, 'done', rawCaptions);
+        const rawWords = (data.words as Array<{ startTime: number; endTime: number; text: string }> | undefined)
+          ?? (data.captions as Array<{ startTime: number; endTime: number; text: string }> | undefined)
+          ?? [];
+        const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
+        setBackgroundTranscript(text, 'done', rawWords);
       } catch {
         setBackgroundTranscript(null, 'error');
       }

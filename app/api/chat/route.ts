@@ -36,6 +36,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Applied end-to-start internally, so offsets stay correct — you do NOT need to account for shifting
 - IMPORTANT: use the silence-removal settings provided in context. Treat them as the current default behavior unless the user explicitly overrides them in the latest request.
 - IMPORTANT: delete_ranges is a complete, one-shot operation. After issuing it, immediately return type:none. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
+- IMPORTANT: when removing silence, use the transcript's sub-second timing and cut as tightly as possible without clipping spoken words. Leaving a tiny bit of extra room is better than cutting into speech.
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
 Example — delete two silent sections (original silence was 22s–45s and 70s–90s):
@@ -172,19 +173,19 @@ No action:
 ## Visual and audio context
 You may be provided with sampled frames from the user's video as images, and/or a full audio transcript.
 - If frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
-- If a transcript is provided: use it to answer questions about what is spoken and when.
+- If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
 - If NEITHER frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate. Never copy transcript text directly as captions — use transcribe_request only to store the transcript internally.`;
 
 const DEFAULT_SETTINGS: AIEditingSettings = {
   silenceRemoval: {
-    paddingSeconds: 2,
-    minDurationSeconds: 6,
-    preserveShortPauses: true,
+    paddingSeconds: 0.12,
+    minDurationSeconds: 0.08,
+    preserveShortPauses: false,
     requireSpeakerAbsence: true,
   },
   frameInspection: {
-    defaultFrameCount: 15,
+    defaultFrameCount: 24,
   },
   captions: {
     wordsPerCaption: 4,
