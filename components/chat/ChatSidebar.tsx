@@ -8,6 +8,24 @@ import { extractAudioSegment, extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
 
+function serializeActionForComparison(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(serializeActionForComparison).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, nested]) => `${key}:${serializeActionForComparison(nested)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function actionsMatch(a?: EditAction, b?: EditAction): boolean {
+  if (!a || !b) return false;
+  return serializeActionForComparison(a) === serializeActionForComparison(b);
+}
+
 // ─── Action card config ────────────────────────────────────────────────────────
 function getActionMeta(action: EditAction): { label: string; color: string; summary: string } {
   switch (action.type) {
@@ -338,6 +356,8 @@ function AssistantMessage({
   const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
+  const updateMessage = useEditorStore(s => s.updateMessage);
+  const appliedActions = useEditorStore(s => s.appliedActions);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
@@ -357,8 +377,18 @@ function AssistantMessage({
   const activeReviewAction = reviewInProgress ? reviewSteps[reviewIndex] : action ?? null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
+  const actionPreviouslyApplied = useMemo(() => (
+    !!action && appliedActions.some(record => actionsMatch(record.action, action))
+  ), [action, appliedActions]);
+  const actionCompleted = msg.actionStatus === 'completed' || msg.autoApplied || actionPreviouslyApplied;
+  const actionResultText = msg.actionResult ?? (msg.autoApplied ? 'Auto-applied ✓' : actionPreviouslyApplied ? 'Already applied.' : null);
 
   useEffect(() => () => clearPreviewSnapshot(msg.id), [clearPreviewSnapshot, msg.id]);
+
+  useEffect(() => {
+    if (!actionCompleted || msg.actionStatus === 'completed') return;
+    updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
+  }, [actionCompleted, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
   const finishReview = useCallback((draft: EditSnapshot, accepted: number, skipped: number) => {
     clearPreviewSnapshot(msg.id);
@@ -366,12 +396,14 @@ function AssistantMessage({
     if (accepted > 0 && action) {
       recordAppliedAction(action, action.message);
     }
+    const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
+    updateMessage(msg.id, { actionStatus: 'completed', actionResult: result });
     setReviewDraft(null);
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
     setSkippedSteps(skipped);
-    setReviewResult(accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.');
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length]);
+    setReviewResult(result);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
 
   const startReview = useCallback(() => {
     if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
@@ -468,20 +500,22 @@ function AssistantMessage({
         content: `Transcript ready for ${formatTime(seg.startTime)} to ${formatTime(seg.endTime)}. Continuing with your request.`,
       });
       setTranscriptionDone(true);
+      updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'Transcript ready ✓' });
       await onTranscriptReady(msg.id);
     } catch (err) {
       setTranscribeError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
     applyStoredAction(action);
     recordAppliedAction(action, action.message);
+    updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
     setReviewResult('AI settings updated.');
-  }, [action, applyStoredAction, recordAppliedAction]);
+  }, [action, applyStoredAction, msg.id, recordAppliedAction, updateMessage]);
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -533,7 +567,7 @@ function AssistantMessage({
           <ActionDetails action={activeReviewAction!} />
 
           {/* Buttons */}
-          {msg.autoApplied ? (
+          {actionCompleted ? (
             <div style={{
               padding: '8px 12px',
               borderTop: '1px solid rgba(255,255,255,0.05)',
@@ -543,7 +577,7 @@ function AssistantMessage({
                 color: 'var(--fg-muted)',
                 fontFamily: 'var(--font-serif)',
               }}>
-                Auto-applied ✓
+                {actionResultText ?? 'Completed.'}
               </span>
             </div>
           ) : reviewResult ? (
@@ -1029,7 +1063,14 @@ export default function ChatSidebar() {
         }
 
         const { message, action } = data;
-        addMessage({ role: 'assistant', content: message, action: action ?? undefined, autoApplied: true });
+        addMessage({
+          role: 'assistant',
+          content: message,
+          action: action ?? undefined,
+          autoApplied: true,
+          actionStatus: action && action.type !== 'none' ? 'completed' : undefined,
+          actionResult: action && action.type !== 'none' ? 'Auto-applied ✓' : undefined,
+        });
 
         if (!action || action.type === 'none') break;
 

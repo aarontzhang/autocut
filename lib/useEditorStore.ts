@@ -183,6 +183,7 @@ interface EditorState {
 
   // Chat
   addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
+  updateMessage: (id: string, patch: Partial<Omit<ChatMessage, 'id' | 'timestamp'>>) => void;
   setIsChatLoading: (v: boolean) => void;
   clearMessages: () => void;
   setAISettings: (settings: Partial<AIEditingSettings>) => void;
@@ -558,6 +559,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   addMessage: (msg) => set(s => ({
     messages: [...s.messages, { ...msg, id: uuidv4(), timestamp: Date.now() }],
+  })),
+
+  updateMessage: (id, patch) => set(s => ({
+    messages: s.messages.map(message => (
+      message.id === id ? { ...message, ...patch } : message
+    )),
   })),
 
   setIsChatLoading: (v) => set({ isChatLoading: v }),

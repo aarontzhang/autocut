@@ -80,6 +80,8 @@ export interface ChatMessage {
   timestamp: number;
   action?: EditAction;
   autoApplied?: boolean;
+  actionStatus?: 'pending' | 'completed';
+  actionResult?: string;
 }
 
 export interface AppliedActionRecord {
