@@ -92,12 +92,13 @@ export interface AppliedActionRecord {
 }
 
 export interface IndexedVideoFrame {
-  image: string;
+  image?: string;
   timelineTime: number;
   sourceTime: number;
   kind: 'overview' | 'dense';
   rangeStart?: number;
   rangeEnd?: number;
+  description?: string;
 }
 
 export interface AIEditingSettings {
@@ -109,6 +110,8 @@ export interface AIEditingSettings {
   };
   frameInspection: {
     defaultFrameCount: number;
+    overviewIntervalSeconds: number;
+    maxOverviewFrames: number;
   };
   captions: {
     wordsPerCaption: number;

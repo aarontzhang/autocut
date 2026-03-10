@@ -2,11 +2,19 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { CaptionEntry, ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
 import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext } from '@/lib/timelineUtils';
-import { extractAudioSegment, extractVideoFrames } from '@/lib/ffmpegClient';
+import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
+import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
+
+const FRAME_DESCRIPTION_BATCH_SIZE = 12;
+
+type FrameDescriptionResponse = {
+  descriptions?: Array<{ index: number; description: string }>;
+  error?: string;
+};
 
 function serializeActionForComparison(value: unknown): string {
   if (Array.isArray(value)) {
@@ -24,6 +32,34 @@ function serializeActionForComparison(value: unknown): string {
 function actionsMatch(a?: EditAction, b?: EditAction): boolean {
   if (!a || !b) return false;
   return serializeActionForComparison(a) === serializeActionForComparison(b);
+}
+
+function mergeFrameDescriptions(
+  frames: IndexedVideoFrame[],
+  startIndex: number,
+  descriptions: Array<{ index: number; description: string }>,
+): IndexedVideoFrame[] {
+  const nextFrames = [...frames];
+  for (const item of descriptions) {
+    const targetIndex = startIndex + item.index;
+    if (!nextFrames[targetIndex]) continue;
+    nextFrames[targetIndex] = {
+      ...nextFrames[targetIndex],
+      description: item.description.trim(),
+    };
+  }
+  return nextFrames;
+}
+
+function buildFrameContextPayload(frames: IndexedVideoFrame[]): IndexedVideoFrame[] {
+  return frames.map((frame) => (
+    frame.kind === 'dense'
+      ? frame
+      : {
+          ...frame,
+          image: undefined,
+        }
+  ));
 }
 
 // ─── Action card config ────────────────────────────────────────────────────────
@@ -256,6 +292,7 @@ function ActionDetails({ action }: { action: EditAction }) {
       settings?.silenceRemoval?.paddingSeconds !== undefined ? `silence padding ${settings.silenceRemoval.paddingSeconds}s` : '',
       settings?.silenceRemoval?.minDurationSeconds !== undefined ? `min silence ${settings.silenceRemoval.minDurationSeconds}s` : '',
       settings?.frameInspection?.defaultFrameCount !== undefined ? `inspect ${settings.frameInspection.defaultFrameCount} frames` : '',
+      settings?.frameInspection?.overviewIntervalSeconds !== undefined ? `overview every ${settings.frameInspection.overviewIntervalSeconds}s` : '',
       settings?.captions?.wordsPerCaption !== undefined ? `${settings.captions.wordsPerCaption} words per caption` : '',
       settings?.transitions?.defaultDuration !== undefined ? `${settings.transitions.defaultDuration}s transitions` : '',
       settings?.textOverlays?.defaultFontSize !== undefined ? `${settings.textOverlays.defaultFontSize}px text` : '',
@@ -474,24 +511,14 @@ function AssistantMessage({
       const sourceSegs = getSourceSegmentsForTimelineRange(clips, seg.startTime, seg.endTime);
       if (sourceSegs.length === 0) throw new Error('No source segments found for requested range');
 
-      const rawCaptions: CaptionEntry[] = [];
-      for (const sourceSeg of sourceSegs) {
-        const audioBlob = await extractAudioSegment(
-          source,
-          sourceSeg.sourceStart,
-          sourceSeg.sourceStart + sourceSeg.sourceDuration,
-        );
-        const form = new FormData();
-        form.append('audio', audioBlob, 'audio.mp3');
-        // Store transcript timings in source time so they can be remapped after later cuts.
-        form.append('startTime', String(sourceSeg.sourceStart));
-        form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
-
-        const res = await fetch('/api/transcribe', { method: 'POST', body: form });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-        rawCaptions.push(...((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? []));
-      }
+      const ranges = sourceSegs.flatMap((sourceSeg) => (
+        buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration)
+      ));
+      const rawCaptions = await transcribeSourceRanges(
+        source,
+        ranges,
+        useEditorStore.getState().aiSettings.captions.wordsPerCaption,
+      );
 
       const transcriptText = buildTranscriptContext(clips, rawCaptions);
       setBackgroundTranscript(transcriptText, 'done', rawCaptions);
@@ -773,6 +800,15 @@ function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; index
           <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
             {indexingReason ?? 'Indexing…'}
           </span>
+          <span style={{
+            fontSize: 10,
+            color: 'rgba(255,255,255,0.38)',
+            fontFamily: 'var(--font-serif)',
+            lineHeight: 1.5,
+            maxWidth: 240,
+          }}>
+            Deep indexing can take a while on longer videos.
+          </span>
         </div>
       )}
     </div>
@@ -786,6 +822,7 @@ export default function ChatSidebar() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
+  const frameDescriptionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
 
   const messages = useEditorStore(s => s.messages);
   const isChatLoading = useEditorStore(s => s.isChatLoading);
@@ -827,7 +864,14 @@ export default function ChatSidebar() {
   useEffect(() => {
     if ((!videoFile && !videoUrl && !videoData) || videoDuration <= 0) return;
     if (videoFrames === null || !videoFramesFresh) {
-      ensureFramesExtracted(!videoFramesFresh);
+      void (async () => {
+        try {
+          const frames = await ensureFramesExtracted(!videoFramesFresh);
+          await ensureFrameDescriptions(frames, !videoFramesFresh);
+        } catch {
+          // Keep the editor usable even if background indexing fails.
+        }
+      })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoData, videoDuration, videoFile, videoFramesFresh, videoUrl]);
@@ -839,7 +883,11 @@ export default function ChatSidebar() {
     try {
       const currentClips = useEditorStore.getState().clips;
       const currentDuration = useEditorStore.getState().videoDuration;
-      const interval = Math.max(0.5, currentDuration / 30);
+      const { overviewIntervalSeconds, maxOverviewFrames } = useEditorStore.getState().aiSettings.frameInspection;
+      const preferredInterval = Math.max(0.1, overviewIntervalSeconds);
+      const interval = currentDuration <= preferredInterval * maxOverviewFrames
+        ? preferredInterval
+        : currentDuration / maxOverviewFrames;
       const timelineTimestamps: number[] = [];
       for (let t = 0; t < currentDuration; t += interval) timelineTimestamps.push(t);
       if (timelineTimestamps[timelineTimestamps.length - 1] !== currentDuration) {
@@ -860,6 +908,68 @@ export default function ChatSidebar() {
     }
   }, [videoData, videoDuration, videoFile, videoFrames, videoUrl, setVideoFrames]);
 
+  const ensureFrameDescriptions = useCallback(async (
+    frames: IndexedVideoFrame[],
+    force = false,
+  ): Promise<IndexedVideoFrame[]> => {
+    const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
+    if (overviewFrames.length === 0) return frames;
+    if (!force && overviewFrames.every((frame) => frame.description && frame.description.trim().length > 0)) {
+      return frames;
+    }
+    if (frameDescriptionPromiseRef.current && !force) {
+      return frameDescriptionPromiseRef.current;
+    }
+
+    const promise = (async () => {
+      let nextFrames = [...frames];
+      for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
+        const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
+        const shouldDescribeBatch = force || batch.some((frame) => (
+          frame.kind === 'overview' && (!frame.description || frame.description.trim().length === 0)
+        ));
+        if (!shouldDescribeBatch) continue;
+
+        const batchFrames = batch
+          .filter((frame): frame is IndexedVideoFrame & { image: string } => (
+            frame.kind === 'overview' && typeof frame.image === 'string' && frame.image.length > 0
+          ))
+          .map((frame) => ({
+            image: frame.image,
+            timelineTime: frame.timelineTime,
+            sourceTime: frame.sourceTime,
+          }));
+        if (batchFrames.length === 0) continue;
+
+        const res = await fetch('/api/frame-descriptions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
+            frames: batchFrames,
+          }),
+        });
+        const data = await res.json() as FrameDescriptionResponse;
+        if (!res.ok) {
+          throw new Error(data.error ?? 'Failed to describe video frames.');
+        }
+
+        nextFrames = mergeFrameDescriptions(nextFrames, start, data.descriptions ?? []);
+        setVideoFrames(nextFrames);
+      }
+      return nextFrames;
+    })();
+
+    frameDescriptionPromiseRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      if (frameDescriptionPromiseRef.current === promise) {
+        frameDescriptionPromiseRef.current = null;
+      }
+    }
+  }, [setVideoFrames]);
+
   const buildCurrentTranscript = useCallback(() => {
     const freshState = useEditorStore.getState();
     const rawCaptions = freshState.rawTranscriptCaptions;
@@ -874,6 +984,7 @@ export default function ChatSidebar() {
     ctrl: AbortController,
   ) => {
     let currentFrames = await ensureFramesExtracted();
+    currentFrames = await ensureFrameDescriptions(currentFrames);
 
     for (let round = 0; round < 2; round++) {
       if (stopRequestedRef.current) break;
@@ -896,7 +1007,7 @@ export default function ChatSidebar() {
             transcript: currentTranscript,
             settings: freshState.aiSettings,
             appliedActions: freshState.appliedActions,
-            frames: currentFrames,
+            frames: buildFrameContextPayload(currentFrames),
           },
         }),
       });
@@ -934,7 +1045,7 @@ export default function ChatSidebar() {
       addMessage({ role: 'assistant', content: message, action: action ?? undefined });
       return;
     }
-  }, [addMessage, buildCurrentTranscript, ensureFramesExtracted, selectedClipContext]);
+  }, [addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -1019,6 +1130,7 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
     try {
       let currentFrames = await ensureFramesExtracted();
+      currentFrames = await ensureFrameDescriptions(currentFrames);
       // After a batch silence cut, suppress the transcript so the agent can't
       // re-analyze it and issue a second round of deletions.
       let suppressTranscriptNextIter = false;
@@ -1055,7 +1167,7 @@ export default function ChatSidebar() {
               transcript: currentTranscript,
               settings: freshState.aiSettings,
               appliedActions: freshState.appliedActions,
-              frames: currentFrames,
+              frames: buildFrameContextPayload(currentFrames),
             },
           }),
         });
@@ -1104,22 +1216,14 @@ export default function ChatSidebar() {
             try {
               setLoadingStatus(`Transcribing audio (${formatTime(seg.startTime)}–${formatTime(seg.endTime)})…`);
               const sourceSegs = getSourceSegmentsForTimelineRange(currentClips, seg.startTime, seg.endTime);
-              const rawCaptions: CaptionEntry[] = [];
-              for (const sourceSeg of sourceSegs) {
-                const audioBlob = await extractAudioSegment(
-                  videoData ?? videoUrl,
-                  sourceSeg.sourceStart,
-                  sourceSeg.sourceStart + sourceSeg.sourceDuration,
-                );
-                const form = new FormData();
-                form.append('audio', audioBlob, 'audio.mp3');
-                form.append('startTime', String(sourceSeg.sourceStart));
-                form.append('wordsPerCaption', String(useEditorStore.getState().aiSettings.captions.wordsPerCaption));
-                const tRes = await fetch('/api/transcribe', { method: 'POST', body: form });
-                const tData = await tRes.json();
-                if (!tRes.ok) throw new Error(tData.error ?? 'Transcription failed');
-                rawCaptions.push(...((tData.words as CaptionEntry[]) ?? (tData.captions as CaptionEntry[]) ?? []));
-              }
+              const ranges = sourceSegs.flatMap((sourceSeg) => (
+                buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration)
+              ));
+              const rawCaptions = await transcribeSourceRanges(
+                videoData ?? videoUrl,
+                ranges,
+                useEditorStore.getState().aiSettings.captions.wordsPerCaption,
+              );
               const remappedTranscript = buildTranscriptContext(useEditorStore.getState().clips, rawCaptions);
               setBackgroundTranscript(remappedTranscript, 'done', rawCaptions);
               resultSummary = `Transcription complete. Full transcript:\n${remappedTranscript}`;
@@ -1139,6 +1243,7 @@ export default function ChatSidebar() {
           // Re-extract frames in background if structural edit made them stale
           if (!useEditorStore.getState().videoFramesFresh && (videoFile || videoUrl || videoData)) {
             currentFrames = await ensureFramesExtracted(true);
+            currentFrames = await ensureFrameDescriptions(currentFrames, true);
           }
           if (action.type === 'delete_ranges') {
             // Batch silence removal is a complete, one-shot operation.
@@ -1158,7 +1263,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFramesExtracted]);
+  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFrameDescriptions, ensureFramesExtracted]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -1191,11 +1296,11 @@ export default function ChatSidebar() {
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && videoFrames === null)
-      ? 'Indexing audio and loading frames…'
+      ? 'Indexing audio and loading frames. This can take a while for long videos…'
       : transcriptStatus === 'loading'
-        ? 'Indexing audio…'
+        ? 'Indexing audio. This can take a while for long videos…'
         : videoFrames === null
-          ? 'Loading video frames…'
+          ? 'Loading video frames. This can take a while for long videos…'
           : null
     : null;
 
@@ -1365,7 +1470,7 @@ export default function ChatSidebar() {
                       <path d="M12 2a10 10 0 0 1 10 10" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" strokeLinecap="round"/>
                     </svg>
                     <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'rgba(255,255,255,0.2)' }}>
-                      Indexing…
+                      Indexing… may take a while
                     </span>
                   </div>
                 );

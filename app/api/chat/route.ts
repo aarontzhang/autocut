@@ -61,10 +61,10 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Use when user says: "make clip 1 black and white", "add cinematic look to the intro", etc.
 
 ### 6. Request Dense Frames (request_frames)
-- Request a higher-density set of video frames for a specific time range to pinpoint a precise visual moment
+- Request a higher-density set of actual video frames for a specific time range to pinpoint a precise visual moment
 - Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
 - startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 30)
-- After extraction, the frames will be attached — use them to identify the exact timestamp, then make your edit
+- Use this when the text-only frame summaries are not specific enough. After extraction, the frames will be attached as images — use them to identify the exact timestamp, then make your edit
 
 Example:
 <action>{"type":"request_frames","frameRequest":{"startTime":10,"endTime":25,"count":15},"message":"Getting a closer look at that section to find the exact moment."}</action>
@@ -171,10 +171,13 @@ No action:
 - You are a single-action editor per request. Complete ONE operation unless the user explicitly asked for multiple distinct edits in one message. After executing any edit, return type:none immediately unless more work is clearly required by the original request.
 
 ## Visual and audio context
-You may be provided with sampled frames from the user's video as images, and/or a full audio transcript.
-- If frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
+You may be provided with sampled frames from the user's video as text summaries, dense sampled frames as images, and/or a full audio transcript.
+- Overview frames are usually provided as text summaries for retrieval. Treat them as approximate visual metadata.
+- Dense frames may be attached as images for a narrower time range. Use those images when you need precise visual confirmation.
+- If the text summaries are not specific enough for the user's visual request, issue request_frames for the most relevant narrow range instead of guessing.
+- If dense frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
-- If NEITHER frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
+- If NEITHER frame summaries/dense frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate. Never copy transcript text directly as captions — use transcribe_request only to store the transcript internally.`;
 
 const DEFAULT_SETTINGS: AIEditingSettings = {
@@ -185,7 +188,9 @@ const DEFAULT_SETTINGS: AIEditingSettings = {
     requireSpeakerAbsence: true,
   },
   frameInspection: {
-    defaultFrameCount: 24,
+    defaultFrameCount: 30,
+    overviewIntervalSeconds: 1,
+    maxOverviewFrames: 1800,
   },
   captions: {
     wordsPerCaption: 4,
@@ -211,6 +216,74 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
 }
 
 type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
+
+function tokenizeForRetrieval(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length >= 3);
+}
+
+function selectRelevantOverviewFrames(
+  frames: IndexedVideoFrame[],
+  messages: Array<{ role: string; content: string }>,
+  maxFrames = 60,
+): IndexedVideoFrame[] {
+  if (frames.length <= maxFrames) return frames;
+
+  const recentUserText = messages
+    .filter((message) => message.role === 'user')
+    .slice(-3)
+    .map((message) => message.content)
+    .join(' ');
+  const queryTokens = new Set(tokenizeForRetrieval(recentUserText));
+
+  if (queryTokens.size === 0) {
+    const stride = Math.ceil(frames.length / maxFrames);
+    return frames.filter((_, index) => index % stride === 0).slice(0, maxFrames);
+  }
+
+  const scored = frames.map((frame, index) => {
+    const descriptionTokens = new Set(tokenizeForRetrieval(frame.description ?? ''));
+    let score = 0;
+    for (const token of queryTokens) {
+      if (descriptionTokens.has(token)) score += 1;
+    }
+    return { frame, index, score };
+  });
+
+  const topMatches = scored
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, Math.max(1, Math.floor(maxFrames / 3)));
+
+  if (topMatches.length === 0) {
+    const stride = Math.ceil(frames.length / maxFrames);
+    return frames.filter((_, index) => index % stride === 0).slice(0, maxFrames);
+  }
+
+  const selectedIndexes = new Set<number>();
+  for (const match of topMatches) {
+    for (let offset = -1; offset <= 1; offset += 1) {
+      const candidate = match.index + offset;
+      if (candidate >= 0 && candidate < frames.length) {
+        selectedIndexes.add(candidate);
+      }
+    }
+  }
+
+  if (selectedIndexes.size < maxFrames) {
+    const stride = Math.max(1, Math.floor(frames.length / maxFrames));
+    for (let index = 0; index < frames.length && selectedIndexes.size < maxFrames; index += stride) {
+      selectedIndexes.add(index);
+    }
+  }
+
+  return [...selectedIndexes]
+    .sort((a, b) => a - b)
+    .slice(0, maxFrames)
+    .map((index) => frames[index]);
+}
 
 function sourceTimeToTimelineFromContext(clips: ClipSummary[], sourceTime: number): number | null {
   let cursor = 0;
@@ -261,6 +334,7 @@ export async function POST(req: NextRequest) {
 - Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
 - Dense frame inspection default count: ${settings.frameInspection.defaultFrameCount}
+- Overview frame sampling: every ${settings.frameInspection.overviewIntervalSeconds}s, capped at ${settings.frameInspection.maxOverviewFrames} frames
 - Caption defaults: ${settings.captions.wordsPerCaption} words per caption
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
@@ -317,6 +391,8 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
       `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
       `- Default dense-frame count: ${settings.frameInspection.defaultFrameCount}\n` +
+      `- Overview frame interval: ${settings.frameInspection.overviewIntervalSeconds}s\n` +
+      `- Max overview frames: ${settings.frameInspection.maxOverviewFrames}\n` +
       `- Caption defaults: ${settings.captions.wordsPerCaption} words per caption\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
@@ -337,8 +413,10 @@ Honor these defaults unless the user explicitly asks for something different in 
     const contextContent: Anthropic.ContentBlockParam[] = [];
 
     const frames = (context?.frames as IndexedVideoFrame[] | undefined) ?? [];
-    if (frames.length > 0) {
-      for (const frame of frames) {
+    const denseFrames = frames.filter((frame) => frame.kind === 'dense');
+    if (denseFrames.length > 0) {
+      for (const frame of denseFrames) {
+        if (!frame.image) continue;
         contextContent.push({
           type: 'image',
           source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
@@ -346,14 +424,25 @@ Honor these defaults unless the user explicitly asks for something different in 
       }
     }
 
-    const frameNote = frames.length > 0
-      ? `\n[${frames.length} video frame(s) are attached above as images in this exact order. Use the mapping below when reasoning about timestamps.]\n` +
-        frames.map((frame, index) =>
-          `Frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.kind}` +
-          (frame.rangeStart !== undefined && frame.rangeEnd !== undefined ? `, requested from ${fmtSec(frame.rangeStart)} to ${fmtSec(frame.rangeEnd)}` : '')
+    const overviewFrames = selectRelevantOverviewFrames(
+      frames.filter((frame) => frame.kind === 'overview'),
+      messages,
+    );
+    const overviewFrameNote = overviewFrames.length > 0
+      ? `\n[Overview frame summaries: showing ${overviewFrames.length} most relevant/recently sampled entries from the video index]\n` +
+        overviewFrames.map((frame, index) =>
+          `Frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.description ?? 'Visual summary unavailable.'}`
         ).join('\n')
       : '';
-    contextContent.push({ type: 'text', text: contextText + frameNote });
+    const denseFrameNote = denseFrames.length > 0
+      ? `\n[${denseFrames.length} dense video frame(s) are attached above as images in this exact order. Use the mapping below when reasoning about timestamps.]\n` +
+        denseFrames.map((frame, index) =>
+          `Dense frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.kind}` +
+          (frame.rangeStart !== undefined && frame.rangeEnd !== undefined ? `, requested from ${fmtSec(frame.rangeStart)} to ${fmtSec(frame.rangeEnd)}` : '') +
+          (frame.description ? `, summary: ${frame.description}` : '')
+        ).join('\n')
+      : '';
+    contextContent.push({ type: 'text', text: contextText + overviewFrameNote + denseFrameNote });
 
     const anthropicMessages: Anthropic.MessageParam[] = [
       { role: 'user', content: contextContent },

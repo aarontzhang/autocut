@@ -2,8 +2,8 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { extractAudioSegment } from '@/lib/ffmpegClient';
 import { buildTranscriptContext } from '@/lib/timelineUtils';
+import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
 import MediaPanel from './MediaPanel';
@@ -148,17 +148,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     setBackgroundTranscript(null, 'loading');
     (async () => {
       try {
-        const audioBlob = await extractAudioSegment(source, 0, videoDuration);
-        const form = new FormData();
-        form.append('audio', audioBlob, 'audio.mp3');
-        form.append('startTime', '0');
-        form.append('wordsPerCaption', String(aiSettings.captions.wordsPerCaption));
-        const res = await fetch('/api/transcribe', { method: 'POST', body: form });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-        const rawWords = (data.words as Array<{ startTime: number; endTime: number; text: string }> | undefined)
-          ?? (data.captions as Array<{ startTime: number; endTime: number; text: string }> | undefined)
-          ?? [];
+        const ranges = buildOverlappingRanges(0, videoDuration);
+        const rawWords = await transcribeSourceRanges(source, ranges, aiSettings.captions.wordsPerCaption);
         const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
         setBackgroundTranscript(text, 'done', rawWords);
       } catch {

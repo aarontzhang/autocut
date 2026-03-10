@@ -68,7 +68,9 @@ export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
     requireSpeakerAbsence: true,
   },
   frameInspection: {
-    defaultFrameCount: 24,
+    defaultFrameCount: 30,
+    overviewIntervalSeconds: 1,
+    maxOverviewFrames: 1800,
   },
   captions: {
     wordsPerCaption: 4,
