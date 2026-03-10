@@ -22,6 +22,7 @@ import {
   EditSnapshot,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
+import { buildTranscriptContext } from './timelineUtils';
 
 export type { EditSnapshot } from './editActionUtils';
 
@@ -193,7 +194,7 @@ interface EditorState {
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown; backgroundTranscript?: unknown; transcriptStatus?: unknown; rawTranscriptCaptions?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -615,10 +616,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   loadProject: (editState, blobUrl, storagePath, projectId, duration) => {
+    const clips = (editState.clips as VideoClip[] | undefined) ?? [];
+    const rawTranscriptCaptions = (editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null;
+    const persistedTranscript = typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null;
+    const backgroundTranscript = rawTranscriptCaptions && rawTranscriptCaptions.length > 0
+      ? buildTranscriptContext(clips, rawTranscriptCaptions)
+      : persistedTranscript;
+    const transcriptStatus = backgroundTranscript
+      ? 'done'
+      : editState.transcriptStatus === 'error'
+        ? 'error'
+        : 'idle';
+
     set({
       videoUrl: blobUrl, videoData: null, videoFile: null, videoDuration: duration ?? 0,
       currentTime: 0, pendingAction: null,
-      clips: (editState.clips as VideoClip[] | undefined) ?? [],
+      clips,
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
       transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
@@ -629,7 +642,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, rawTranscriptCaptions, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],
     });

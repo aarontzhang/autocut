@@ -18,6 +18,9 @@ export function useAutoSave() {
   const messages = useEditorStore(s => s.messages);
   const appliedActions = useEditorStore(s => s.appliedActions);
   const aiSettings = useEditorStore(s => s.aiSettings);
+  const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
+  const transcriptStatus = useEditorStore(s => s.transcriptStatus);
+  const rawTranscriptCaptions = useEditorStore(s => s.rawTranscriptCaptions);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
 
@@ -45,6 +48,9 @@ export function useAutoSave() {
           messages: state.messages,
           appliedActions: state.appliedActions,
           aiSettings: state.aiSettings,
+          backgroundTranscript: state.backgroundTranscript,
+          transcriptStatus: state.transcriptStatus,
+          rawTranscriptCaptions: state.rawTranscriptCaptions,
           extraTracks: state.extraTracks.map(track => ({
             ...track,
             clips: track.clips.map(stripSourceUrl),
@@ -68,5 +74,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, currentProjectId, setSaveStatus]);
 }
