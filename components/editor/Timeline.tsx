@@ -110,7 +110,9 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const updateClipSourcePath = useEditorStore(s => s.updateClipSourcePath);
   const removeTrackClip = useEditorStore(s => s.removeTrackClip);
   const selectedItem = useEditorStore(s => s.selectedItem);
+  const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
+  const toggleTaggedMarker = useEditorStore(s => s.toggleTaggedMarker);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const updateMarker = useEditorStore(s => s.updateMarker);
@@ -1004,12 +1006,14 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
             {markers.map((marker) => {
               const x = tPx(marker.timelineTime);
               const isSelected = selectedItem?.type === 'marker' && selectedItem.id === marker.id;
+              const isTagged = taggedMarkerIds.includes(marker.id);
               return (
                 <button
                   key={marker.id}
-                  title={`Marker ${marker.number}${marker.label ? `: ${marker.label}` : ''}`}
+                  title={`${isTagged ? 'Untag' : 'Tag'} marker ${marker.number}${marker.label ? `: ${marker.label}` : ''}`}
                   onClick={(event) => {
                     event.stopPropagation();
+                    toggleTaggedMarker(marker.id);
                     setSelectedItem({ type: 'marker', id: marker.id });
                     requestSeek(marker.timelineTime);
                   }}
@@ -1022,9 +1026,14 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
                     height: 20,
                     padding: '0 4px',
                     borderRadius: 999,
-                    border: isSelected ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
-                    background: isSelected ? 'rgba(250,204,21,0.24)' : 'rgba(250,204,21,0.12)',
-                    color: isSelected ? '#fef08a' : '#fde68a',
+                    border: isSelected || isTagged ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
+                    background: isTagged
+                      ? 'rgba(250,204,21,0.34)'
+                      : isSelected
+                        ? 'rgba(250,204,21,0.2)'
+                        : 'rgba(250,204,21,0.12)',
+                    boxShadow: isTagged ? '0 0 0 1px rgba(250,204,21,0.22)' : 'none',
+                    color: isSelected || isTagged ? '#fef08a' : '#fde68a',
                     fontSize: 10,
                     fontWeight: 700,
                     fontFamily: 'var(--font-serif)',

@@ -95,7 +95,15 @@ function deleteRange(clips: VideoClip[], startTime: number, endTime: number): Vi
 }
 
 export function actionChangesTimelineStructure(action: EditAction) {
-  return ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip'].includes(action.type);
+  return ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip', 'set_clip_speed'].includes(action.type);
+}
+
+function withClearedMarkers(snapshot: EditSnapshot, patch: Partial<EditSnapshot>): EditSnapshot {
+  return {
+    ...snapshot,
+    ...patch,
+    markers: [],
+  };
 }
 
 export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction): EditSnapshot {
@@ -109,12 +117,14 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
   if (action.type === 'split_clip') {
     if (action.splitTime === undefined) return snapshot;
     const clips = splitClipAtTime(snapshot.clips, action.splitTime);
-    return clips === snapshot.clips ? snapshot : { ...snapshot, clips };
+    return clips === snapshot.clips ? snapshot : withClearedMarkers(snapshot, { clips });
   }
 
   if (action.type === 'delete_range') {
     if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return snapshot;
-    return { ...snapshot, clips: deleteRange(snapshot.clips, action.deleteStartTime, action.deleteEndTime) };
+    return withClearedMarkers(snapshot, {
+      clips: deleteRange(snapshot.clips, action.deleteStartTime, action.deleteEndTime),
+    });
   }
 
   if (action.type === 'delete_ranges') {
@@ -123,7 +133,7 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
       if (range.end <= range.start) return acc;
       return deleteRange(acc, range.start, range.end);
     }, snapshot.clips);
-    return { ...snapshot, clips };
+    return withClearedMarkers(snapshot, { clips });
   }
 
   if (action.type === 'reorder_clip') {
@@ -133,23 +143,24 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     const remaining = snapshot.clips.filter(item => item.id !== clip.id);
     const targetIndex = Math.max(0, Math.min(action.newIndex, remaining.length));
     const clips = [...remaining.slice(0, targetIndex), clip, ...remaining.slice(targetIndex)];
-    return { ...snapshot, clips };
+    return withClearedMarkers(snapshot, { clips });
   }
 
   if (action.type === 'delete_clip') {
     const clipIndex = action.clipIndex ?? 0;
     const clip = snapshot.clips[clipIndex];
     if (!clip) return snapshot;
-    return { ...snapshot, clips: snapshot.clips.filter(item => item.id !== clip.id) };
+    return withClearedMarkers(snapshot, {
+      clips: snapshot.clips.filter(item => item.id !== clip.id),
+    });
   }
 
   if (action.type === 'set_clip_speed') {
     const clip = snapshot.clips[action.clipIndex ?? 0];
     if (!clip || action.speed === undefined) return snapshot;
-    return {
-      ...snapshot,
+    return withClearedMarkers(snapshot, {
       clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, speed: action.speed ?? item.speed } : item),
-    };
+    });
   }
 
   if (action.type === 'set_clip_volume') {

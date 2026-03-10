@@ -20,6 +20,7 @@ import {
 } from './types';
 import {
   applyActionToSnapshot,
+  actionChangesTimelineStructure,
   EditSnapshot,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
@@ -104,6 +105,16 @@ function mergeAISettings(
   };
 }
 
+function filterTaggedMarkerIds(taggedMarkerIds: string[], markers: MarkerEntry[]): string[] {
+  const markerIds = new Set(markers.map((marker) => marker.id));
+  return taggedMarkerIds.filter((id) => markerIds.has(id));
+}
+
+function normalizeSelectedItem(selectedItem: SelectedItem, markers: MarkerEntry[]): SelectedItem {
+  if (!selectedItem || selectedItem.type !== 'marker') return selectedItem;
+  return markers.some((marker) => marker.id === selectedItem.id) ? selectedItem : null;
+}
+
 interface EditorState {
   // Video
   videoFile: File | null;
@@ -132,6 +143,7 @@ interface EditorState {
 
   // Selection
   selectedItem: SelectedItem;
+  taggedMarkerIds: string[];
 
   // Undo/redo
   history: EditSnapshot[];
@@ -265,6 +277,9 @@ interface EditorState {
 
   // Selection
   setSelectedItem: (item: SelectedItem) => void;
+  setTaggedMarkerIds: (ids: string[]) => void;
+  toggleTaggedMarker: (id: string) => void;
+  clearTaggedMarkers: () => void;
   deleteSelectedItem: () => void;
 
   // Effect drag helpers
@@ -303,6 +318,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   previewOwnerId: null,
   extraTracks: [],
   selectedItem: null,
+  taggedMarkerIds: [],
   history: [],
   future: [],
   messages: [],
@@ -342,7 +358,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingAction: null, clips: [],
       captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
-      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
@@ -381,6 +397,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...state.history, current],
       future: [],
       pendingAction: null,
+      selectedItem: normalizeSelectedItem(state.selectedItem, snapshot.markers),
+      taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       previewSnapshot: null,
       previewOwnerId: null,
       videoFramesFresh: state.videoFramesFresh,
@@ -424,7 +442,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const idx = clips.findIndex(c => c.id === clip.id);
     const newClips = [...clips.slice(0, idx), firstClip, secondClip, ...clips.slice(idx + 1)];
 
-    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
+    set(state => ({
+      history: [...state.history, snap],
+      future: [],
+      clips: newClips,
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
+      videoFramesFresh: state.videoFramesFresh,
+    }));
   },
 
   deleteRangeAtTime: (startTime, endTime) => {
@@ -472,7 +498,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
-    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
+    set(state => ({
+      history: [...state.history, snap],
+      future: [],
+      clips: newClips,
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
+      videoFramesFresh: state.videoFramesFresh,
+    }));
   },
 
   deleteClip: (clipId) => {
@@ -481,6 +515,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...s.history, snap],
       future: [],
       clips: s.clips.filter(c => c.id !== clipId),
+      markers: [],
+      taggedMarkerIds: [],
       selectedItem: null,
       videoFramesFresh: s.videoFramesFresh,
     }));
@@ -494,12 +530,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const newClips = [...clips];
     const [removed] = newClips.splice(idx, 1);
     newClips.splice(Math.max(0, Math.min(newClips.length, newIndex)), 0, removed);
-    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
+    set(state => ({
+      history: [...state.history, snap],
+      future: [],
+      clips: newClips,
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
+      videoFramesFresh: state.videoFramesFresh,
+    }));
   },
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
     set(s => ({
       clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
       videoFramesFresh: s.videoFramesFresh,
     }));
   },
@@ -510,6 +557,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...s.history, snap],
       future: [],
       clips: s.clips.map(c => c.id === clipId ? { ...c, speed: Math.max(0.1, Math.min(10, speed)) } : c),
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
       videoFramesFresh: s.videoFramesFresh,
     }));
   },
@@ -567,6 +617,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...state.history, snap],
       future: [],
       pendingAction: null,
+      selectedItem: normalizeSelectedItem(
+        actionChangesTimelineStructure(action) ? null : state.selectedItem,
+        next.markers,
+      ),
+      taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       previewSnapshot: null,
       previewOwnerId: null,
       videoFramesFresh: state.videoFramesFresh,
@@ -586,6 +641,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       future: [snap, ...future],
       pendingAction: null,
       selectedItem: null,
+      taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
       videoFramesFresh: get().videoFramesFresh,
@@ -603,6 +659,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       future: future.slice(1),
       pendingAction: null,
       selectedItem: null,
+      taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
       videoFramesFresh: get().videoFramesFresh,
@@ -639,6 +696,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     previewOwnerId: null,
     extraTracks: [],
     selectedItem: null,
+    taggedMarkerIds: [],
   })),
 
   setAISettings: (settings) => set(state => ({
@@ -662,7 +720,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingAction: null, clips: [],
       captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
-      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
@@ -757,7 +815,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       extraTracks: hydratedTracks,
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
       appliedActions: (editState.appliedActions as AppliedActionRecord[] | undefined) ?? [],
-      ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
       backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions,
@@ -790,7 +848,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       messages: [], isChatLoading: false,
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
-      ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
+      ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
@@ -802,6 +860,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // ── Selection ───────────────────────────────────────────────────────────────
 
   setSelectedItem: (item) => set({ selectedItem: item }),
+  setTaggedMarkerIds: (ids) => set(() => ({ taggedMarkerIds: [...new Set(ids)] })),
+  toggleTaggedMarker: (id) => set((state) => ({
+    taggedMarkerIds: state.taggedMarkerIds.includes(id)
+      ? state.taggedMarkerIds.filter((markerId) => markerId !== id)
+      : [...state.taggedMarkerIds, id],
+  })),
+  clearTaggedMarkers: () => set({ taggedMarkerIds: [] }),
 
   deleteSelectedItem: () => {
     const s = get();
@@ -810,7 +875,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { type, id } = s.selectedItem;
     const newHistory = [...s.history, snap];
     if (type === 'clip') {
-      set({ history: newHistory, future: [], clips: s.clips.filter(c => c.id !== id), selectedItem: null, videoFramesFresh: s.videoFramesFresh });
+      set({
+        history: newHistory,
+        future: [],
+        clips: s.clips.filter(c => c.id !== id),
+        markers: [],
+        taggedMarkerIds: [],
+        selectedItem: null,
+        videoFramesFresh: s.videoFramesFresh,
+      });
     } else if (type === 'caption') {
       set({ history: newHistory, future: [], captions: s.captions.filter(c => c.id !== id), selectedItem: null });
     } else if (type === 'text') {
@@ -818,7 +891,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     } else if (type === 'transition') {
       set({ history: newHistory, future: [], transitions: s.transitions.filter(c => c.id !== id), selectedItem: null });
     } else if (type === 'marker') {
-      set({ history: newHistory, future: [], markers: s.markers.filter(marker => marker.id !== id), selectedItem: null });
+      set({
+        history: newHistory,
+        future: [],
+        markers: s.markers.filter(marker => marker.id !== id),
+        selectedItem: null,
+        taggedMarkerIds: s.taggedMarkerIds.filter((markerId) => markerId !== id),
+      });
     }
   },
 
@@ -886,6 +965,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...s.history, snap],
       future: [],
       markers: s.markers.filter((marker) => marker.id !== id),
+      taggedMarkerIds: s.taggedMarkerIds.filter((markerId) => markerId !== id),
       selectedItem: s.selectedItem?.type === 'marker' && s.selectedItem.id === id ? null : s.selectedItem,
     }));
   },

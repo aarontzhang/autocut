@@ -26,6 +26,15 @@ type FrameDescriptionResponse = {
   error?: string;
 };
 
+type FrameDescriptionBatch = {
+  start: number;
+  batchFrames: Array<{
+    image: string;
+    timelineTime: number;
+    sourceTime: number;
+  }>;
+};
+
 type ChatResponse = {
   message?: string;
   action?: EditAction | null;
@@ -42,7 +51,7 @@ type IndexingProgress = {
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
-const MARKER_REFERENCE_PATTERN = /(?:marker\s+|@)(\d+)/gi;
+const MARKER_TAG_PATTERN = /@(\d+)/gi;
 
 type ActiveMarkerMention = {
   query: string;
@@ -157,16 +166,29 @@ function removeMarkerReference(text: string, markerNumber: number): string {
     .trimStart();
 }
 
-function extractReferencedMarkers(text: string, markers: MarkerEntry[]): MarkerEntry[] {
+function extractTaggedMarkers(text: string, markers: MarkerEntry[]): MarkerEntry[] {
   const markerNumbers = new Set<number>();
   let match: RegExpExecArray | null;
-  MARKER_REFERENCE_PATTERN.lastIndex = 0;
-  while ((match = MARKER_REFERENCE_PATTERN.exec(text)) !== null) {
+  MARKER_TAG_PATTERN.lastIndex = 0;
+  while ((match = MARKER_TAG_PATTERN.exec(text)) !== null) {
     const markerNumber = Number(match[1]);
     if (Number.isFinite(markerNumber)) markerNumbers.add(markerNumber);
   }
   return [...markerNumbers]
     .map((number) => markers.find((marker) => marker.number === number) ?? null)
+    .filter((marker): marker is MarkerEntry => marker !== null)
+    .sort((a, b) => a.number - b.number);
+}
+
+function areStringArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
+function resolveMarkersById(ids: string[], markers: MarkerEntry[]): MarkerEntry[] {
+  const byId = new Map(markers.map((marker) => [marker.id, marker]));
+  return ids
+    .map((id) => byId.get(id) ?? null)
     .filter((marker): marker is MarkerEntry => marker !== null)
     .sort((a, b) => a.number - b.number);
 }
@@ -210,7 +232,8 @@ function estimateFrameExtractionSeconds(frameCount: number): number {
 
 function estimateFrameDescriptionSeconds(frameCount: number): number {
   const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
-  return Math.max(10, batches * 3.5);
+  const waves = Math.ceil(batches / MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS);
+  return Math.max(4, waves * 3.5);
 }
 
 function serializeActionForComparison(value: unknown): string {
@@ -246,6 +269,28 @@ function mergeFrameDescriptions(
     };
   }
   return nextFrames;
+}
+
+async function runFrameDescriptionBatches(
+  batches: FrameDescriptionBatch[],
+  onBatchComplete: (result: { start: number; data: FrameDescriptionResponse }) => void,
+): Promise<void> {
+  if (batches.length === 0) return;
+
+  let nextBatchIndex = 0;
+  const workerCount = Math.min(MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS, batches.length);
+
+  const runWorker = async () => {
+    while (nextBatchIndex < batches.length) {
+      const batchIndex = nextBatchIndex;
+      nextBatchIndex += 1;
+      const batch = batches[batchIndex];
+      const data = await requestFrameDescriptions(batch.batchFrames);
+      onBatchComplete({ start: batch.start, data });
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
 }
 
 function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType<typeof useEditorStore.getState>['clips']): IndexedVideoFrame[] {
@@ -1426,6 +1471,8 @@ export default function ChatSidebar() {
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
+  const syncingTaggedMarkersRef = useRef(false);
+  const previousTaggedMarkerIdsRef = useRef<string[]>([]);
 
   const messages = useEditorStore(s => s.messages);
   const isChatLoading = useEditorStore(s => s.isChatLoading);
@@ -1435,7 +1482,10 @@ export default function ChatSidebar() {
   const clips = useEditorStore(s => s.clips);
   const markers = useEditorStore(s => s.markers);
   const selectedItem = useEditorStore(s => s.selectedItem);
+  const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
+  const setTaggedMarkerIds = useEditorStore(s => s.setTaggedMarkerIds);
+  const clearTaggedMarkers = useEditorStore(s => s.clearTaggedMarkers);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
@@ -1466,7 +1516,8 @@ export default function ChatSidebar() {
     if (!selectedItem || selectedItem.type !== 'marker') return null;
     return markers.find((marker) => marker.id === selectedItem.id) ?? null;
   })();
-  const taggedMarkers = useMemo(() => extractReferencedMarkers(input, markers), [input, markers]);
+  const inputTaggedMarkers = useMemo(() => extractTaggedMarkers(input, markers), [input, markers]);
+  const taggedMarkers = useMemo(() => resolveMarkersById(taggedMarkerIds, markers), [markers, taggedMarkerIds]);
   const markerSuggestions = useMemo(() => {
     if (!activeMarkerMention) return [];
     const query = activeMarkerMention.query.trim().toLowerCase();
@@ -1483,6 +1534,45 @@ export default function ChatSidebar() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isChatLoading]);
+
+  useEffect(() => {
+    if (areStringArraysEqual(previousTaggedMarkerIdsRef.current, taggedMarkerIds)) return;
+    previousTaggedMarkerIdsRef.current = taggedMarkerIds;
+
+    const nextTaggedMarkers = resolveMarkersById(taggedMarkerIds, markers);
+    const currentTaggedMarkers = extractTaggedMarkers(input, markers);
+    const currentIds = currentTaggedMarkers.map((marker) => marker.id);
+
+    let nextInput = input;
+    for (const marker of currentTaggedMarkers) {
+      if (!taggedMarkerIds.includes(marker.id)) {
+        nextInput = removeMarkerReference(nextInput, marker.number);
+      }
+    }
+    for (const marker of nextTaggedMarkers) {
+      if (!currentIds.includes(marker.id)) {
+        nextInput = appendMarkerReference(nextInput, marker.number);
+      }
+    }
+
+    if (nextInput !== input) {
+      syncingTaggedMarkersRef.current = true;
+      setInput(nextInput);
+      setActiveMarkerMention(null);
+    }
+  }, [input, markers, taggedMarkerIds]);
+
+  useEffect(() => {
+    if (syncingTaggedMarkersRef.current) {
+      syncingTaggedMarkersRef.current = false;
+      return;
+    }
+    const nextTaggedIds = inputTaggedMarkers.map((marker) => marker.id);
+    if (!areStringArraysEqual(nextTaggedIds, taggedMarkerIds)) {
+      previousTaggedMarkerIdsRef.current = nextTaggedIds;
+      setTaggedMarkerIds(nextTaggedIds);
+    }
+  }, [inputTaggedMarkers, setTaggedMarkerIds, taggedMarkerIds]);
 
   useEffect(() => {
     setHighlightedMarkerIndex(0);
@@ -1588,7 +1678,7 @@ export default function ChatSidebar() {
         label: `Analyzing visuals ${initialCompleted}/${totalOverviewFrames}`,
         etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
       });
-      const batches = [];
+      const batches: FrameDescriptionBatch[] = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
         const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
         const shouldDescribeBatch = force || batch.some((frame) => (
@@ -1609,29 +1699,21 @@ export default function ChatSidebar() {
         batches.push({ start, batchFrames });
       }
 
-      for (let i = 0; i < batches.length; i += MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS) {
-        const windowBatches = batches.slice(i, i + MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS);
-        const results = await Promise.all(windowBatches.map(async (batch) => ({
-          start: batch.start,
-          data: await requestFrameDescriptions(batch.batchFrames),
-        })));
-
-        for (const result of results) {
-          nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
-          setVideoFrames(nextFrames);
-          const completed = nextFrames.filter((frame) => (
-            frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
-          )).length;
-          const remaining = Math.max(totalOverviewFrames - completed, 0);
-          setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: `Analyzing visuals ${completed}/${totalOverviewFrames}`,
-            etaSeconds: remaining > 0 ? estimateFrameDescriptionSeconds(remaining) : 0,
-          });
-        }
-      }
+      await runFrameDescriptionBatches(batches, (result) => {
+        nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
+        setVideoFrames(nextFrames);
+        const completed = nextFrames.filter((frame) => (
+          frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
+        )).length;
+        const remaining = Math.max(totalOverviewFrames - completed, 0);
+        setFrameIndexingProgress({
+          stage: 'describing_frames',
+          completed,
+          total: Math.max(totalOverviewFrames, 1),
+          label: `Analyzing visuals ${completed}/${totalOverviewFrames}`,
+          etaSeconds: remaining > 0 ? estimateFrameDescriptionSeconds(remaining) : 0,
+        });
+      });
       return nextFrames;
     })();
 
@@ -1797,6 +1879,8 @@ export default function ChatSidebar() {
     if (!text || isChatLoading || reviewLocked) return;
 
     setInput('');
+    previousTaggedMarkerIdsRef.current = [];
+    clearTaggedMarkers();
     setActiveMarkerMention(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
@@ -1821,7 +1905,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [addMessage, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, clearTaggedMarkers, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
     if (isChatLoading || reviewLocked) return;
@@ -1918,6 +2002,10 @@ export default function ChatSidebar() {
     }
   }, []);
 
+  useEffect(() => {
+    resizeComposer();
+  }, [input, resizeComposer]);
+
   const syncActiveMarkerMention = useCallback((value: string, caret: number | null) => {
     setActiveMarkerMention(getActiveMarkerMention(value, caret));
   }, []);
@@ -1944,20 +2032,16 @@ export default function ChatSidebar() {
     focusComposer(nextCaret);
   }, [activeMarkerMention, focusComposer, input]);
 
-  const tagSelectedMarker = useCallback((marker: MarkerEntry) => {
-    requestSeek(marker.timelineTime);
-    const nextValue = appendMarkerReference(input, marker.number);
+  const untagMarker = useCallback((marker: MarkerEntry) => {
+    const nextTaggedIds = taggedMarkerIds.filter((id) => id !== marker.id);
+    previousTaggedMarkerIdsRef.current = nextTaggedIds;
+    setTaggedMarkerIds(nextTaggedIds);
+    const nextValue = removeMarkerReference(input, marker.number);
+    syncingTaggedMarkersRef.current = true;
     setInput(nextValue);
     setActiveMarkerMention(null);
     focusComposer(nextValue.length);
-  }, [focusComposer, input, requestSeek]);
-
-  const untagMarker = useCallback((markerNumber: number) => {
-    const nextValue = removeMarkerReference(input, markerNumber);
-    setInput(nextValue);
-    setActiveMarkerMention(null);
-    focusComposer(nextValue.length);
-  }, [focusComposer, input]);
+  }, [focusComposer, input, setTaggedMarkerIds, taggedMarkerIds]);
 
   useEffect(() => {
     if (agentContextReady) {
@@ -2202,7 +2286,7 @@ export default function ChatSidebar() {
               {taggedMarkers.map((marker) => (
                 <button
                   key={marker.id}
-                  onClick={() => untagMarker(marker.number)}
+                  onClick={() => untagMarker(marker)}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -2223,27 +2307,6 @@ export default function ChatSidebar() {
                   <span style={{ color: 'rgba(253,230,138,0.72)' }}>×</span>
                 </button>
               ))}
-            </div>
-          )}
-          {selectedMarkerContext && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-              <button
-                onClick={() => tagSelectedMarker(selectedMarkerContext)}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  padding: '2px 7px',
-                  background: 'rgba(250,204,21,0.12)',
-                  border: '1px solid rgba(250,204,21,0.28)',
-                  borderRadius: 999,
-                  fontSize: 11,
-                  color: '#fde68a',
-                  fontFamily: 'var(--font-serif)',
-                  cursor: 'pointer',
-                }}
-              >
-                <span>@{selectedMarkerContext.number}</span>
-                <span>{selectedMarkerContext.label ?? formatChatTime(selectedMarkerContext.timelineTime)}</span>
-              </button>
             </div>
           )}
           {activeMarkerMention && markerSuggestions.length > 0 && (
