@@ -14,6 +14,12 @@ import { useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
 
+function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sourceUrl'> {
+  const copy = { ...item };
+  delete copy.sourceUrl;
+  return copy;
+}
+
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
@@ -22,6 +28,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const [chatWidth, setChatWidth] = useState(340);
   const [timelineHeight, setTimelineHeight] = useState(300);
   const [mediaPanelWidth, setMediaPanelWidth] = useState(200);
+  const [isProjectLoading, setIsProjectLoading] = useState(false);
 
   const startChatResize = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -165,6 +172,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   useEffect(() => {
     if (!projectId) return;
     (async () => {
+      setIsProjectLoading(true);
       try {
         const res = await fetch(`/api/projects/${projectId}`);
         if (!res.ok) return;
@@ -181,27 +189,31 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         const signedPaths = allAssetPaths.length > 0 ? await createSignedUrls(allAssetPaths) : new Map<string, string>();
 
         if (editState.clips?.length) {
-          editState.clips = editState.clips.map((clip: { sourcePath?: string; sourceUrl?: string }) =>
-            clip.sourcePath && signedPaths.has(clip.sourcePath)
-              ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
-              : clip
-          );
+          editState.clips = editState.clips.map((clip: { sourcePath?: string; sourceUrl?: string }) => {
+            const rest = stripSourceUrl(clip);
+            return clip.sourcePath && signedPaths.has(clip.sourcePath)
+              ? { ...rest, sourceUrl: signedPaths.get(clip.sourcePath) }
+              : rest;
+          });
         }
 
         if (editState.extraTracks?.length) {
           editState.extraTracks = editState.extraTracks.map((track: { clips?: Array<{ sourcePath?: string; sourceUrl?: string }> }) => ({
             ...track,
-            clips: (track.clips ?? []).map((clip: { sourcePath?: string; sourceUrl?: string }) =>
-              clip.sourcePath && signedPaths.has(clip.sourcePath)
-                ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
-                : clip
-            ),
+            clips: (track.clips ?? []).map((clip: { sourcePath?: string; sourceUrl?: string }) => {
+              const rest = stripSourceUrl(clip);
+              return clip.sourcePath && signedPaths.has(clip.sourcePath)
+                ? { ...rest, sourceUrl: signedPaths.get(clip.sourcePath) }
+                : rest;
+            }),
           }));
         }
 
         loadProject(editState, videoUrl, data.video_path ?? null, projectId);
       } catch (e) {
         console.error('Failed to load project', e);
+      } finally {
+        setIsProjectLoading(false);
       }
     })();
   }, [loadProject, projectId]);
@@ -294,7 +306,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
             {/* Video preview */}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
-              {(videoFile || videoUrl)
+              {isProjectLoading && !videoUrl
+                ? <ProjectLoadingState />
+                : (videoFile || videoUrl)
                 ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
                 : <EmptyDropZone importFile={importFile} />
               }
@@ -338,6 +352,26 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       </div>
 
       <ExportProgress />
+    </div>
+  );
+}
+
+function ProjectLoadingState() {
+  return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, color: 'var(--fg-secondary)' }}>
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            borderRadius: '50%',
+            border: '2px solid rgba(255,255,255,0.12)',
+            borderTopColor: 'var(--accent)',
+            animation: 'spin 0.8s linear infinite',
+          }}
+        />
+        <span style={{ fontSize: 12, fontFamily: 'var(--font-serif)' }}>Loading project...</span>
+      </div>
     </div>
   );
 }

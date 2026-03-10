@@ -13,21 +13,21 @@ interface ClipBlockProps {
   onMouseDown: (e: React.MouseEvent) => void;  // for drag-to-reorder
   onTrimLeftStart: (e: React.MouseEvent) => void;
   onTrimRightStart: (e: React.MouseEvent) => void;
-  index: number;   // for alternating colors
+  index: number;
 }
 
-const CLIP_COLORS = [
-  { bg: 'rgba(59,130,246,0.35)', border: 'rgba(96,165,250,0.6)', hi: 'rgba(96,165,250,0.9)' },
-  { bg: 'rgba(99,102,241,0.35)', border: 'rgba(129,140,248,0.6)', hi: 'rgba(129,140,248,0.9)' },
-  { bg: 'rgba(16,185,129,0.3)', border: 'rgba(52,211,153,0.6)', hi: 'rgba(52,211,153,0.9)' },
-  { bg: 'rgba(245,158,11,0.3)', border: 'rgba(251,191,36,0.6)', hi: 'rgba(251,191,36,0.9)' },
-];
+const CLIP_COLOR = {
+  bg: 'rgba(59,130,246,0.35)',
+  border: 'rgba(96,165,250,0.6)',
+  hi: 'rgba(96,165,250,0.9)',
+};
 
 export default function ClipBlock({
   clip, left, width, height, isSelected,
   onSelect, onMouseDown, onTrimLeftStart, onTrimRightStart, index
 }: ClipBlockProps) {
-  const color = CLIP_COLORS[index % CLIP_COLORS.length];
+  void index;
+  const color = CLIP_COLOR;
   const HANDLE_W = 6;
 
   // Timeline duration = sourceDuration / speed

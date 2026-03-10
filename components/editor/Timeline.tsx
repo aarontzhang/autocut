@@ -34,6 +34,11 @@ type DragInfo = {
   linkedOrigStart?: number;
 };
 
+type PlayheadDragInfo = {
+  totalW: number;
+  totalDuration: number;
+};
+
 /** Collect all timeline edge positions (start/end of every clip) for snapping, excluding specified clip IDs */
 function collectSnapPoints(excludeClipIds: string[]): number[] {
   const store = useEditorStore.getState();
@@ -78,7 +83,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
   const [trackWidth, setTrackWidth] = useState(800);
   const dragRef = useRef<DragInfo | null>(null);
   const panRef = useRef<{ startX: number; startScrollLeft: number; moved: boolean } | null>(null);
-  const playheadDragRef = useRef<{ totalW: number; totalDuration: number } | null>(null);
+  const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
   const clipDragJustEnded = useRef(false);
 
   // Track clip selection (supports linked video+audio pair highlighting)
@@ -239,6 +244,37 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
     }
     setSelectedItem(null);
   }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, totalTimelineDuration, totalW, videoRef]);
+
+  const scrubPlayhead = useCallback((clientX: number, dragInfo: PlayheadDragInfo) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const rawPx = (clientX - rect.left - HEADER_W) + el.scrollLeft;
+    const rawT = Math.max(0, Math.min(dragInfo.totalDuration, (rawPx / dragInfo.totalW) * dragInfo.totalDuration));
+    const snapThreshold = (SNAP_PX / dragInfo.totalW) * dragInfo.totalDuration;
+    const snapPts = collectSnapPoints([]);
+    const t = snapEnabled ? applySnap(rawT, snapPts, snapThreshold).snapped : rawT;
+    playerRef?.current?.seekTo(t);
+    if (!playerRef?.current) {
+      useEditorStore.getState().setCurrentTime(t);
+      const store = useEditorStore.getState();
+      const sched = buildClipSchedule(store.clips);
+      if (sched.length > 0) {
+        let targetEntry = sched.find(entry => t >= entry.timelineStart && t <= entry.timelineEnd);
+        if (!targetEntry) targetEntry = sched[sched.length - 1];
+        const offsetInTimeline = t - targetEntry.timelineStart;
+        const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+        if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
+      }
+    }
+  }, [playerRef, snapEnabled, videoRef]);
+
+  const beginPlayheadDrag = useCallback((clientX: number) => {
+    const dragInfo = { totalW, totalDuration: totalTimelineDuration };
+    playheadDragRef.current = dragInfo;
+    document.body.style.cursor = 'ew-resize';
+    scrubPlayhead(clientX, dragInfo);
+  }, [scrubPlayhead, totalTimelineDuration, totalW]);
 
   const getSnappedTime = useCallback((rawTime: number, clipDuration = 0, excludeClipIds: string[] = []) => {
     const clamped = Math.max(0, rawTime);
@@ -549,29 +585,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
       // Playhead scrub drag — with snapping to clip edges
       const ph = playheadDragRef.current;
       if (ph) {
-        const el = scrollRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const scrollLeft = el.scrollLeft;
-        const rawPx = (e.clientX - rect.left - HEADER_W) + scrollLeft;
-        const rawT = Math.max(0, Math.min(ph.totalDuration, (rawPx / ph.totalW) * ph.totalDuration));
-        // Snap playhead to clip edges
-        const snapThreshold = (SNAP_PX / ph.totalW) * ph.totalDuration;
-        const snapPts = collectSnapPoints([]);
-        const t = snapEnabled ? applySnap(rawT, snapPts, snapThreshold).snapped : rawT;
-        playerRef?.current?.seekTo(t);
-        if (!playerRef?.current) {
-          useEditorStore.getState().setCurrentTime(t);
-          const store = useEditorStore.getState();
-          const sched = buildClipSchedule(store.clips);
-          if (sched.length > 0) {
-            let targetEntry = sched.find(entry => t >= entry.timelineStart && t <= entry.timelineEnd);
-            if (!targetEntry) targetEntry = sched[sched.length - 1];
-            const offsetInTimeline = t - targetEntry.timelineStart;
-            const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
-            if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
-          }
-        }
+        scrubPlayhead(e.clientX, ph);
         return;
       }
 
@@ -709,7 +723,7 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     };
-  }, [playerRef, snapEnabled, videoRef]);
+  }, [scrubPlayhead, snapEnabled]);
 
   const playheadX = tPx(currentTime);
 
@@ -844,14 +858,14 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
               color="var(--blue-clip-hi)"
             />
           ))}
-          <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--audio-clip-hi)" />
+          <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           {extraTracks.filter(t => t.type === 'audio').map(track => (
             <TrackHeader
               key={track.id}
               icon={<AudioIcon />}
               label={track.label}
               height={TRACK_HEIGHT}
-              color="var(--audio-clip-hi)"
+              color="var(--blue-clip-hi)"
             />
           ))}
           {hasCaptions && <EffectHeader label="CC" color="var(--caption-clip)" />}
@@ -870,6 +884,25 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
               zIndex: 20, pointerEvents: 'none',
             }} />
           )}
+          {/* Extended playhead hit area */}
+          <div
+            className="playhead-hitbox"
+            style={{
+              position: 'absolute',
+              left: Math.max(0, playheadX - 12),
+              top: 0,
+              bottom: 0,
+              width: 24,
+              zIndex: 15,
+              cursor: 'ew-resize',
+            }}
+            onMouseDown={e => {
+              e.stopPropagation();
+              e.preventDefault();
+              beginPlayheadDrag(e.clientX);
+            }}
+          />
+
           {/* Ruler */}
           <div
             style={{
@@ -906,17 +939,17 @@ export default function Timeline({ videoRef, playerRef, onImportFile }: Timeline
             <div
               className="playhead-dot"
               style={{
-                position: 'absolute', top: 3, left: playheadX - 6,
-                width: 12, height: 12, borderRadius: '50%',
+                position: 'absolute', top: 1, left: playheadX - 7,
+                width: 14, height: 14, borderRadius: '50%',
                 background: 'var(--accent)',
                 cursor: 'ew-resize',
-                zIndex: 5,
+                zIndex: 16,
+                boxShadow: '0 0 0 3px rgba(33,212,255,0.12)',
               }}
               onMouseDown={e => {
                 e.stopPropagation();
                 e.preventDefault();
-                playheadDragRef.current = { totalW, totalDuration: contentDuration };
-                document.body.style.cursor = 'ew-resize';
+                beginPlayheadDrag(e.clientX);
               }}
             />
           </div>
@@ -1181,9 +1214,10 @@ function EffectTrackRow({ height, children }: { height: number; children: React.
 function Playhead({ x, height }: { x: number; height: number }) {
   return (
     <div style={{
-      position: 'absolute', top: 0, left: x,
-      width: 1, height,
-      background: 'rgba(255,255,255,0.85)',
+      position: 'absolute', top: -2, left: x,
+      width: 2, height: height + 4,
+      background: 'rgba(255,255,255,0.92)',
+      boxShadow: '0 0 0 1px rgba(255,255,255,0.12)',
       zIndex: 4, pointerEvents: 'none',
     }} />
   );
@@ -1230,12 +1264,7 @@ function TrackHeader({ icon, label, height, color, onRemove }: {
   );
 }
 
-const EXTRA_CLIP_COLORS = [
-  { bg: 'rgba(168,85,247,0.3)', border: 'rgba(192,132,252,0.6)' },
-  { bg: 'rgba(236,72,153,0.3)', border: 'rgba(244,114,182,0.6)' },
-  { bg: 'rgba(20,184,166,0.3)', border: 'rgba(45,212,191,0.6)' },
-  { bg: 'rgba(245,158,11,0.3)', border: 'rgba(251,191,36,0.6)' },
-];
+const EXTRA_CLIP_COLOR = { bg: 'rgba(59,130,246,0.35)', border: 'rgba(96,165,250,0.6)' };
 
 function ExtraTrackRow({ height, track, tPx, playheadX, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
   height: number;
@@ -1280,7 +1309,8 @@ function ExtraTrackRow({ height, track, tPx, playheadX, selectedTrackClipId, onD
         </div>
       )}
       {track.clips.map((clip, i) => {
-        const color = EXTRA_CLIP_COLORS[i % EXTRA_CLIP_COLORS.length];
+        void i;
+        const color = EXTRA_CLIP_COLOR;
         const clipLeft = tPx(clip.timelineStart);
         const clipW = Math.max(HANDLE_W * 2 + 4, tPx(clip.timelineStart + clip.sourceDuration / clip.speed) - clipLeft);
         // A clip is "selected" if it is the selected clip OR its linked partner is selected

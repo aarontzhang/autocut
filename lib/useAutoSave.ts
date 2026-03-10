@@ -3,6 +3,12 @@
 import { useEffect, useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 
+function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sourceUrl'> {
+  const copy = { ...item };
+  delete copy.sourceUrl;
+  return copy;
+}
+
 export function useAutoSave() {
   const clips = useEditorStore(s => s.clips);
   const captions = useEditorStore(s => s.captions);
@@ -29,11 +35,14 @@ export function useAutoSave() {
       try {
         const state = useEditorStore.getState();
         const editState = {
-          clips: state.clips,
+          clips: state.clips.map(stripSourceUrl),
           captions: state.captions,
           transitions: state.transitions,
           textOverlays: state.textOverlays,
-          extraTracks: state.extraTracks,
+          extraTracks: state.extraTracks.map(track => ({
+            ...track,
+            clips: track.clips.map(stripSourceUrl),
+          })),
         };
         const res = await fetch(`/api/projects/${currentProjectId}`, {
           method: 'PATCH',
