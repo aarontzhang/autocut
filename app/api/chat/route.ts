@@ -63,7 +63,8 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ### 6. Request Dense Frames (request_frames)
 - Request a higher-density set of actual video frames for a specific time range to pinpoint a precise visual moment
 - Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
-- startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 30)
+- startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 60)
+- Prefer narrow requests around the likely boundary instead of one broad 10–20s span when the user needs an exact cut
 - Use this when the text-only frame summaries are not specific enough. After extraction, the frames will be attached as images — use them to identify the exact timestamp, then make your edit
 
 Example:

@@ -10,6 +10,7 @@ import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcript
 import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
+const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -20,6 +21,14 @@ type ChatResponse = {
   message?: string;
   action?: EditAction | null;
   error?: string;
+};
+
+type IndexingProgress = {
+  stage: 'extracting_frames' | 'describing_frames' | 'transcribing';
+  completed: number;
+  total: number;
+  label: string;
+  etaSeconds?: number | null;
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
@@ -64,6 +73,59 @@ async function postChatRequest(
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+async function requestFrameDescriptions(batchFrames: Array<{
+  image: string;
+  timelineTime: number;
+  sourceTime: number;
+}>): Promise<FrameDescriptionResponse> {
+  const res = await fetch('/api/frame-descriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
+      frames: batchFrames,
+    }),
+  });
+  const data = await parseJsonResponse<FrameDescriptionResponse>(res);
+  if (!res.ok) {
+    throw new Error(data?.error ?? 'Failed to describe video frames.');
+  }
+  return data ?? {};
+}
+
+function clampProgress(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function formatEtaLabel(seconds?: number | null): string | null {
+  if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds < 10) return 'about 10s left';
+  if (seconds < 60) return `about ${Math.ceil(seconds / 5) * 5}s left`;
+  const roundedMinutes = Math.ceil((seconds / 60) * 2) / 2;
+  return `about ${roundedMinutes} min left`;
+}
+
+function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
+  if (duration <= 0) return 0;
+  const interval = duration <= preferredInterval * maxOverviewFrames
+    ? preferredInterval
+    : duration / maxOverviewFrames;
+  return Math.floor(duration / interval) + 1;
+}
+
+function estimateTranscriptSeconds(duration: number): number {
+  return Math.max(12, Math.min(90, duration * 0.16));
+}
+
+function estimateFrameExtractionSeconds(frameCount: number): number {
+  return Math.max(6, Math.min(30, frameCount * 0.035));
+}
+
+function estimateFrameDescriptionSeconds(frameCount: number): number {
+  const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
+  return Math.max(10, batches * 3.5);
 }
 
 function serializeActionForComparison(value: unknown): string {
@@ -828,10 +890,22 @@ function ThinkingIndicator({ status }: { status?: string }) {
 }
 
 // ─── Empty state ───────────────────────────────────────────────────────────────
-function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; indexingReason: string | null }) {
+function EmptyState({
+  isIndexing,
+  indexingReason,
+  indexingProgress,
+}: {
+  isIndexing: boolean;
+  indexingReason: string | null;
+  indexingProgress: IndexingProgress | null;
+}) {
   const indexingDetail = indexingReason?.includes('take a while')
     ? null
     : 'Deep indexing can take a while on longer videos.';
+  const progressValue = indexingProgress && indexingProgress.total > 0
+    ? clampProgress(indexingProgress.completed / indexingProgress.total)
+    : null;
+  const etaLabel = formatEtaLabel(indexingProgress?.etaSeconds);
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
@@ -853,6 +927,29 @@ function EmptyState({ isIndexing, indexingReason }: { isIndexing: boolean; index
           <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
             {indexingReason ?? 'Indexing…'}
           </span>
+          {progressValue !== null && (
+            <>
+              <div style={{
+                width: 220,
+                height: 6,
+                borderRadius: 999,
+                background: 'rgba(255,255,255,0.08)',
+                overflow: 'hidden',
+                boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
+              }}>
+                <div style={{
+                  width: `${Math.max(progressValue * 100, 4)}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, rgba(33,212,255,0.7), rgba(33,212,255,1))',
+                  transition: 'width 0.2s ease',
+                }} />
+              </div>
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', fontFamily: 'var(--font-serif)' }}>
+                {indexingProgress.label}
+                {etaLabel ? ` • ${etaLabel}` : ''}
+              </span>
+            </>
+          )}
           {indexingDetail && (
             <span style={{
               fontSize: 10,
@@ -890,6 +987,7 @@ export default function ChatSidebar() {
   const [agentMode, setAgentMode] = useState(false);
   const [userChoseModeManually, setUserChoseModeManually] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState('');
+  const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const applyAction = useEditorStore(s => s.applyAction);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoData = useEditorStore(s => s.videoData);
@@ -940,9 +1038,17 @@ export default function ChatSidebar() {
       const currentDuration = useEditorStore.getState().videoDuration;
       const { overviewIntervalSeconds, maxOverviewFrames } = useEditorStore.getState().aiSettings.frameInspection;
       const preferredInterval = Math.max(0.1, overviewIntervalSeconds);
+      const frameTarget = getOverviewFrameTarget(currentDuration, preferredInterval, maxOverviewFrames);
       const interval = currentDuration <= preferredInterval * maxOverviewFrames
         ? preferredInterval
         : currentDuration / maxOverviewFrames;
+      setFrameIndexingProgress({
+        stage: 'extracting_frames',
+        completed: 0,
+        total: Math.max(frameTarget, 1),
+        label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
+        etaSeconds: estimateFrameExtractionSeconds(frameTarget),
+      });
       const timelineTimestamps: number[] = [];
       for (let t = 0; t < currentDuration; t += interval) timelineTimestamps.push(t);
       if (timelineTimestamps[timelineTimestamps.length - 1] !== currentDuration) {
@@ -957,6 +1063,13 @@ export default function ChatSidebar() {
         kind: 'overview' as const,
       }));
       setVideoFrames(frames);
+      setFrameIndexingProgress({
+        stage: 'extracting_frames',
+        completed: frames.length,
+        total: Math.max(frames.length, 1),
+        label: `Sampled ${frames.length} frame${frames.length === 1 ? '' : 's'}`,
+        etaSeconds: 0,
+      });
       return frames;
     } catch {
       return videoFrames ?? [];
@@ -978,6 +1091,18 @@ export default function ChatSidebar() {
 
     const promise = (async () => {
       let nextFrames = [...frames];
+      const totalOverviewFrames = nextFrames.filter((frame) => frame.kind === 'overview').length;
+      const initialCompleted = nextFrames.filter((frame) => (
+        frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
+      )).length;
+      setFrameIndexingProgress({
+        stage: 'describing_frames',
+        completed: initialCompleted,
+        total: Math.max(totalOverviewFrames, 1),
+        label: `Analyzing visuals ${initialCompleted}/${totalOverviewFrames}`,
+        etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
+      });
+      const batches = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
         const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
         const shouldDescribeBatch = force || batch.some((frame) => (
@@ -995,22 +1120,31 @@ export default function ChatSidebar() {
             sourceTime: frame.sourceTime,
           }));
         if (batchFrames.length === 0) continue;
+        batches.push({ start, batchFrames });
+      }
 
-        const res = await fetch('/api/frame-descriptions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
-            frames: batchFrames,
-          }),
-        });
-        const data = await res.json() as FrameDescriptionResponse;
-        if (!res.ok) {
-          throw new Error(data.error ?? 'Failed to describe video frames.');
+      for (let i = 0; i < batches.length; i += MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS) {
+        const windowBatches = batches.slice(i, i + MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS);
+        const results = await Promise.all(windowBatches.map(async (batch) => ({
+          start: batch.start,
+          data: await requestFrameDescriptions(batch.batchFrames),
+        })));
+
+        for (const result of results) {
+          nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
+          setVideoFrames(nextFrames);
+          const completed = nextFrames.filter((frame) => (
+            frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
+          )).length;
+          const remaining = Math.max(totalOverviewFrames - completed, 0);
+          setFrameIndexingProgress({
+            stage: 'describing_frames',
+            completed,
+            total: Math.max(totalOverviewFrames, 1),
+            label: `Analyzing visuals ${completed}/${totalOverviewFrames}`,
+            etaSeconds: remaining > 0 ? estimateFrameDescriptionSeconds(remaining) : 0,
+          });
         }
-
-        nextFrames = mergeFrameDescriptions(nextFrames, start, data.descriptions ?? []);
-        setVideoFrames(nextFrames);
       }
       return nextFrames;
     })();
@@ -1024,6 +1158,13 @@ export default function ChatSidebar() {
       }
     }
   }, [setVideoFrames]);
+
+  const frameDescriptionsReady = useMemo(() => {
+    if (videoFrames === null) return false;
+    return videoFrames
+      .filter((frame) => frame.kind === 'overview')
+      .every((frame) => !!frame.description && frame.description.trim().length > 0);
+  }, [videoFrames]);
 
   const buildCurrentTranscript = useCallback(() => {
     const freshState = useEditorStore.getState();
@@ -1064,7 +1205,11 @@ export default function ChatSidebar() {
 
       if (action?.type === 'request_frames' && action.frameRequest) {
         const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-        const count = Math.min(req.count ?? freshState.aiSettings.frameInspection.defaultFrameCount, 30);
+        const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
+        const count = Math.min(
+          req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
+          60,
+        );
         setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
         const interval = (req.endTime - req.startTime) / count;
         const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
@@ -1223,7 +1368,11 @@ export default function ChatSidebar() {
         let resultSummary = '';
         if (action.type === 'request_frames' && action.frameRequest) {
           const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-          const count = Math.min(req.count ?? useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount, 30);
+          const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
+          const count = Math.min(
+            req.count ?? Math.max(useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
+            60,
+          );
           setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
           const interval = (req.endTime - req.startTime) / count;
           const timelineTimestamps = Array.from({ length: count }, (_, k) => req.startTime + k * interval);
@@ -1316,24 +1465,42 @@ export default function ChatSidebar() {
     setLoadingStatus('');
   }, [setIsChatLoading]);
 
-  const handleSend = useCallback(() => {
-    if (reviewLocked) return;
-    if (agentMode) handleAgentSend(input.trim());
-    else handleSendSingle();
-  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked]);
-
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
-  const agentContextReady = transcriptStatus === 'done' && videoFrames !== null;
+  const agentContextReady = transcriptStatus === 'done' && videoFrames !== null && frameDescriptionsReady;
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
+  const estimatedTranscriptEta = estimateTranscriptSeconds(videoDuration);
+  const indexingProgress = transcriptStatus === 'loading'
+    ? {
+        stage: 'transcribing' as const,
+        completed: 0,
+        total: 1,
+        label: 'Transcribing audio',
+        etaSeconds: estimatedTranscriptEta,
+      }
+    : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && videoFrames === null)
-      ? 'Indexing audio and loading frames. This can take a while for long videos…'
+      ? 'Transcribing audio and sampling frames…'
       : transcriptStatus === 'loading'
-        ? 'Indexing audio. This can take a while for long videos…'
+        ? 'Transcribing audio…'
         : videoFrames === null
-          ? 'Loading video frames. This can take a while for long videos…'
+          ? 'Sampling video frames…'
+          : !frameDescriptionsReady
+            ? 'Analyzing sampled frames…'
           : null
     : null;
+
+  useEffect(() => {
+    if (agentContextReady) {
+      setFrameIndexingProgress(null);
+    }
+  }, [agentContextReady]);
+
+  const handleSend = useCallback(() => {
+    if (reviewLocked || (hasVideoSource && !agentContextReady)) return;
+    if (agentMode) handleAgentSend(input.trim());
+    else handleSendSingle();
+  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked, hasVideoSource, agentContextReady]);
 
   useEffect(() => {
     if (agentContextReady && !userChoseModeManually) {
@@ -1401,8 +1568,9 @@ export default function ChatSidebar() {
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
         {messages.length === 0 ? (
           <EmptyState
-            isIndexing={!!(videoFile && !agentContextReady)}
+            isIndexing={hasVideoSource && !agentContextReady}
             indexingReason={agentNotReadyReason}
+            indexingProgress={indexingProgress}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1468,19 +1636,47 @@ export default function ChatSidebar() {
               Finish the active edit review before sending another request.
             </p>
           )}
+          {!reviewLocked && hasVideoSource && !agentContextReady && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
+                {agentNotReadyReason ?? 'Finishing indexing…'}
+                {formatEtaLabel(indexingProgress?.etaSeconds) ? ` • ${formatEtaLabel(indexingProgress?.etaSeconds)}` : ''}
+              </p>
+              <div style={{
+                width: '100%',
+                height: 5,
+                borderRadius: 999,
+                background: 'rgba(255,255,255,0.06)',
+                overflow: 'hidden',
+              }}>
+                <div style={{
+                  width: `${Math.max((((indexingProgress?.completed ?? 0) / Math.max(indexingProgress?.total ?? 1, 1)) * 100), 6)}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, rgba(33,212,255,0.5), rgba(33,212,255,0.95))',
+                  transition: 'width 0.2s ease',
+                }} />
+              </div>
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             value={input}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder={reviewLocked ? 'Complete the active review…' : 'Split, speed, filter, caption…'}
+            placeholder={
+              reviewLocked
+                ? 'Complete the active review…'
+                : hasVideoSource && !agentContextReady
+                  ? (indexingProgress?.label ?? agentNotReadyReason ?? 'Finishing indexing…')
+                  : 'Split, speed, filter, caption…'
+            }
             rows={1}
-            disabled={reviewLocked}
+            disabled={reviewLocked || (hasVideoSource && !agentContextReady)}
             style={{
               resize: 'none',
               background: 'transparent',
               border: 'none',
-              color: reviewLocked ? 'var(--fg-muted)' : 'var(--fg-primary)',
+              color: reviewLocked || (hasVideoSource && !agentContextReady) ? 'var(--fg-muted)' : 'var(--fg-primary)',
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
@@ -1492,7 +1688,7 @@ export default function ChatSidebar() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             {/* Mode toggle — two options side by side */}
             {(() => {
-              const isIndexing = !!(videoFile && !agentContextReady);
+              const isIndexing = hasVideoSource && !agentContextReady;
               if (isIndexing) {
                 return (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -1558,19 +1754,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || !!(videoFile && !agentContextReady) || reviewLocked}
+                disabled={!input.trim() || (hasVideoSource && !agentContextReady) || reviewLocked}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? 'pointer' : 'default',
+                  cursor: input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(videoFile && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>
