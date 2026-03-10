@@ -91,6 +91,95 @@ export interface AppliedActionRecord {
   summary: string;
 }
 
+export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error';
+
+export interface MediaAsset {
+  id: string;
+  projectId: string;
+  storagePath: string;
+  sourceDuration: number | null;
+  fps: number | null;
+  width: number | null;
+  height: number | null;
+  status: MediaAssetStatus;
+  createdAt: string;
+  indexedAt: string | null;
+}
+
+export interface AssetScene {
+  id: string;
+  assetId: string;
+  sceneIndex: number;
+  sourceStart: number;
+  sourceEnd: number;
+  representativeThumbnailPath: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export type AssetVisualSampleKind = 'scene_rep' | 'window_250ms';
+
+export interface AssetVisualSample {
+  id: string;
+  assetId: string;
+  sourceTime: number;
+  windowDuration: number;
+  sampleKind: AssetVisualSampleKind;
+  thumbnailPath: string | null;
+  ocrText: string | null;
+  embedding: number[] | null;
+  brightness: number | null;
+  contrast: number | null;
+  edgeDensity: number | null;
+  motionScore: number | null;
+  fogScore: number | null;
+  darknessScore: number | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface AssetTranscriptWord {
+  id: string;
+  assetId: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+  confidence?: number | null;
+}
+
+export type AnalysisJobType =
+  | 'index_asset'
+  | 'verify_visual_candidates'
+  | 'repeat_detect_from_seed';
+
+export type AnalysisJobStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export interface AnalysisJobProgress {
+  completed: number;
+  total: number;
+  stage?: string;
+}
+
+export interface AnalysisJob {
+  id: string;
+  projectId: string;
+  assetId: string | null;
+  jobType: AnalysisJobType;
+  status: AnalysisJobStatus;
+  priority: number;
+  attemptCount: number;
+  payload?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  lockedAt?: string | null;
+  lockedBy?: string | null;
+  progress?: AnalysisJobProgress | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface IndexedVideoFrame {
   image?: string;
   timelineTime: number;
@@ -101,6 +190,67 @@ export interface IndexedVideoFrame {
   description?: string;
   projectedTimelineTime?: number | null;
   visibleOnTimeline?: boolean;
+}
+
+export type VisualConfidenceBand = 'low' | 'medium' | 'high';
+
+export interface VisualQueryIntent {
+  rawQuery: string;
+  normalizedQuery: string;
+  actionType: 'delete' | 'locate' | 'inspect';
+  targetType: 'visual_motif' | 'text_on_screen' | 'scene' | 'unknown';
+  transcriptRelevance: 'low' | 'medium' | 'high';
+  visualEvidencePriority: 'low' | 'medium' | 'high';
+  expectedDurationSeconds: number;
+  confidenceThreshold: number;
+  allowRepeatDetection: boolean;
+}
+
+export interface VisualCandidateWindow {
+  id: string;
+  assetId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  retrievalScore: number;
+  retrievalReasons: string[];
+  thumbnailPath?: string | null;
+  ocrText?: string | null;
+  verificationStatus?: 'not_requested' | 'queued' | 'verified' | 'rejected';
+  confidenceBand?: VisualConfidenceBand;
+}
+
+export interface VerifiedSourceRange {
+  assetId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  frameStart: number;
+  frameEnd: number;
+  verificationConfidence: number;
+  boundaryConfidence: number;
+  evidence: string[];
+  candidateId?: string;
+}
+
+export interface VisualEditProposal {
+  assetId: string;
+  intent: VisualQueryIntent;
+  confidenceBand: VisualConfidenceBand;
+  sourceRanges: VerifiedSourceRange[];
+  timelineRanges: Array<{ timelineStart: number; timelineEnd: number }>;
+  followUpPrompt?: string;
+}
+
+export interface VisualSearchSession {
+  projectId: string;
+  assetId: string | null;
+  query: string;
+  confidenceBand: VisualConfidenceBand;
+  intent: VisualQueryIntent | null;
+  candidates: VisualCandidateWindow[];
+  proposal: VisualEditProposal | null;
+  followUpPrompt?: string;
+  verificationJobId?: string | null;
+  updatedAt: number;
 }
 
 export interface AIEditingSettings {

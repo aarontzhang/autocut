@@ -15,6 +15,7 @@ import {
   IndexedVideoFrame,
   AIEditingSettings,
   AppliedActionRecord,
+  VisualSearchSession,
 } from './types';
 import {
   applyActionToSnapshot,
@@ -159,6 +160,7 @@ interface EditorState {
   // Video frames cache
   videoFrames: IndexedVideoFrame[] | null;
   videoFramesFresh: boolean; // false when the indexed source set changed and overview frames must be rebuilt
+  visualSearchSession: VisualSearchSession | null;
 
   // Actions
   setVideoFile: (file: File) => void;
@@ -211,6 +213,7 @@ interface EditorState {
   setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
   setTranscriptProgress: (progress: TranscriptProgress) => void;
   setVideoFrames: (frames: IndexedVideoFrame[]) => void;
+  setVisualSearchSession: (session: VisualSearchSession | null) => void;
 
   // Media library (multi-source V1)
   mediaLibrary: MediaLibraryItem[];
@@ -279,6 +282,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   rawTranscriptCaptions: null,
   videoFrames: null,
   videoFramesFresh: true,
+  visualSearchSession: null,
   mediaLibrary: [],
 
   _snapshot: (): EditSnapshot => {
@@ -303,6 +307,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       appliedActions: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      visualSearchSession: null,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
     });
   },
@@ -581,6 +586,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   clearMessages: () => set(s => ({
     messages: [],
     appliedActions: [],
+    visualSearchSession: null,
     pendingAction: null,
     clips: s.videoDuration > 0 ? [makeClip(0, s.videoDuration)] : [],
     captions: [],
@@ -618,6 +624,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       appliedActions: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],
     });
@@ -651,6 +658,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
       backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions, videoFrames: null, videoFramesFresh: true,
+      visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],
     });
@@ -680,6 +688,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      visualSearchSession: null,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
       mediaLibrary: [],
     });
@@ -911,4 +920,5 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   }),
   setTranscriptProgress: (progress) => set({ transcriptProgress: progress }),
   setVideoFrames: (frames) => set({ videoFrames: frames, videoFramesFresh: true }),
+  setVisualSearchSession: (session) => set({ visualSearchSession: session }),
 }));

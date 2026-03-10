@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, VisualSearchSession } from '@/lib/types';
 import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -11,6 +11,7 @@ import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
+const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -20,6 +21,7 @@ type FrameDescriptionResponse = {
 type ChatResponse = {
   message?: string;
   action?: EditAction | null;
+  visualSearch?: VisualSearchSession | null;
   error?: string;
 };
 
@@ -181,6 +183,28 @@ function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType
       visibleOnTimeline: timelineOccurrences.length > 0,
     };
   });
+}
+
+function getAssistantFallbackMessage(action?: EditAction | null): string {
+  switch (action?.type) {
+    case 'request_frames':
+      return 'I need a closer visual inspection before I can place that cut precisely.';
+    case 'transcribe_request':
+      return 'I need a transcript for that section before I can finish the edit.';
+    case 'delete_range':
+    case 'delete_ranges':
+      return 'I found the section to remove.';
+    default:
+      return 'I checked that section, but I need a clearer target before making an edit.';
+  }
+}
+
+function getDenseRequestTooBroadMessage(startTime: number, endTime: number): string {
+  return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
+}
+
+function looksLikeVisualSearchQuery(text: string): boolean {
+  return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
 }
 
 // ─── Action card config ────────────────────────────────────────────────────────
@@ -978,6 +1002,58 @@ function EmptyState({
   );
 }
 
+function VisualSearchPanel({ session }: { session: VisualSearchSession }) {
+  return (
+    <div style={{
+      padding: '10px 11px',
+      borderRadius: 8,
+      border: '1px solid rgba(56,189,248,0.18)',
+      background: 'rgba(56,189,248,0.06)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 11, color: '#7dd3fc', fontFamily: 'var(--font-serif)' }}>
+          Source visual retrieval
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'capitalize' }}>
+          {session.confidenceBand} confidence
+        </span>
+      </div>
+      <p style={{ margin: 0, fontSize: 11, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
+        {session.query}
+      </p>
+      {session.followUpPrompt && (
+        <p style={{ margin: 0, fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
+          {session.followUpPrompt}
+        </p>
+      )}
+      {session.candidates.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {session.candidates.slice(0, 3).map((candidate, index) => (
+            <div
+              key={candidate.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                fontSize: 10,
+                color: 'var(--fg-muted)',
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              <span>Candidate {index + 1}</span>
+              <span>{formatTime(candidate.sourceStart)}-{formatTime(candidate.sourceEnd)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main sidebar ──────────────────────────────────────────────────────────────
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
@@ -1011,6 +1087,9 @@ export default function ChatSidebar() {
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
+  const currentProjectId = useEditorStore(s => s.currentProjectId);
+  const visualSearchSession = useEditorStore(s => s.visualSearchSession);
+  const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
 
@@ -1054,6 +1133,7 @@ export default function ChatSidebar() {
       const interval = currentDuration <= preferredInterval * maxOverviewFrames
         ? preferredInterval
         : currentDuration / maxOverviewFrames;
+      const sampleEnd = Math.max(currentDuration - 0.05, 0);
       setFrameIndexingProgress({
         stage: 'extracting_frames',
         completed: 0,
@@ -1062,9 +1142,9 @@ export default function ChatSidebar() {
         etaSeconds: estimateFrameExtractionSeconds(frameTarget),
       });
       const sourceTimestamps: number[] = [];
-      for (let t = 0; t < currentDuration; t += interval) sourceTimestamps.push(t);
-      if (sourceTimestamps[sourceTimestamps.length - 1] !== currentDuration) {
-        sourceTimestamps.push(currentDuration);
+      for (let t = 0; t < sampleEnd; t += interval) sourceTimestamps.push(t);
+      if (sourceTimestamps.length === 0 || sourceTimestamps[sourceTimestamps.length - 1] < sampleEnd) {
+        sourceTimestamps.push(sampleEnd);
       }
       const images = await extractVideoFrames(source, sourceTimestamps);
       const frames = images.map((image, index) => ({
@@ -1083,6 +1163,7 @@ export default function ChatSidebar() {
       });
       return frames;
     } catch {
+      setFrameIndexingProgress(null);
       return videoFrames ?? [];
     }
   }, [videoData, videoDuration, videoFile, videoFrames, videoUrl, setVideoFrames]);
@@ -1163,6 +1244,9 @@ export default function ChatSidebar() {
     frameDescriptionPromiseRef.current = promise;
     try {
       return await promise;
+    } catch {
+      setFrameIndexingProgress(null);
+      return frames;
     } finally {
       if (frameDescriptionPromiseRef.current === promise) {
         frameDescriptionPromiseRef.current = null;
@@ -1190,8 +1274,13 @@ export default function ChatSidebar() {
     history: Array<{ role: 'user' | 'assistant'; content: string }>,
     ctrl: AbortController,
   ) => {
-    let currentFrames = await ensureFramesExtracted();
-    currentFrames = await ensureFrameDescriptions(currentFrames);
+    const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
+    const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(latestUserInput) && !!useEditorStore.getState().currentProjectId;
+    let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
+    if (!preferSourceVisualRetrieval) {
+      currentFrames = await ensureFrameDescriptions(currentFrames);
+    }
+    let producedVisibleResponse = false;
 
     for (let round = 0; round < 2; round++) {
       if (stopRequestedRef.current) break;
@@ -1200,9 +1289,10 @@ export default function ChatSidebar() {
       const currentTranscript = buildCurrentTranscript();
       const source = freshState.videoData ?? freshState.videoFile ?? freshState.videoUrl;
 
-      const { message = '', action } = await postChatRequest({
+      const { message = '', action, visualSearch } = await postChatRequest({
         messages: history,
         context: {
+          projectId: freshState.currentProjectId,
           videoDuration: freshState.videoDuration,
           clipCount: currentClips.length,
           clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
@@ -1213,15 +1303,27 @@ export default function ChatSidebar() {
           frames: buildFrameContextPayload(currentFrames, currentClips),
         },
       }, ctrl);
+      setVisualSearchSession(visualSearch ?? null);
+      const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
         const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
         const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
+        if (spanSeconds > MAX_DENSE_FRAME_WINDOW_SECONDS) {
+          addMessage({
+            role: 'assistant',
+            content: getDenseRequestTooBroadMessage(req.startTime, req.endTime),
+          });
+          producedVisibleResponse = true;
+          return;
+        }
         const count = Math.min(
           req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
           60,
         );
-        setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
+        addMessage({ role: 'assistant', content: assistantMessage });
+        producedVisibleResponse = true;
+        setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
         const interval = (req.endTime - req.startTime) / count;
         const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
         const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
@@ -1236,15 +1338,23 @@ export default function ChatSidebar() {
           rangeEnd: req.endTime,
         }));
         setLoadingStatus('');
-        history.push({ role: 'assistant', content: message });
+        history.push({ role: 'assistant', content: assistantMessage });
         history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
         continue;
       }
 
-      addMessage({ role: 'assistant', content: message, action: action ?? undefined });
+      addMessage({ role: 'assistant', content: assistantMessage, action: action ?? undefined });
+      producedVisibleResponse = true;
       return;
     }
-  }, [addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext]);
+
+    if (!producedVisibleResponse) {
+      addMessage({
+        role: 'assistant',
+        content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
+      });
+    }
+  }, [addMessage, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, selectedClipContext, setVisualSearchSession]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -1328,8 +1438,11 @@ export default function ChatSidebar() {
     abortRef.current = ctrl;
     stopRequestedRef.current = false;
     try {
-      let currentFrames = await ensureFramesExtracted();
-      currentFrames = await ensureFrameDescriptions(currentFrames);
+      const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(text) && !!useEditorStore.getState().currentProjectId;
+      let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
+      if (!preferSourceVisualRetrieval) {
+        currentFrames = await ensureFrameDescriptions(currentFrames);
+      }
       // After a batch silence cut, suppress the transcript so the agent can't
       // re-analyze it and issue a second round of deletions.
       let suppressTranscriptNextIter = false;
@@ -1352,9 +1465,10 @@ export default function ChatSidebar() {
             : freshState.backgroundTranscript;
         suppressTranscriptNextIter = false;
 
-        const { message = '', action } = await postChatRequest({
+        const { message = '', action, visualSearch } = await postChatRequest({
           messages: agentHistory,
           context: {
+            projectId: freshState.currentProjectId,
             videoDuration: currentDuration,
             clipCount: currentClips.length,
             clips: currentClips.map((c, idx) => ({ index: idx, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
@@ -1365,14 +1479,25 @@ export default function ChatSidebar() {
             frames: buildFrameContextPayload(currentFrames, currentClips),
           },
         }, ctrl);
+        setVisualSearchSession(visualSearch ?? null);
+        const frameRequest = action?.type === 'request_frames' ? action.frameRequest : null;
+        const requestSpanSeconds = frameRequest
+          ? Math.max(frameRequest.endTime - frameRequest.startTime, 0.5)
+          : null;
+        const requestTooBroad = requestSpanSeconds !== null && requestSpanSeconds > MAX_DENSE_FRAME_WINDOW_SECONDS;
+        const assistantMessage = requestTooBroad
+          ? getDenseRequestTooBroadMessage(frameRequest!.startTime, frameRequest!.endTime)
+          : (message.trim() || getAssistantFallbackMessage(action));
         addMessage({
           role: 'assistant',
-          content: message,
-          action: action ?? undefined,
+          content: assistantMessage,
+          action: requestTooBroad ? undefined : action ?? undefined,
           autoApplied: true,
-          actionStatus: action && action.type !== 'none' ? 'completed' : undefined,
-          actionResult: action && action.type !== 'none' ? 'Auto-applied ✓' : undefined,
+          actionStatus: requestTooBroad ? undefined : action && action.type !== 'none' ? 'completed' : undefined,
+          actionResult: requestTooBroad ? undefined : action && action.type !== 'none' ? 'Auto-applied ✓' : undefined,
         });
+
+        if (requestTooBroad) break;
 
         if (!action || action.type === 'none') break;
 
@@ -1384,7 +1509,7 @@ export default function ChatSidebar() {
             req.count ?? Math.max(useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
             60,
           );
-          setLoadingStatus(`Extracting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
+          setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
           const interval = (req.endTime - req.startTime) / count;
           const timelineTimestamps = Array.from({ length: count }, (_, k) => req.startTime + k * interval);
           const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
@@ -1443,14 +1568,18 @@ export default function ChatSidebar() {
           }
         }
 
-        agentHistory.push({ role: 'assistant', content: message });
+        agentHistory.push({ role: 'assistant', content: assistantMessage });
         agentHistory.push({ role: 'user', content: `[Agent result: ${resultSummary}. Unless the user's message explicitly requested additional edits beyond this, you MUST return {"type":"none"} now. Do not make any further edits.]` });
+      }
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
       }
     } finally {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, setTranscriptProgress, videoFile, ensureFrameDescriptions, ensureFramesExtracted]);
+  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, setTranscriptProgress, videoFile, ensureFrameDescriptions, ensureFramesExtracted, setVisualSearchSession]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -1501,6 +1630,8 @@ export default function ChatSidebar() {
             ? 'Analyzing sampled frames…'
           : null
     : null;
+  const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
+  const canSendDespiteIndexing = pendingVisualQuery;
 
   useEffect(() => {
     if (agentContextReady) {
@@ -1509,10 +1640,10 @@ export default function ChatSidebar() {
   }, [agentContextReady]);
 
   const handleSend = useCallback(() => {
-    if (reviewLocked || (hasVideoSource && !agentContextReady)) return;
+    if (reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing)) return;
     if (agentMode) handleAgentSend(input.trim());
     else handleSendSingle();
-  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked, hasVideoSource, agentContextReady]);
+  }, [agentMode, input, handleAgentSend, handleSendSingle, reviewLocked, hasVideoSource, agentContextReady, canSendDespiteIndexing]);
 
   useEffect(() => {
     if (agentContextReady && !userChoseModeManually) {
@@ -1578,6 +1709,11 @@ export default function ChatSidebar() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
+        {visualSearchSession && currentProjectId && visualSearchSession.projectId === currentProjectId && (
+          <div style={{ marginBottom: 12 }}>
+            <VisualSearchPanel session={visualSearchSession} />
+          </div>
+        )}
         {messages.length === 0 ? (
           <EmptyState
             isIndexing={hasVideoSource && !agentContextReady}
@@ -1648,7 +1784,7 @@ export default function ChatSidebar() {
               Finish the active edit review before sending another request.
             </p>
           )}
-          {!reviewLocked && hasVideoSource && !agentContextReady && (
+          {!reviewLocked && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: 0, fontFamily: 'var(--font-serif)' }}>
                 {agentNotReadyReason ?? 'Finishing indexing…'}
@@ -1678,17 +1814,17 @@ export default function ChatSidebar() {
             placeholder={
               reviewLocked
                 ? 'Complete the active review…'
-                : hasVideoSource && !agentContextReady
+                : hasVideoSource && !agentContextReady && !canSendDespiteIndexing
                   ? (indexingProgress?.label ?? agentNotReadyReason ?? 'Finishing indexing…')
                   : 'Split, speed, filter, caption…'
             }
             rows={1}
-            disabled={reviewLocked || (hasVideoSource && !agentContextReady)}
+            disabled={reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing)}
             style={{
               resize: 'none',
               background: 'transparent',
               border: 'none',
-              color: reviewLocked || (hasVideoSource && !agentContextReady) ? 'var(--fg-muted)' : 'var(--fg-primary)',
+              color: reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing) ? 'var(--fg-muted)' : 'var(--fg-primary)',
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
@@ -1702,6 +1838,13 @@ export default function ChatSidebar() {
             {(() => {
               const isIndexing = hasVideoSource && !agentContextReady;
               if (isIndexing) {
+                if (canSendDespiteIndexing) {
+                  return (
+                    <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)', color: 'var(--accent-strong)' }}>
+                      Source retrieval ready
+                    </span>
+                  );
+                }
                 return (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }}>
@@ -1766,19 +1909,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || (hasVideoSource && !agentContextReady) || reviewLocked}
+                disabled={!input.trim() || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing) || reviewLocked}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? 'pointer' : 'default',
+                  cursor: input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(hasVideoSource && !agentContextReady) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !(hasVideoSource && !agentContextReady && !canSendDespiteIndexing) && !reviewLocked ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>

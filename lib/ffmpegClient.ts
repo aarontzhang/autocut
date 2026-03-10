@@ -330,6 +330,7 @@ export async function extractVideoFrames(
     });
 
     const frames: string[] = [];
+    const maxSeekTime = Math.max(video.duration - 0.05, 0);
     for (const t of timestamps) {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error(`Seek timeout at ${t}s`)), 8000);
@@ -339,7 +340,7 @@ export async function extractVideoFrames(
           frames.push(canvas.toDataURL('image/jpeg', 0.7).split(',')[1]);
           resolve();
         };
-        video.currentTime = t;
+        video.currentTime = Math.max(0, Math.min(t, maxSeekTime));
       });
     }
     return frames;

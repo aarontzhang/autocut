@@ -1,4 +1,5 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
+import { enqueueAnalysisJob, ensurePrimaryMediaAsset } from '@/lib/analysisJobs';
 import { NextResponse } from 'next/server';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -44,7 +45,33 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { data: updated, error } = await supabase.from('projects').update(patch).eq('id', id).eq('user_id', user.id).select('id').single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!updated) return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
-  return NextResponse.json({ ok: true });
+
+  let assetId: string | null = null;
+  let indexingJobId: string | null = null;
+  if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
+    try {
+      const asset = await ensurePrimaryMediaAsset(supabase, id, body.video_path);
+      assetId = asset.id;
+      if (asset.status === 'pending' || asset.status === 'error') {
+        const job = await enqueueAnalysisJob(supabase, {
+          projectId: id,
+          assetId: asset.id,
+          jobType: 'index_asset',
+          payload: {
+            storagePath: body.video_path,
+            videoFilename: body.video_filename ?? null,
+          },
+        });
+        indexingJobId = job.id;
+      }
+    } catch (assetError) {
+      return NextResponse.json({
+        ok: false,
+        error: assetError instanceof Error ? assetError.message : 'Failed to create source media asset',
+      }, { status: 500 });
+    }
+  }
+  return NextResponse.json({ ok: true, assetId, indexingJobId });
 }
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {

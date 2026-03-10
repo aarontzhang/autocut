@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "worker:analysis": "node scripts/analysis-worker.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

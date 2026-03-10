@@ -1,6 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
-import { AIEditingSettings, EditAction, IndexedVideoFrame } from '@/lib/types';
+import { getSupabaseServer } from '@/lib/supabase/server';
+import { getPrimaryMediaAsset } from '@/lib/analysisJobs';
+import {
+  AIEditingSettings,
+  EditAction,
+  IndexedVideoFrame,
+  VerifiedSourceRange,
+  VideoClip,
+  VisualSearchSession,
+} from '@/lib/types';
+import {
+  confidenceBandForCandidates,
+  isLikelyVisualQuery,
+  makeDeleteRangesAction,
+  parseVisualQuery,
+  projectVerifiedRangesToProposal,
+  retrieveVisualCandidates,
+} from '@/lib/visualRetrieval';
 
 const client = new Anthropic();
 
@@ -65,6 +82,8 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
 - startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 60)
 - Prefer narrow requests around the likely boundary instead of one broad 10–20s span when the user needs an exact cut
+- Never request dense frames across most or all of the video to search for a brief visual event. If you cannot narrow the candidate span first, ask the user for an approximate timestamp instead of guessing.
+- Dense sampled frames are discrete evidence, not proof that an entire multi-second range matches. If you see a possible match, request a narrower follow-up window before issuing a delete_range.
 - Use this when the text-only frame summaries are not specific enough. After extraction, the frames will be attached as images — use them to identify the exact timestamp, then make your edit
 
 Example:
@@ -399,9 +418,49 @@ function extractMentionedTimes(messages: ChatTurn[], clips: ClipSummary[]) {
   return mentioned;
 }
 
+function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
+  return clips.map((clip, index) => ({
+    id: `clip-${clip.index ?? index}`,
+    sourceStart: clip.sourceStart,
+    sourceDuration: clip.sourceDuration,
+    speed: clip.speed ?? 1,
+    volume: 1,
+    filter: null,
+    fadeIn: 0,
+    fadeOut: 0,
+  }));
+}
+
+function formatVisualCandidateMessage(session: VisualSearchSession): string {
+  if (session.confidenceBand === 'high' && session.proposal?.timelineRanges.length) {
+    const matchCount = session.proposal.timelineRanges.length;
+    return matchCount === 1
+      ? 'I found one verified source-anchored visual match and mapped it onto the current timeline.'
+      : `I found ${matchCount} verified source-anchored visual matches and mapped them onto the current timeline.`;
+  }
+
+  if (session.candidates.length === 0) {
+    return session.followUpPrompt ?? 'I could not find a confident visual match in the indexed source media.';
+  }
+
+  const preview = session.candidates
+    .slice(0, 3)
+    .map((candidate, index) => `${index + 1}. source ${candidate.sourceStart.toFixed(2)}-${candidate.sourceEnd.toFixed(2)}s`)
+    .join(' ');
+
+  if (session.confidenceBand === 'medium') {
+    return `I narrowed this to a few likely source windows but I am not confident enough to cut automatically. Candidates: ${preview}`;
+  }
+
+  return session.followUpPrompt ?? `I do not have a reliable visual match yet. Best candidates: ${preview}`;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { messages, context } = await req.json();
+    const latestUserMessage = [...(Array.isArray(messages) ? messages : [])]
+      .reverse()
+      .find((message: ChatTurn) => message.role === 'user')?.content ?? '';
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}
 
@@ -429,6 +488,98 @@ Honor these defaults unless the user explicitly asks for something different in 
     ];
 
     const clipSummaries = (context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[];
+    const projectionClips = toProjectionClips(clipSummaries);
+
+    if (context?.projectId && typeof context.projectId === 'string' && isLikelyVisualQuery(latestUserMessage)) {
+      const supabase = await getSupabaseServer();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+      const { data: project, error: projectError } = await supabase
+        .from('projects')
+        .select('id')
+        .eq('id', context.projectId)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
+      if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
+      const asset = await getPrimaryMediaAsset(supabase, context.projectId);
+      const intent = parseVisualQuery(latestUserMessage);
+
+      if (!asset) {
+        const visualSearch: VisualSearchSession = {
+          projectId: context.projectId,
+          assetId: null,
+          query: latestUserMessage,
+          confidenceBand: 'low',
+          intent,
+          candidates: [],
+          proposal: null,
+          followUpPrompt: 'This project does not have a source asset index yet.',
+          updatedAt: Date.now(),
+        };
+        return NextResponse.json({
+          message: visualSearch.followUpPrompt,
+          action: { type: 'none', message: visualSearch.followUpPrompt },
+          visualSearch,
+        });
+      }
+
+      const candidates = await retrieveVisualCandidates(supabase, asset, intent, 5);
+      const confidenceBand = confidenceBandForCandidates(candidates);
+      let proposal = null;
+      let action: EditAction | null = { type: 'none', message: 'No timeline edit was applied.' };
+      let followUpPrompt: string | undefined;
+
+      if (confidenceBand === 'high' && candidates[0]) {
+        const seed = candidates[0];
+        const verifiedRanges: VerifiedSourceRange[] = [{
+          assetId: asset.id,
+          sourceStart: seed.sourceStart,
+          sourceEnd: seed.sourceEnd,
+          frameStart: Math.round(seed.sourceStart * (asset.fps ?? 30)),
+          frameEnd: Math.round(seed.sourceEnd * (asset.fps ?? 30)),
+          verificationConfidence: Math.max(seed.retrievalScore, intent.confidenceThreshold),
+          boundaryConfidence: 0.82,
+          evidence: seed.retrievalReasons,
+          candidateId: seed.id,
+        }];
+        proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges);
+        const deleteAction = intent.actionType === 'delete' ? makeDeleteRangesAction(proposal) : null;
+        if (deleteAction) {
+          action = {
+            ...deleteAction,
+            message: deleteAction.message,
+          };
+        } else {
+          action = { type: 'none', message: 'I found a strong source-anchored visual match.' };
+        }
+      } else {
+        followUpPrompt = confidenceBand === 'medium'
+          ? 'I found a few plausible source windows. Choose one, or give me an approximate timestamp for tighter verification.'
+          : 'I am not confident enough to cut automatically. Please give me a more specific visual description or an approximate timestamp.';
+      }
+
+      const visualSearch: VisualSearchSession = {
+        projectId: context.projectId,
+        assetId: asset.id,
+        query: latestUserMessage,
+        confidenceBand,
+        intent,
+        candidates,
+        proposal,
+        followUpPrompt,
+        updatedAt: Date.now(),
+      };
+
+      return NextResponse.json({
+        message: formatVisualCandidateMessage(visualSearch),
+        action,
+        visualSearch,
+      });
+    }
 
     if (clipSummaries.length > 0) {
       let cursor = 0;
