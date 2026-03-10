@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic();
-const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-3-5-haiku-latest';
+const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-sonnet-4-6';
 
 type FrameRequest = {
   image: string;
@@ -65,9 +65,9 @@ export async function POST(req: NextRequest) {
     const content: Anthropic.ContentBlockParam[] = [{
       type: 'text',
       text:
-        'Describe each video frame in one terse phrase for retrieval. ' +
-        'Focus only on major visible state, notable objects, and readable on-screen text. ' +
-        'Keep each description under 12 words and do not speculate. ' +
+        'Describe each video frame in one short sentence for retrieval. ' +
+        'Focus on visible subjects, actions, text on screen, scene changes, and standout objects. ' +
+        'Do not speculate beyond what is visible. ' +
         'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
     }];
 
@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
 
     const response = await client.messages.create({
       model: FRAME_DESCRIPTION_MODEL,
-      max_tokens: 700,
+      max_tokens: 1400,
       temperature: 0,
       messages: [{ role: 'user', content }],
     });

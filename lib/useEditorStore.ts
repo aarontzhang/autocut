@@ -27,6 +27,10 @@ import { buildTranscriptContext } from './timelineUtils';
 export type { EditSnapshot } from './editActionUtils';
 
 export type TranscriptStatus = 'idle' | 'loading' | 'done' | 'error';
+export type TranscriptProgress = {
+  completed: number;
+  total: number;
+} | null;
 
 export interface MediaLibraryItem {
   id: string;
@@ -151,6 +155,7 @@ interface EditorState {
   // Background transcription
   backgroundTranscript: string | null;
   transcriptStatus: TranscriptStatus;
+  transcriptProgress: TranscriptProgress;
   rawTranscriptCaptions: CaptionEntry[] | null;
   // Video frames cache
   videoFrames: IndexedVideoFrame[] | null;
@@ -205,6 +210,7 @@ interface EditorState {
   setZoom: (zoom: number) => void;
 
   setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
+  setTranscriptProgress: (progress: TranscriptProgress) => void;
   setVideoFrames: (frames: IndexedVideoFrame[]) => void;
 
   // Media library (multi-source V1)
@@ -270,6 +276,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   zoom: 1,
   backgroundTranscript: null,
   transcriptStatus: 'idle' as TranscriptStatus,
+  transcriptProgress: null,
   rawTranscriptCaptions: null,
   videoFrames: null,
   videoFramesFresh: true,
@@ -296,7 +303,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
     });
   },
@@ -611,7 +618,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],
     });
@@ -644,7 +651,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
-      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, rawTranscriptCaptions, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions, videoFrames: null, videoFramesFresh: true,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],
     });
@@ -673,7 +680,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       appliedActions: [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
       mediaLibrary: [],
     });
@@ -900,7 +907,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setBackgroundTranscript: (text, status, rawCaptions) => set({
     backgroundTranscript: text,
     transcriptStatus: status,
+    transcriptProgress: status === 'loading' ? get().transcriptProgress : null,
     ...(rawCaptions !== undefined ? { rawTranscriptCaptions: rawCaptions } : {}),
   }),
+  setTranscriptProgress: (progress) => set({ transcriptProgress: progress }),
   setVideoFrames: (frames) => set({ videoFrames: frames, videoFramesFresh: true }),
 }));

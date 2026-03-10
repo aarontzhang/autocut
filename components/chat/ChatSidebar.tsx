@@ -517,6 +517,7 @@ function AssistantMessage({
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
   const addMessage = useEditorStore(s => s.addMessage);
 
   const action = msg.action;
@@ -630,6 +631,7 @@ function AssistantMessage({
         source,
         ranges,
         useEditorStore.getState().aiSettings.captions.wordsPerCaption,
+        { onProgress: setTranscriptProgress },
       );
 
       const transcriptText = buildTranscriptContext(clips, rawCaptions);
@@ -646,7 +648,7 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, updateMessage, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -993,7 +995,9 @@ export default function ChatSidebar() {
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
+  const transcriptProgress = useEditorStore(s => s.transcriptProgress);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
@@ -1403,6 +1407,7 @@ export default function ChatSidebar() {
                 videoData ?? videoUrl,
                 ranges,
                 useEditorStore.getState().aiSettings.captions.wordsPerCaption,
+                { onProgress: setTranscriptProgress },
               );
               const remappedTranscript = buildTranscriptContext(useEditorStore.getState().clips, rawCaptions);
               setBackgroundTranscript(remappedTranscript, 'done', rawCaptions);
@@ -1443,7 +1448,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, videoFile, ensureFrameDescriptions, ensureFramesExtracted]);
+  }, [isChatLoading, reviewLocked, messages, selectedClipContext, addMessage, setIsChatLoading, applyAction, recordAppliedAction, videoUrl, videoData, setBackgroundTranscript, setTranscriptProgress, videoFile, ensureFrameDescriptions, ensureFramesExtracted]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -1472,9 +1477,11 @@ export default function ChatSidebar() {
   const indexingProgress = transcriptStatus === 'loading'
     ? {
         stage: 'transcribing' as const,
-        completed: 0,
-        total: 1,
-        label: 'Transcribing audio',
+        completed: transcriptProgress?.completed ?? 0,
+        total: transcriptProgress?.total ?? 1,
+        label: transcriptProgress && transcriptProgress.total > 0
+          ? `Transcribing audio ${Math.min(transcriptProgress.completed, transcriptProgress.total)}/${transcriptProgress.total}`
+          : 'Transcribing audio',
         etaSeconds: estimatedTranscriptEta,
       }
     : frameIndexingProgress;

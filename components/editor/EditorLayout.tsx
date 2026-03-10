@@ -87,11 +87,14 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
+  const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
   const aiSettings = useEditorStore(s => s.aiSettings);
   const loadProject = useEditorStore(s => s.loadProject);
+  const resetEditor = useEditorStore(s => s.resetEditor);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
   const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
+  const currentProjectId = useEditorStore(s => s.currentProjectId);
   const { user } = useAuth();
 
   useAutoSave();
@@ -146,21 +149,27 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const source = videoFile ?? videoUrl;
     if (!source || videoDuration <= 0 || transcriptStatus !== 'idle') return;
     setBackgroundTranscript(null, 'loading');
+    setTranscriptProgress({ completed: 0, total: 1 });
     (async () => {
       try {
         const ranges = buildOverlappingRanges(0, videoDuration);
-        const rawWords = await transcribeSourceRanges(source, ranges, aiSettings.captions.wordsPerCaption);
+        const rawWords = await transcribeSourceRanges(source, ranges, aiSettings.captions.wordsPerCaption, {
+          onProgress: setTranscriptProgress,
+        });
         const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
         setBackgroundTranscript(text, 'done', rawWords);
       } catch {
         setBackgroundTranscript(null, 'error');
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, videoDuration, transcriptStatus, setBackgroundTranscript, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, videoDuration, transcriptStatus, setBackgroundTranscript, setTranscriptProgress, videoFile, videoUrl]);
 
   // Load project from URL param
   useEffect(() => {
     if (!projectId) return;
+    if (useEditorStore.getState().currentProjectId !== projectId) {
+      resetEditor();
+    }
     (async () => {
       setIsProjectLoading(true);
       try {
@@ -209,7 +218,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         setIsProjectLoading(false);
       }
     })();
-  }, [loadProject, projectId]);
+  }, [loadProject, projectId, resetEditor]);
 
   const importFile = useCallback((file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -264,6 +273,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     e.preventDefault();
   }, []);
 
+  const isActiveProjectReady = currentProjectId === projectId;
+  const shouldShowProjectLoading = Boolean(projectId) && (isProjectLoading || !isActiveProjectReady);
+
   return (
     <div
       style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)', overflow: 'hidden' }}
@@ -299,7 +311,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
             {/* Video preview */}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
-              {isProjectLoading && !videoUrl
+              {shouldShowProjectLoading
                 ? <ProjectLoadingState />
                 : (videoFile || videoUrl)
                 ? <VideoPlayer ref={playerRef} videoRef={videoRef} />

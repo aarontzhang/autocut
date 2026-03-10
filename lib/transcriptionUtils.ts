@@ -4,6 +4,9 @@ import { extractAudioSegment } from './ffmpegClient';
 import { CaptionEntry } from './types';
 
 type TimeRange = { startTime: number; endTime: number };
+type TranscriptionProgressOptions = {
+  onProgress?: (progress: { completed: number; total: number }) => void;
+};
 
 export function buildOverlappingRanges(
   startTime: number,
@@ -63,10 +66,15 @@ export async function transcribeSourceRanges(
   source: Uint8Array | File | string,
   ranges: TimeRange[],
   wordsPerCaption: number,
+  options: TranscriptionProgressOptions = {},
 ): Promise<CaptionEntry[]> {
   const rawEntries: CaptionEntry[] = [];
+  const total = ranges.length;
 
-  for (const range of ranges) {
+  options.onProgress?.({ completed: 0, total });
+
+  for (let index = 0; index < ranges.length; index += 1) {
+    const range = ranges[index];
     const audioBlob = await extractAudioSegment(source, range.startTime, range.endTime);
     const form = new FormData();
     form.append('audio', audioBlob, 'audio.mp3');
@@ -77,6 +85,7 @@ export async function transcribeSourceRanges(
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
     rawEntries.push(...((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? []));
+    options.onProgress?.({ completed: index + 1, total });
   }
 
   return dedupeCaptionEntries(rawEntries);
