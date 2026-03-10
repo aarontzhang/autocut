@@ -175,6 +175,7 @@ No action:
 You may be provided with sampled frames from the user's video as text summaries, dense sampled frames as images, and/or a full audio transcript.
 - Overview frames are usually provided as text summaries for retrieval. Treat them as approximate visual metadata.
 - Dense frames may be attached as images for a narrower time range. Use those images when you need precise visual confirmation.
+- For visually triggered edits, prioritize the visual evidence over the transcript when they disagree. Spoken words can lead or lag what appears on screen.
 - If the text summaries are not specific enough for the user's visual request, issue request_frames for the most relevant narrow range instead of guessing.
 - If dense frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
@@ -511,7 +512,11 @@ Honor these defaults unless the user explicitly asks for something different in 
     const overviewFrameNote = overviewFrames.length > 0
       ? `\n[Overview frame summaries: showing ${overviewFrames.length} most relevant/recently sampled entries from the video index]\n` +
         overviewFrames.map((frame, index) =>
-          `Frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.description ?? 'Visual summary unavailable.'}`
+          `Frame ${index + 1}: source ${fmtSec(frame.sourceTime)}, ` +
+          `${frame.visibleOnTimeline === false
+            ? 'currently cut from the timeline'
+            : `current timeline ${fmtSec(frame.projectedTimelineTime ?? frame.timelineTime)}`}, ` +
+          `${frame.description ?? 'Visual summary unavailable.'}`
         ).join('\n')
       : '';
     const denseFrameNote = denseFrames.length > 0

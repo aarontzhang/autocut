@@ -17,7 +17,6 @@ import {
   AppliedActionRecord,
 } from './types';
 import {
-  actionChangesTimelineStructure,
   applyActionToSnapshot,
   EditSnapshot,
 } from './editActionUtils';
@@ -159,7 +158,7 @@ interface EditorState {
   rawTranscriptCaptions: CaptionEntry[] | null;
   // Video frames cache
   videoFrames: IndexedVideoFrame[] | null;
-  videoFramesFresh: boolean; // false when a structural edit invalidated the frame-to-timeline mapping
+  videoFramesFresh: boolean; // false when the indexed source set changed and overview frames must be rebuilt
 
   // Actions
   setVideoFile: (file: File) => void;
@@ -337,7 +336,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingAction: null,
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: snapshot.clips === state.clips ? state.videoFramesFresh : false,
+      videoFramesFresh: state.videoFramesFresh,
     }));
   },
 
@@ -378,7 +377,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const idx = clips.findIndex(c => c.id === clip.id);
     const newClips = [...clips.slice(0, idx), firstClip, secondClip, ...clips.slice(idx + 1)];
 
-    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
+    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
   },
 
   deleteRangeAtTime: (startTime, endTime) => {
@@ -426,7 +425,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
-    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
+    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
   },
 
   deleteClip: (clipId) => {
@@ -436,7 +435,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       future: [],
       clips: s.clips.filter(c => c.id !== clipId),
       selectedItem: null,
-      videoFramesFresh: false,
+      videoFramesFresh: s.videoFramesFresh,
     }));
   },
 
@@ -448,13 +447,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const newClips = [...clips];
     const [removed] = newClips.splice(idx, 1);
     newClips.splice(Math.max(0, Math.min(newClips.length, newIndex)), 0, removed);
-    set({ history: [...get().history, snap], future: [], clips: newClips, videoFramesFresh: false });
+    set(state => ({ history: [...state.history, snap], future: [], clips: newClips, videoFramesFresh: state.videoFramesFresh }));
   },
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
     set(s => ({
       clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
-      videoFramesFresh: false,
+      videoFramesFresh: s.videoFramesFresh,
     }));
   },
 
@@ -464,7 +463,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...s.history, snap],
       future: [],
       clips: s.clips.map(c => c.id === clipId ? { ...c, speed: Math.max(0.1, Math.min(10, speed)) } : c),
-      videoFramesFresh: false,
+      videoFramesFresh: s.videoFramesFresh,
     }));
   },
 
@@ -523,7 +522,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingAction: null,
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: actionChangesTimelineStructure(action) ? false : state.videoFramesFresh,
+      videoFramesFresh: state.videoFramesFresh,
     }));
   },
 
@@ -542,7 +541,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: false,
+      videoFramesFresh: get().videoFramesFresh,
     });
   },
 
@@ -559,7 +558,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: false,
+      videoFramesFresh: get().videoFramesFresh,
     });
   },
 
@@ -697,7 +696,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { type, id } = s.selectedItem;
     const newHistory = [...s.history, snap];
     if (type === 'clip') {
-      set({ history: newHistory, future: [], clips: s.clips.filter(c => c.id !== id), selectedItem: null, videoFramesFresh: false });
+      set({ history: newHistory, future: [], clips: s.clips.filter(c => c.id !== id), selectedItem: null, videoFramesFresh: s.videoFramesFresh });
     } else if (type === 'caption') {
       set({ history: newHistory, future: [], captions: s.captions.filter(c => c.id !== id), selectedItem: null });
     } else if (type === 'text') {

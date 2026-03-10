@@ -148,6 +148,54 @@ export function sourceTimeToTimeline(clips: VideoClip[], sourceTime: number): nu
 }
 
 /**
+ * Return every current-timeline occurrence of a source timestamp.
+ * A source moment can appear multiple times after duplication or reordering.
+ */
+export function sourceTimeToTimelineOccurrences(clips: VideoClip[], sourceTime: number): number[] {
+  const matches: number[] = [];
+  let cursor = 0;
+  for (const clip of clips) {
+    const clipDuration = clip.sourceDuration / clip.speed;
+    if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
+      matches.push(cursor + (sourceTime - clip.sourceStart) / clip.speed);
+    }
+    cursor += clipDuration;
+  }
+  return matches;
+}
+
+/**
+ * Project a source-time range onto the current timeline.
+ * Returns zero ranges if the source span is fully cut out.
+ */
+export function sourceRangeToTimelineRanges(
+  clips: VideoClip[],
+  sourceStart: number,
+  sourceEnd: number,
+): Array<{ timelineStart: number; timelineEnd: number }> {
+  if (sourceEnd <= sourceStart) return [];
+  const ranges: Array<{ timelineStart: number; timelineEnd: number }> = [];
+  let cursor = 0;
+  for (const clip of clips) {
+    const clipDuration = clip.sourceDuration / clip.speed;
+    const clipSourceStart = clip.sourceStart;
+    const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
+    const overlapStart = Math.max(sourceStart, clipSourceStart);
+    const overlapEnd = Math.min(sourceEnd, clipSourceEnd);
+
+    if (overlapEnd > overlapStart) {
+      ranges.push({
+        timelineStart: cursor + (overlapStart - clipSourceStart) / clip.speed,
+        timelineEnd: cursor + (overlapEnd - clipSourceStart) / clip.speed,
+      });
+    }
+
+    cursor += clipDuration;
+  }
+  return ranges;
+}
+
+/**
  * Build a transcript string from raw captions remapped to the current timeline.
  * Captions whose source time falls in deleted segments are omitted.
  */

@@ -194,8 +194,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             useEditorStore.setState((state) => ({
               clips: Array.isArray(state.clips)
                 ? state.clips.map((clip) => (
-                  clip.sourcePath && signedPaths.has(clip.sourcePath)
-                    ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+                  clip.sourcePath && signedPaths.get(clip.sourcePath)
+                    ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
                     : clip
                 ))
                 : state.clips,
@@ -203,8 +203,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
                 ? state.extraTracks.map((track) => ({
                   ...track,
                   clips: (track.clips ?? []).map((clip) => (
-                    clip.sourcePath && signedPaths.has(clip.sourcePath)
-                      ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath) }
+                    clip.sourcePath && signedPaths.get(clip.sourcePath)
+                      ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
                       : clip
                   )),
                 }))

@@ -99,6 +99,8 @@ export interface IndexedVideoFrame {
   rangeStart?: number;
   rangeEnd?: number;
   description?: string;
+  projectedTimelineTime?: number | null;
+  visibleOnTimeline?: boolean;
 }
 
 export interface AIEditingSettings {

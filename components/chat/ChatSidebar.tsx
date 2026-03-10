@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame } from '@/lib/types';
-import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext } from '@/lib/timelineUtils';
+import { formatTime, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -163,15 +163,24 @@ function mergeFrameDescriptions(
   return nextFrames;
 }
 
-function buildFrameContextPayload(frames: IndexedVideoFrame[]): IndexedVideoFrame[] {
-  return frames.map((frame) => (
-    frame.kind === 'dense'
-      ? frame
-      : {
-          ...frame,
-          image: undefined,
-        }
-  ));
+function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType<typeof useEditorStore.getState>['clips']): IndexedVideoFrame[] {
+  return frames.map((frame) => {
+    if (frame.kind === 'dense') {
+      return {
+        ...frame,
+        projectedTimelineTime: frame.timelineTime,
+        visibleOnTimeline: true,
+      };
+    }
+
+    const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime);
+    return {
+      ...frame,
+      image: undefined,
+      projectedTimelineTime: timelineOccurrences[0] ?? null,
+      visibleOnTimeline: timelineOccurrences.length > 0,
+    };
+  });
 }
 
 // ─── Action card config ────────────────────────────────────────────────────────
@@ -947,7 +956,7 @@ function EmptyState({
                 }} />
               </div>
               <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', fontFamily: 'var(--font-serif)' }}>
-                {indexingProgress.label}
+                {indexingProgress?.label ?? ''}
                 {etaLabel ? ` • ${etaLabel}` : ''}
               </span>
             </>
@@ -1038,7 +1047,6 @@ export default function ChatSidebar() {
     const source = videoData ?? videoFile ?? videoUrl;
     if (!source || videoDuration <= 0) return videoFrames ?? [];
     try {
-      const currentClips = useEditorStore.getState().clips;
       const currentDuration = useEditorStore.getState().videoDuration;
       const { overviewIntervalSeconds, maxOverviewFrames } = useEditorStore.getState().aiSettings.frameInspection;
       const preferredInterval = Math.max(0.1, overviewIntervalSeconds);
@@ -1053,16 +1061,15 @@ export default function ChatSidebar() {
         label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
         etaSeconds: estimateFrameExtractionSeconds(frameTarget),
       });
-      const timelineTimestamps: number[] = [];
-      for (let t = 0; t < currentDuration; t += interval) timelineTimestamps.push(t);
-      if (timelineTimestamps[timelineTimestamps.length - 1] !== currentDuration) {
-        timelineTimestamps.push(currentDuration);
+      const sourceTimestamps: number[] = [];
+      for (let t = 0; t < currentDuration; t += interval) sourceTimestamps.push(t);
+      if (sourceTimestamps[sourceTimestamps.length - 1] !== currentDuration) {
+        sourceTimestamps.push(currentDuration);
       }
-      const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
       const images = await extractVideoFrames(source, sourceTimestamps);
       const frames = images.map((image, index) => ({
         image,
-        timelineTime: timelineTimestamps[index],
+        timelineTime: sourceTimestamps[index],
         sourceTime: sourceTimestamps[index],
         kind: 'overview' as const,
       }));
@@ -1203,7 +1210,7 @@ export default function ChatSidebar() {
           transcript: currentTranscript,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
-          frames: buildFrameContextPayload(currentFrames),
+          frames: buildFrameContextPayload(currentFrames, currentClips),
         },
       }, ctrl);
 
@@ -1355,7 +1362,7 @@ export default function ChatSidebar() {
             transcript: currentTranscript,
             settings: freshState.aiSettings,
             appliedActions: freshState.appliedActions,
-            frames: buildFrameContextPayload(currentFrames),
+            frames: buildFrameContextPayload(currentFrames, currentClips),
           },
         }, ctrl);
         addMessage({
@@ -1425,11 +1432,6 @@ export default function ChatSidebar() {
           madeStructuralEdit = true;
           applyAction(action);
           recordAppliedAction(action, action.message);
-          // Re-extract frames in background if structural edit made them stale
-          if (!useEditorStore.getState().videoFramesFresh && (videoFile || videoUrl || videoData)) {
-            currentFrames = await ensureFramesExtracted(true);
-            currentFrames = await ensureFrameDescriptions(currentFrames, true);
-          }
           if (action.type === 'delete_ranges') {
             // Batch silence removal is a complete, one-shot operation.
             // Suppress transcript next iteration so the agent can't see remapped
@@ -1474,6 +1476,9 @@ export default function ChatSidebar() {
   const agentContextReady = transcriptStatus === 'done' && videoFrames !== null && frameDescriptionsReady;
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
   const estimatedTranscriptEta = estimateTranscriptSeconds(videoDuration);
+  const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
+    ? estimatedTranscriptEta * Math.max(0, transcriptProgress.total - transcriptProgress.completed) / transcriptProgress.total
+    : estimatedTranscriptEta;
   const indexingProgress = transcriptStatus === 'loading'
     ? {
         stage: 'transcribing' as const,
@@ -1482,7 +1487,7 @@ export default function ChatSidebar() {
         label: transcriptProgress && transcriptProgress.total > 0
           ? `Transcribing audio ${Math.min(transcriptProgress.completed, transcriptProgress.total)}/${transcriptProgress.total}`
           : 'Transcribing audio',
-        etaSeconds: estimatedTranscriptEta,
+        etaSeconds: estimatedTranscriptRemainingEta,
       }
     : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
