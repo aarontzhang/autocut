@@ -3,6 +3,20 @@
 import { useEffect, useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 
+function persistOverviewFrame(frame: {
+  timelineTime: number;
+  sourceTime: number;
+  kind: string;
+  description?: string;
+}) {
+  return {
+    timelineTime: frame.timelineTime,
+    sourceTime: frame.sourceTime,
+    kind: frame.kind,
+    description: frame.description ?? '',
+  };
+}
+
 function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sourceUrl'> {
   const copy = { ...item };
   delete copy.sourceUrl;
@@ -21,6 +35,8 @@ export function useAutoSave() {
   const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const rawTranscriptCaptions = useEditorStore(s => s.rawTranscriptCaptions);
+  const videoFrames = useEditorStore(s => s.videoFrames);
+  const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
 
@@ -51,6 +67,11 @@ export function useAutoSave() {
           backgroundTranscript: state.backgroundTranscript,
           transcriptStatus: state.transcriptStatus,
           rawTranscriptCaptions: state.rawTranscriptCaptions,
+          videoFrames: state.videoFramesFresh
+            ? (state.videoFrames ?? [])
+                .filter(frame => frame.kind === 'overview' && !!frame.description?.trim())
+                .map(persistOverviewFrame)
+            : null,
           extraTracks: state.extraTracks.map(track => ({
             ...track,
             clips: track.clips.map(stripSourceUrl),
@@ -74,5 +95,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, setSaveStatus]);
 }

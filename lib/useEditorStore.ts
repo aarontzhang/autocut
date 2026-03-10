@@ -206,7 +206,7 @@ interface EditorState {
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
-  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown; backgroundTranscript?: unknown; transcriptStatus?: unknown; rawTranscriptCaptions?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
+  loadProject: (editState: { clips?: unknown[]; captions?: unknown[]; transitions?: unknown[]; textOverlays?: unknown[]; extraTracks?: unknown[]; messages?: unknown[]; appliedActions?: unknown[]; aiSettings?: unknown; backgroundTranscript?: unknown; transcriptStatus?: unknown; rawTranscriptCaptions?: unknown[]; videoFrames?: unknown[] }, blobUrl: string, storagePath: string | null, projectId: string, duration?: number) => void;
   setUploadProgress: (pct: number | null) => void;
   setSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
   setStoragePath: (path: string) => void;
@@ -637,6 +637,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   loadProject: (editState, blobUrl, storagePath, projectId, duration) => {
     const clips = (editState.clips as VideoClip[] | undefined) ?? [];
     const rawTranscriptCaptions = (editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null;
+    const persistedVideoFrames = Array.isArray(editState.videoFrames)
+      ? (editState.videoFrames as Array<Partial<IndexedVideoFrame>>)
+          .filter((frame) => (
+            frame?.kind === 'overview'
+            && typeof frame.timelineTime === 'number'
+            && typeof frame.sourceTime === 'number'
+            && typeof frame.description === 'string'
+          ))
+          .map((frame) => ({
+            timelineTime: frame.timelineTime as number,
+            sourceTime: frame.sourceTime as number,
+            kind: 'overview' as const,
+            description: frame.description as string,
+          }))
+      : null;
     const persistedTranscript = typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null;
     const backgroundTranscript = rawTranscriptCaptions && rawTranscriptCaptions.length > 0
       ? buildTranscriptContext(clips, rawTranscriptCaptions)
@@ -661,7 +676,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null,
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
-      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions,
+      videoFrames: persistedVideoFrames && persistedVideoFrames.length > 0 ? persistedVideoFrames : null,
+      videoFramesFresh: persistedVideoFrames ? persistedVideoFrames.length > 0 : true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [],

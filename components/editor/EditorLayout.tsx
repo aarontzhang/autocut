@@ -99,6 +99,46 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   useAutoSave();
 
+  const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
+    const state = useEditorStore.getState();
+    if (state.currentProjectId !== targetProjectId) return;
+
+    const paths = new Set<string>();
+    if (state.storagePath) paths.add(state.storagePath);
+    state.clips.forEach((clip) => {
+      if (clip.sourcePath) paths.add(clip.sourcePath);
+    });
+    state.extraTracks.forEach((track) => {
+      track.clips.forEach((clip) => {
+        if (clip.sourcePath) paths.add(clip.sourcePath);
+      });
+    });
+
+    if (paths.size === 0) return;
+
+    const signedPaths = await createSignedUrls([...paths]);
+    if (signedPaths.size === 0 || useEditorStore.getState().currentProjectId !== targetProjectId) return;
+
+    useEditorStore.setState((currentState) => ({
+      videoUrl: currentState.storagePath && signedPaths.get(currentState.storagePath)
+        ? signedPaths.get(currentState.storagePath)!
+        : currentState.videoUrl,
+      clips: currentState.clips.map((clip) => (
+        clip.sourcePath && signedPaths.get(clip.sourcePath)
+          ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
+          : clip
+      )),
+      extraTracks: currentState.extraTracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => (
+          clip.sourcePath && signedPaths.get(clip.sourcePath)
+            ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
+            : clip
+        )),
+      })),
+    }));
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Allow Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo) even when a text input is focused
@@ -180,45 +220,35 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         const videoUrl = data.signedUrl ?? '';
         loadProject(editState, videoUrl, data.video_path ?? null, projectId);
         setIsProjectLoading(false);
-
-        const clipPaths = (editState.clips ?? [])
-          .map((clip: { sourcePath?: string }) => clip.sourcePath)
-          .filter(Boolean);
-        const extraTrackPaths = (editState.extraTracks ?? []).flatMap((track: { clips?: Array<{ sourcePath?: string }> }) =>
-          (track.clips ?? []).map(clip => clip.sourcePath).filter(Boolean)
-        );
-        const allAssetPaths = [...clipPaths, ...extraTrackPaths] as string[];
-        if (allAssetPaths.length > 0) {
-          const signedPaths = await createSignedUrls(allAssetPaths);
-          if (signedPaths.size > 0 && useEditorStore.getState().currentProjectId === projectId) {
-            useEditorStore.setState((state) => ({
-              clips: Array.isArray(state.clips)
-                ? state.clips.map((clip) => (
-                  clip.sourcePath && signedPaths.get(clip.sourcePath)
-                    ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
-                    : clip
-                ))
-                : state.clips,
-              extraTracks: Array.isArray(state.extraTracks)
-                ? state.extraTracks.map((track) => ({
-                  ...track,
-                  clips: (track.clips ?? []).map((clip) => (
-                    clip.sourcePath && signedPaths.get(clip.sourcePath)
-                      ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
-                      : clip
-                  )),
-                }))
-                : state.extraTracks,
-            }));
-          }
-        }
+        await refreshSignedMediaUrls(projectId);
       } catch (e) {
         console.error('Failed to load project', e);
       } finally {
         setIsProjectLoading(false);
       }
     })();
-  }, [loadProject, projectId, resetEditor]);
+  }, [loadProject, projectId, refreshSignedMediaUrls, resetEditor]);
+
+  useEffect(() => {
+    if (!projectId) return;
+
+    const maybeRefresh = () => {
+      if (document.visibilityState !== 'visible') return;
+      void refreshSignedMediaUrls(projectId).catch((error) => {
+        console.warn('Failed to refresh signed media URLs:', error);
+      });
+    };
+
+    const intervalId = window.setInterval(maybeRefresh, 45 * 60 * 1000);
+    window.addEventListener('focus', maybeRefresh);
+    document.addEventListener('visibilitychange', maybeRefresh);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', maybeRefresh);
+      document.removeEventListener('visibilitychange', maybeRefresh);
+    };
+  }, [projectId, refreshSignedMediaUrls]);
 
   const importFile = useCallback((file: File) => {
     if (!file.type.startsWith('video/')) return;
