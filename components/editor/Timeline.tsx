@@ -122,9 +122,12 @@ export default function Timeline({
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const toggleTaggedMarker = useEditorStore(s => s.toggleTaggedMarker);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
+  const reorderClip = useEditorStore(s => s.reorderClip);
+  const trimClipWithHistory = useEditorStore(s => s.trimClipWithHistory);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const updateMarker = useEditorStore(s => s.updateMarker);
   const removeMarker = useEditorStore(s => s.removeMarker);
+  const deleteSelectedItem = useEditorStore(s => s.deleteSelectedItem);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const { user } = useAuth();
 
@@ -195,6 +198,23 @@ export default function Timeline({
   const selectedMarker = selectedItem?.type === 'marker'
     ? markers.find((marker) => marker.id === selectedItem.id) ?? null
     : null;
+  const selectedClipDetails = useMemo(() => {
+    if (!selectedItem || selectedItem.type !== 'clip') return null;
+    const clipIndex = clips.findIndex((clip) => clip.id === selectedItem.id);
+    if (clipIndex === -1) return null;
+    const clip = clips[clipIndex];
+    const entry = schedule.find((item) => item.clipId === clip.id) ?? null;
+    if (!entry) return null;
+    return { clip, entry, clipIndex };
+  }, [clips, schedule, selectedItem]);
+  const clipAtPlayhead = useMemo(
+    () => schedule.find((entry) => currentTime > entry.timelineStart && currentTime < entry.timelineEnd) ?? null,
+    [currentTime, schedule],
+  );
+  const canSplitAtPlayhead = clipAtPlayhead !== null;
+  const canTrimSelectedClipToPlayhead = selectedClipDetails !== null
+    && currentTime > selectedClipDetails.entry.timelineStart + 0.05
+    && currentTime < selectedClipDetails.entry.timelineEnd - 0.05;
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -750,6 +770,30 @@ export default function Timeline({
     splitClipAtTime(useEditorStore.getState().currentTime);
   }, [splitClipAtTime]);
 
+  const moveSelectedClip = useCallback((direction: -1 | 1) => {
+    if (!selectedClipDetails) return;
+    reorderClip(selectedClipDetails.clip.id, selectedClipDetails.clipIndex + direction);
+  }, [reorderClip, selectedClipDetails]);
+
+  const trimSelectedClipStartToPlayhead = useCallback(() => {
+    if (!selectedClipDetails || !canTrimSelectedClipToPlayhead) return;
+    const timelineDelta = currentTime - selectedClipDetails.entry.timelineStart;
+    const sourceDelta = timelineDelta * selectedClipDetails.clip.speed;
+    const nextSourceStart = selectedClipDetails.clip.sourceStart + sourceDelta;
+    const nextSourceDuration = selectedClipDetails.clip.sourceDuration - sourceDelta;
+    if (nextSourceDuration < 0.05) return;
+    trimClipWithHistory(selectedClipDetails.clip.id, nextSourceStart, nextSourceDuration);
+    requestSeek(selectedClipDetails.entry.timelineStart);
+  }, [canTrimSelectedClipToPlayhead, currentTime, requestSeek, selectedClipDetails, trimClipWithHistory]);
+
+  const trimSelectedClipEndToPlayhead = useCallback(() => {
+    if (!selectedClipDetails || !canTrimSelectedClipToPlayhead) return;
+    const timelineDelta = currentTime - selectedClipDetails.entry.timelineStart;
+    const nextSourceDuration = timelineDelta * selectedClipDetails.clip.speed;
+    if (nextSourceDuration < 0.05) return;
+    trimClipWithHistory(selectedClipDetails.clip.id, selectedClipDetails.clip.sourceStart, nextSourceDuration);
+  }, [canTrimSelectedClipToPlayhead, currentTime, selectedClipDetails, trimClipWithHistory]);
+
   const px = (t: number) => tPx(t);
 
   return (
@@ -780,6 +824,137 @@ export default function Timeline({
           }}>
             {clips.length} clips
           </span>
+        )}
+
+        <button
+          onClick={() => splitClipAtTime(currentTime)}
+          disabled={!canSplitAtPlayhead}
+          title="Split the clip under the playhead"
+          style={{
+            height: 22,
+            padding: '0 9px',
+            borderRadius: 999,
+            border: `1px solid ${canSplitAtPlayhead ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
+            background: canSplitAtPlayhead ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
+            color: canSplitAtPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
+            cursor: canSplitAtPlayhead ? 'pointer' : 'not-allowed',
+            fontSize: 10,
+            fontFamily: 'var(--font-serif)',
+            letterSpacing: '0.05em',
+            textTransform: 'uppercase',
+          }}
+        >
+          Cut at playhead
+        </button>
+
+        {selectedClipDetails && (
+          <>
+            <span style={{
+              fontSize: 10,
+              padding: '1px 7px',
+              borderRadius: 999,
+              background: 'rgba(96,165,250,0.12)',
+              border: '1px solid rgba(96,165,250,0.24)',
+              color: 'rgba(191,219,254,0.95)',
+              fontFamily: 'var(--font-serif)',
+            }}>
+              Clip {selectedClipDetails.clipIndex + 1}
+            </span>
+
+            <button
+              onClick={() => moveSelectedClip(-1)}
+              disabled={selectedClipDetails.clipIndex === 0}
+              title="Move the selected clip earlier in the timeline"
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: selectedClipDetails.clipIndex === 0 ? 'var(--fg-muted)' : 'var(--fg-secondary)',
+                cursor: selectedClipDetails.clipIndex === 0 ? 'not-allowed' : 'pointer',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Move left
+            </button>
+
+            <button
+              onClick={() => moveSelectedClip(1)}
+              disabled={selectedClipDetails.clipIndex === clips.length - 1}
+              title="Move the selected clip later in the timeline"
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: selectedClipDetails.clipIndex === clips.length - 1 ? 'var(--fg-muted)' : 'var(--fg-secondary)',
+                cursor: selectedClipDetails.clipIndex === clips.length - 1 ? 'not-allowed' : 'pointer',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Move right
+            </button>
+
+            <button
+              onClick={trimSelectedClipStartToPlayhead}
+              disabled={!canTrimSelectedClipToPlayhead}
+              title="Trim the selected clip so it starts at the playhead"
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: canTrimSelectedClipToPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
+                cursor: canTrimSelectedClipToPlayhead ? 'pointer' : 'not-allowed',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Trim in
+            </button>
+
+            <button
+              onClick={trimSelectedClipEndToPlayhead}
+              disabled={!canTrimSelectedClipToPlayhead}
+              title="Trim the selected clip so it ends at the playhead"
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'transparent',
+                color: canTrimSelectedClipToPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
+                cursor: canTrimSelectedClipToPlayhead ? 'pointer' : 'not-allowed',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Trim out
+            </button>
+
+            <button
+              onClick={deleteSelectedItem}
+              title="Delete the selected clip"
+              style={{
+                height: 22,
+                padding: '0 8px',
+                borderRadius: 999,
+                border: '1px solid rgba(248,113,113,0.2)',
+                background: 'rgba(248,113,113,0.08)',
+                color: '#fca5a5',
+                cursor: 'pointer',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Delete
+            </button>
+          </>
         )}
 
         <button
@@ -858,6 +1033,15 @@ export default function Timeline({
         )}
 
         <div style={{ flex: 1 }} />
+
+        <span style={{
+          fontSize: 10,
+          color: 'var(--fg-muted)',
+          fontFamily: 'var(--font-serif)',
+          whiteSpace: 'nowrap',
+        }}>
+          Drag clips to reorder, drag edges to trim, press S to cut
+        </span>
 
         <button
           onClick={() => setSnapEnabled(v => !v)}

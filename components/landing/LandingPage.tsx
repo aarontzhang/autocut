@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import Image from 'next/image';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import DemoLightbox from './DemoLightbox';
 import styles from './LandingPage.module.css';
 import AutocutMark from '@/components/branding/AutocutMark';
@@ -139,6 +139,22 @@ export default function LandingPage() {
 
   const accessHref = useMemo(() => (user ? '/projects' : '/auth/login'), [user]);
   const accessLabel = user ? 'Open dashboard' : 'Start with Autocut';
+
+  useEffect(() => {
+    const htmlOverflowY = document.documentElement.style.overflowY;
+    const bodyOverflowY = document.body.style.overflowY;
+    const bodyOverflowX = document.body.style.overflowX;
+
+    document.documentElement.style.overflowY = 'auto';
+    document.body.style.overflowY = 'auto';
+    document.body.style.overflowX = 'hidden';
+
+    return () => {
+      document.documentElement.style.overflowY = htmlOverflowY;
+      document.body.style.overflowY = bodyOverflowY;
+      document.body.style.overflowX = bodyOverflowX;
+    };
+  }, []);
 
   return (
     <>

@@ -194,6 +194,7 @@ interface EditorState {
   deleteClip: (clipId: string) => void;
   reorderClip: (clipId: string, newIndex: number) => void;
   trimClip: (clipId: string, newSourceStart: number, newSourceDuration: number) => void;
+  trimClipWithHistory: (clipId: string, newSourceStart: number, newSourceDuration: number) => void;
   setClipSpeed: (clipId: string, speed: number) => void;
   setClipVolume: (clipId: string, volume: number, fadeIn?: number, fadeOut?: number) => void;
   setClipFilter: (clipId: string, filter: ColorFilter | null) => void;
@@ -543,6 +544,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
     set(s => ({
+      clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
+      videoFramesFresh: s.videoFramesFresh,
+    }));
+  },
+
+  trimClipWithHistory: (clipId, newSourceStart, newSourceDuration) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    set(s => ({
+      history: [...s.history, snap],
+      future: [],
       clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
       markers: [],
       taggedMarkerIds: [],
