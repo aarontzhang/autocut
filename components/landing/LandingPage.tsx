@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import AutocutMark from '@/components/branding/AutocutMark';
 
-const VIDEO_IMAGE = 'https://images.unsplash.com/photo-1758273706007-f1524d2d963f?w=900&q=85&auto=format&fit=crop';
+const VIDEO_IMAGE = 'https://images.unsplash.com/photo-1633077353753-cc4f0df5eb88?w=900&q=85&auto=format&fit=crop';
 
 /* ─── Reusable window chrome ─────────────────────────────────── */
 
@@ -23,9 +23,6 @@ function AppWindow({
       border: accent
         ? '1px solid rgba(33, 212, 255, 0.22)'
         : '1px solid rgba(255,255,255,0.09)',
-      boxShadow: accent
-        ? '0 0 0 1px rgba(33,212,255,0.06), 0 40px 100px rgba(0,0,0,0.7), 0 0 60px rgba(33,212,255,0.05)'
-        : '0 40px 100px rgba(0,0,0,0.7)',
       overflow: 'hidden',
       display: 'flex',
       flexDirection: 'column',
@@ -500,19 +497,22 @@ export default function LandingPage() {
 
       {/* ── Hero ─────────────────────────────────────────────── */}
       <section style={{
+        maxWidth: 1100,
+        margin: '0 auto',
+        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '400px 1fr',
+        gridTemplateColumns: '380px 1fr',
         minHeight: 'calc(100vh - 54px)',
-        paddingLeft: 64,
-        gap: 0,
-        alignItems: 'stretch',
+        padding: '0 48px',
+        gap: 48,
+        alignItems: 'center',
       }}>
         <div style={{
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          paddingRight: 48, paddingTop: 60, paddingBottom: 60,
+          paddingTop: 60, paddingBottom: 60,
         }}>
           <h1 style={{
-            fontSize: 'clamp(38px, 3.6vw, 54px)',
+            fontSize: 'clamp(38px, 3.6vw, 52px)',
             fontWeight: 700,
             letterSpacing: '-0.035em',
             lineHeight: 1.08,
@@ -537,13 +537,7 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* Hero mock — slight inset from edge */}
-        <div style={{
-          padding: '28px 32px 28px 24px',
-          display: 'flex',
-          alignItems: 'stretch',
-          overflow: 'hidden',
-        }}>
+        <div style={{ padding: '28px 0', display: 'flex', alignItems: 'stretch' }}>
           <HeroEditorMock />
         </div>
       </section>
@@ -551,16 +545,16 @@ export default function LandingPage() {
       {/* ── Feature 1: Chat flow — text LEFT, mock RIGHT ─────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
+        maxWidth: 1100,
+        margin: '0 auto',
+        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '400px 1fr',
+        gridTemplateColumns: '340px 1fr',
         alignItems: 'center',
-        paddingLeft: 64,
-        paddingTop: 96,
-        paddingBottom: 96,
-        paddingRight: 0,
-        gap: 0,
+        padding: '96px 48px',
+        gap: 64,
       }}>
-        <div style={{ paddingRight: 48 }}>
+        <div>
           <h2 style={{
             fontSize: 'clamp(30px, 2.8vw, 42px)',
             fontWeight: 700, letterSpacing: '-0.03em',
@@ -575,27 +569,23 @@ export default function LandingPage() {
             Each edit is proposed as an action card. Step through the cuts one at a time, keep what works, skip what doesn't — nothing commits until you say so.
           </p>
         </div>
-        <div style={{ padding: '0 32px 0 0' }}>
-          <ChatFlowMock />
-        </div>
+        <ChatFlowMock />
       </section>
 
       {/* ── Feature 2: Timeline — mock LEFT, text RIGHT ──────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
+        maxWidth: 1100,
+        margin: '0 auto',
+        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '1fr 400px',
+        gridTemplateColumns: '1fr 340px',
         alignItems: 'center',
-        paddingRight: 64,
-        paddingTop: 96,
-        paddingBottom: 96,
-        paddingLeft: 0,
-        gap: 0,
+        padding: '96px 48px',
+        gap: 64,
       }}>
-        <div style={{ padding: '0 0 0 32px' }}>
-          <TimelineMock />
-        </div>
-        <div style={{ paddingLeft: 48 }}>
+        <TimelineMock />
+        <div>
           <h2 style={{
             fontSize: 'clamp(30px, 2.8vw, 42px)',
             fontWeight: 700, letterSpacing: '-0.03em',

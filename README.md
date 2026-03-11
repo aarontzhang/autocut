@@ -40,6 +40,7 @@ Optional tuning:
 - `OPENAI_EMBEDDING_MODEL`
 - `ANALYSIS_WORKER_ID`
 - `ANALYSIS_WORKER_POLL_MS`
+- `ANALYSIS_WORKER_CONCURRENCY`
 - `BETA_MAX_CHAT_REQUESTS_PER_DAY`
 - `BETA_MAX_TRANSCRIBE_SECONDS_PER_DAY`
 - `BETA_MAX_FRAME_DESCRIPTIONS_PER_DAY`
@@ -81,7 +82,8 @@ Deploy a separate always-on worker service from `Dockerfile.worker`.
 
 - Start command: `npm run worker:analysis`
 - Required system dependency: `ffmpeg` and `ffprobe` are installed in the image
-- Recommended shape: one small instance for the public beta
+- The worker now processes multiple queued jobs per process. Tune `ANALYSIS_WORKER_CONCURRENCY` to match available CPU and memory.
+- Recommended starting point: `ANALYSIS_WORKER_CONCURRENCY=2` on a small instance, then increase if FFmpeg and API throughput stay healthy.
 
 Any container host that supports long-running Node processes works here.
 

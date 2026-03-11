@@ -18,40 +18,55 @@ const supabase = createClient(url, serviceRoleKey, {
 
 const WORKER_ID = process.env.ANALYSIS_WORKER_ID ?? `worker-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.ANALYSIS_WORKER_POLL_MS ?? 3000);
+const WORKER_CONCURRENCY = normalizeWorkerConcurrency(process.env.ANALYSIS_WORKER_CONCURRENCY);
+
+function normalizeWorkerConcurrency(value) {
+  if (!value) return 2;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 2;
+  return Math.min(8, Math.max(1, Math.floor(parsed)));
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function leaseNextJob() {
+function getSlotWorkerId(slotIndex) {
+  return WORKER_CONCURRENCY === 1 ? WORKER_ID : `${WORKER_ID}:${slotIndex + 1}`;
+}
+
+async function leaseNextJob(lockerId) {
   const { data: jobs, error } = await supabase
     .from('analysis_jobs')
     .select('*')
     .eq('status', 'queued')
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(1);
+    .limit(Math.max(1, WORKER_CONCURRENCY * 2));
 
   if (error) throw error;
-  const nextJob = jobs?.[0];
-  if (!nextJob) return null;
+  if (!jobs?.length) return null;
 
-  const { data: leased, error: leaseError } = await supabase
-    .from('analysis_jobs')
-    .update({
-      status: 'running',
-      locked_at: new Date().toISOString(),
-      locked_by: WORKER_ID,
-      attempt_count: Number(nextJob.attempt_count ?? 0) + 1,
-      progress: { completed: 0, total: 1, stage: 'starting' },
-    })
-    .eq('id', nextJob.id)
-    .eq('status', 'queued')
-    .select('*')
-    .maybeSingle();
+  for (const nextJob of jobs) {
+    const { data: leased, error: leaseError } = await supabase
+      .from('analysis_jobs')
+      .update({
+        status: 'running',
+        locked_at: new Date().toISOString(),
+        locked_by: lockerId,
+        attempt_count: Number(nextJob.attempt_count ?? 0) + 1,
+        progress: { completed: 0, total: 1, stage: 'starting' },
+      })
+      .eq('id', nextJob.id)
+      .eq('status', 'queued')
+      .select('*')
+      .maybeSingle();
 
-  if (leaseError) throw leaseError;
-  return leased;
+    if (leaseError) throw leaseError;
+    if (leased) return leased;
+  }
+
+  return null;
 }
 
 async function updateJob(jobId, patch) {
@@ -147,17 +162,11 @@ async function handleJob(job) {
   }
 }
 
-async function main() {
-  for (;;) {
-    const job = await leaseNextJob();
-    if (!job) {
-      await sleep(POLL_INTERVAL_MS);
-      continue;
-    }
-
+async function handleLeasedJob(job) {
+  try {
+    await handleJob(job);
+  } catch (error) {
     try {
-      await handleJob(job);
-    } catch (error) {
       await updateJob(job.id, {
         status: 'failed',
         error: error instanceof Error ? error.message : 'Unknown worker error',
@@ -167,8 +176,44 @@ async function main() {
       if (job.asset_id) {
         await markAsset(job.asset_id, { status: 'error' });
       }
+    } catch (updateError) {
+      console.error('[analysis-worker] failed to persist job failure', {
+        jobId: job.id,
+        error: updateError instanceof Error ? updateError.message : updateError,
+      });
     }
   }
+}
+
+async function runWorkerSlot(slotIndex) {
+  const lockerId = getSlotWorkerId(slotIndex);
+  for (;;) {
+    try {
+      const job = await leaseNextJob(lockerId);
+      if (!job) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
+      await handleLeasedJob(job);
+    } catch (error) {
+      console.error('[analysis-worker] slot error', {
+        workerId: lockerId,
+        error: error instanceof Error ? error.message : error,
+      });
+      await sleep(POLL_INTERVAL_MS);
+    }
+  }
+}
+
+async function main() {
+  console.info('[analysis-worker] starting', {
+    workerId: WORKER_ID,
+    concurrency: WORKER_CONCURRENCY,
+    pollIntervalMs: POLL_INTERVAL_MS,
+  });
+
+  await Promise.all(Array.from({ length: WORKER_CONCURRENCY }, (_, index) => runWorkerSlot(index)));
 }
 
 main().catch((error) => {
