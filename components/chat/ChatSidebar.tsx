@@ -9,6 +9,7 @@ import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/li
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule } from '@/lib/playbackEngine';
 import AutocutMark from '@/components/branding/AutocutMark';
+import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
@@ -325,7 +326,7 @@ function actionsMatch(a?: EditAction, b?: EditAction): boolean {
 }
 
 function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: string): ChatRequestMessage[] {
-  const history = messages.map((message) => ({
+  const history: ChatRequestMessage[] = messages.map((message) => ({
     role: message.role,
     content: message.content,
     actionType: message.action?.type,
@@ -1572,6 +1573,7 @@ export default function ChatSidebar() {
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const setTaggedMarkerIds = useEditorStore(s => s.setTaggedMarkerIds);
   const clearTaggedMarkers = useEditorStore(s => s.clearTaggedMarkers);
+  const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
@@ -2046,6 +2048,17 @@ export default function ChatSidebar() {
     setLoadingStatus('');
   }, [setIsChatLoading]);
 
+  const handleClearChat = useCallback(() => {
+    if (isChatLoading || reviewLocked || messages.length === 0) return;
+    clearChatHistory();
+    setInput('');
+    setActiveMarkerMention(null);
+    setHighlightedMarkerIndex(0);
+    previousTaggedMarkerIdsRef.current = [];
+    clearTaggedMarkers();
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+  }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
+
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
   const agentContextReady = transcriptStatus === 'done' && videoFrames !== null && frameDescriptionsReady;
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
@@ -2268,6 +2281,33 @@ export default function ChatSidebar() {
                 </div>
               )}
             </div>
+            <HoverPillIconButton
+              label="Clear chat"
+              onClick={handleClearChat}
+              disabled={isChatLoading || reviewLocked || messages.length === 0}
+              buttonStyle={{
+                width: 28,
+                height: 28,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 999,
+                color: isChatLoading || reviewLocked || messages.length === 0 ? 'rgba(255,255,255,0.24)' : 'var(--fg-secondary)',
+                cursor: isChatLoading || reviewLocked || messages.length === 0 ? 'default' : 'pointer',
+                transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 7h16" />
+                <path d="M9 7V4h6v3" />
+                <path d="M7 7l1 12h8l1-12" />
+                <path d="M10 11v5" />
+                <path d="M14 11v5" />
+              </svg>
+            </HoverPillIconButton>
           </div>
         </div>
 

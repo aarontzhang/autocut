@@ -708,16 +708,22 @@ function summarizeConversationTaskState(taskState: ConversationTaskState): strin
   return lines;
 }
 
+function sanitizeRouteTime(value: unknown, safeDuration: number): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(value, safeDuration))
+    : null;
+}
+
 function sanitizeSilenceCandidates(value: unknown, safeDuration: number): SilenceCandidate[] {
   if (!Array.isArray(value)) return [];
 
   return value.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') return [];
     const candidate = entry as Record<string, unknown>;
-    const gapStart = sanitizeTime(candidate.gapStart, safeDuration);
-    const gapEnd = sanitizeTime(candidate.gapEnd, safeDuration);
-    const deleteStart = sanitizeTime(candidate.deleteStart, safeDuration);
-    const deleteEnd = sanitizeTime(candidate.deleteEnd, safeDuration);
+    const gapStart = sanitizeRouteTime(candidate.gapStart, safeDuration);
+    const gapEnd = sanitizeRouteTime(candidate.gapEnd, safeDuration);
+    const deleteStart = sanitizeRouteTime(candidate.deleteStart, safeDuration);
+    const deleteEnd = sanitizeRouteTime(candidate.deleteEnd, safeDuration);
 
     if (gapStart === null || gapEnd === null || deleteStart === null || deleteEnd === null) return [];
     if (gapEnd <= gapStart || deleteEnd <= deleteStart) return [];

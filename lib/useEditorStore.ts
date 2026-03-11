@@ -212,6 +212,7 @@ interface EditorState {
   addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   updateMessage: (id: string, patch: Partial<Omit<ChatMessage, 'id' | 'timestamp'>>) => void;
   setIsChatLoading: (v: boolean) => void;
+  clearChatHistory: () => void;
   clearMessages: () => void;
   setAISettings: (settings: Partial<AIEditingSettings>) => void;
   recordAppliedAction: (
@@ -696,6 +697,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
 
   setIsChatLoading: (v) => set({ isChatLoading: v }),
+
+  clearChatHistory: () => set(() => ({
+    messages: [],
+    appliedActions: [],
+    visualSearchSession: null,
+    pendingAction: null,
+    taggedMarkerIds: [],
+  })),
 
   clearMessages: () => set(s => ({
     messages: [],

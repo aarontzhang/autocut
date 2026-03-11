@@ -9,6 +9,7 @@ import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { uploadProjectMedia } from '@/lib/projectMedia';
+import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
 const BASE_TRACK_HEIGHT = 50;
 const EFFECT_TRACK_H = 26;
@@ -549,13 +550,11 @@ export default function Timeline({
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <TimelineActionButton
               label="Cut at playhead"
-              shortcut="C"
               onClick={() => splitClipAtTime(useEditorStore.getState().currentTime)}
               icon={<CutToolIcon />}
             />
             <TimelineActionButton
               label="Add marker at playhead"
-              shortcut="M"
               onClick={() => createMarkerAtTime(useEditorStore.getState().currentTime, { createdBy: 'human' })}
               icon={<MarkerToolIcon />}
             />
@@ -1172,20 +1171,18 @@ function TrackHeader({ icon, label, height, color }: {
 
 function TimelineActionButton({
   label,
-  shortcut,
   onClick,
   icon,
 }: {
   label: string;
-  shortcut: string;
   onClick: () => void;
   icon: React.ReactNode;
 }) {
   return (
-    <button
+    <HoverPillIconButton
+      label={label}
       onClick={onClick}
-      title={`${label} (${shortcut})`}
-      style={{
+      buttonStyle={{
         width: 32,
         height: 32,
         display: 'flex',
@@ -1199,7 +1196,7 @@ function TimelineActionButton({
       }}
     >
       {icon}
-    </button>
+    </HoverPillIconButton>
   );
 }
 
