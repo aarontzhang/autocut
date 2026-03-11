@@ -11,6 +11,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const { user } = useAuth();
@@ -19,20 +20,35 @@ export default function LoginPage() {
     if (user) router.replace('/projects');
   }, [router, user]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const routeError = params.get('error');
+    const routeMessage = params.get('message');
+    setError(routeError ?? '');
+    setNotice(routeMessage ?? '');
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setLoading(true);
     const supabase = getSupabaseBrowser();
     try {
       if (mode === 'login') {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        router.push('/projects');
       } else {
-        const { error } = await supabase.auth.signUp({ email, password });
+        const { data, error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
+        if (data.session) {
+          router.push('/projects');
+        } else {
+          setMode('login');
+          setNotice('Check your email to confirm your account, then sign in.');
+        }
       }
-      router.push('/projects');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Authentication failed');
     } finally {
@@ -119,6 +135,7 @@ export default function LoginPage() {
             required style={inputStyle}
           />
           {error && <p style={{ fontSize: 12, color: '#f87171', margin: 0 }}>{error}</p>}
+          {notice && <p style={{ fontSize: 12, color: 'var(--fg-secondary)', margin: 0 }}>{notice}</p>}
           <button
             type="submit"
             disabled={loading}
@@ -138,7 +155,7 @@ export default function LoginPage() {
         <p style={{ fontSize: 12, color: 'var(--fg-muted)', textAlign: 'center', marginTop: 16, marginBottom: 0 }}>
           {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
           <button
-            onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(''); }}
+            onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(''); setNotice(''); }}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 12, padding: 0 }}
           >
             {mode === 'login' ? 'Sign up' : 'Sign in'}

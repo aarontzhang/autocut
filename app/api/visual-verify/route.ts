@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { enqueueAnalysisJob, getPrimaryMediaAsset } from '@/lib/analysisJobs';
+import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 
 export async function POST(req: NextRequest) {
   const supabase = await getSupabaseServer();
@@ -27,6 +28,11 @@ export async function POST(req: NextRequest) {
 
   if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
   if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
+  const usage = await consumeBetaUsage('visual_searches', user.id, 1);
+  if (!usage.allowed) {
+    return buildBetaLimitExceededResponse('visual_searches', usage);
+  }
 
   const resolvedAsset = assetId
     ? { id: assetId }

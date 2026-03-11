@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
+import { getSupabaseServer } from '@/lib/supabase/server';
+import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 
 const client = new Anthropic();
 const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-sonnet-4-6';
@@ -47,6 +49,10 @@ function parseDescriptions(text: string): FrameDescription[] | null {
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await getSupabaseServer();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
     const body = await req.json();
     const frames = (Array.isArray(body?.frames) ? body.frames : []) as FrameRequest[];
     const requestedBatchSize = Number(body?.batchSize);
@@ -60,6 +66,11 @@ export async function POST(req: NextRequest) {
 
     if (frames.length > batchSize) {
       return NextResponse.json({ error: `Too many frames in one request. Maximum is ${batchSize}.` }, { status: 400 });
+    }
+
+    const usage = await consumeBetaUsage('frame_descriptions', user.id, frames.length);
+    if (!usage.allowed) {
+      return buildBetaLimitExceededResponse('frame_descriptions', usage);
     }
 
     const content: Anthropic.ContentBlockParam[] = [{

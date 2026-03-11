@@ -20,6 +20,7 @@ import {
 } from '@/lib/visualRetrieval';
 import { mergeSourceRanges, subtractSourceRanges } from '@/lib/timelineUtils';
 import { verifyCandidatesAgainstQuery } from '@/lib/server/visionIndexing.mjs';
+import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 
 const client = new Anthropic();
 
@@ -681,6 +682,15 @@ function filterCandidatesAgainstRemovedSourceRanges(
 export async function POST(req: NextRequest) {
   try {
     const { messages, context } = await req.json();
+    const supabase = await getSupabaseServer();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const chatUsage = await consumeBetaUsage('chat_requests', user.id, 1);
+    if (!chatUsage.allowed) {
+      return buildBetaLimitExceededResponse('chat_requests', chatUsage);
+    }
+
     const latestUserMessage = [...(Array.isArray(messages) ? messages : [])]
       .reverse()
       .find((message: ChatTurn) => message.role === 'user')?.content ?? '';
@@ -747,10 +757,6 @@ Honor these defaults unless the user explicitly asks for something different in 
     }
 
     if (context?.projectId && typeof context.projectId === 'string' && isLikelyVisualQuery(latestUserMessage)) {
-      const supabase = await getSupabaseServer();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
       const { data: project, error: projectError } = await supabase
         .from('projects')
         .select('id')
@@ -760,6 +766,11 @@ Honor these defaults unless the user explicitly asks for something different in 
 
       if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
       if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
+      const visualUsage = await consumeBetaUsage('visual_searches', user.id, 1);
+      if (!visualUsage.allowed) {
+        return buildBetaLimitExceededResponse('visual_searches', visualUsage);
+      }
 
       let asset = null;
       const intent = parseVisualQuery(latestUserMessage);

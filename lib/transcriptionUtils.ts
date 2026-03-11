@@ -79,6 +79,7 @@ export async function transcribeSourceRanges(
     const form = new FormData();
     form.append('audio', audioBlob, 'audio.mp3');
     form.append('startTime', String(range.startTime));
+    form.append('requestedDuration', String(Math.max(0, range.endTime - range.startTime)));
     form.append('wordsPerCaption', String(wordsPerCaption));
 
     const res = await fetch('/api/transcribe', { method: 'POST', body: form });

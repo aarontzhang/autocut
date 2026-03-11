@@ -1,18 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { CaptionEntry } from '@/lib/types';
+import { getSupabaseServer } from '@/lib/supabase/server';
+import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 type WhisperWord = { start: number; end: number; word: string };
 
 export async function POST(req: NextRequest) {
   try {
+    const supabase = await getSupabaseServer();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
     const formData = await req.formData();
     const audio = formData.get('audio') as Blob | null;
     const startTime = parseFloat((formData.get('startTime') as string) ?? '0');
+    const requestedDuration = Number((formData.get('requestedDuration') as string) ?? '0');
     const wordsPerCaption = Math.max(1, Math.min(12, parseInt((formData.get('wordsPerCaption') as string) ?? '4', 10) || 4));
 
     if (!audio) return NextResponse.json({ error: 'No audio provided' }, { status: 400 });
+
+    const usage = await consumeBetaUsage(
+      'transcribe_seconds',
+      user.id,
+      Number.isFinite(requestedDuration) ? Math.max(1, requestedDuration) : 1,
+    );
+    if (!usage.allowed) {
+      return buildBetaLimitExceededResponse('transcribe_seconds', usage);
+    }
 
     const file = new File([audio], 'audio.mp3', { type: 'audio/mpeg' });
 

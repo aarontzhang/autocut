@@ -741,9 +741,9 @@ export default function Timeline({
                     position: 'absolute',
                     left: x,
                     transform: 'translateX(-50%)',
-                    top: 0,
-                    width: 22,
-                    height: 26,
+                    top: 2,
+                    width: 18,
+                    height: 20,
                     padding: 0,
                     border: 'none',
                     background: 'transparent',
@@ -759,7 +759,7 @@ export default function Timeline({
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      clipPath: 'polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%)',
+                      clipPath: 'polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%)',
                       border: isSelected || isTagged ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
                       background: isTagged
                         ? 'rgba(250,204,21,0.34)'
@@ -767,7 +767,7 @@ export default function Timeline({
                           ? 'rgba(250,204,21,0.2)'
                           : 'rgba(250,204,21,0.12)',
                       boxShadow: isTagged ? '0 0 0 1px rgba(250,204,21,0.22)' : 'none',
-                      fontSize: 10,
+                      fontSize: 9,
                       fontWeight: 700,
                       fontFamily: 'var(--font-serif)',
                       lineHeight: 1,

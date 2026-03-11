@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Autocut
 
-## Getting Started
+Autocut is a Next.js video editor with Supabase-backed auth/storage, browser-side FFmpeg editing, OpenAI transcription, Anthropic-powered assistant flows, and a background worker for source-video indexing.
 
-First, run the development server:
+## Local Development
+
+1. Copy `.env.example` to `.env.local` and fill in the required values.
+2. Install dependencies:
+
+```bash
+npm ci
+```
+
+3. Apply Supabase migrations to your project.
+4. Start the app:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+5. Start the optional indexing worker in a second shell if you want visual search/indexing locally:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run worker:analysis
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Required Environment Variables
 
-## Learn More
+Web app and worker:
 
-To learn more about Next.js, take a look at the following resources:
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Optional tuning:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `ANTHROPIC_FRAME_DESCRIPTION_MODEL`
+- `OPENAI_EMBEDDING_MODEL`
+- `ANALYSIS_WORKER_ID`
+- `ANALYSIS_WORKER_POLL_MS`
+- `BETA_MAX_CHAT_REQUESTS_PER_DAY`
+- `BETA_MAX_TRANSCRIBE_SECONDS_PER_DAY`
+- `BETA_MAX_FRAME_DESCRIPTIONS_PER_DAY`
+- `BETA_MAX_VISUAL_SEARCHES_PER_DAY`
 
-## Deploy on Vercel
+## Supabase Setup
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Run the SQL migrations in `supabase/migrations/` against a fresh Supabase project. They create:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `projects`
+- visual-indexing tables and job queue tables
+- `beta_usage_daily`
+- the private `videos` storage bucket
+- RLS policies for projects, storage objects, and beta usage
+- the `consume_beta_usage` RPC used by the public-beta guardrails
+
+Auth configuration:
+
+- Set the Supabase site URL to your Vercel deployment URL.
+- Add `${YOUR_APP_URL}/auth/callback` as an additional redirect URL.
+- Enable Google provider if you want Google login.
+- If email confirmation stays enabled, the UI now shows a check-your-email state after signup instead of assuming immediate login.
+
+## Deployment
+
+### Web app
+
+Deploy the repo to Vercel as a standard Next.js project.
+
+- Build command: `npm run build`
+- Output: standard Next.js server deployment
+- Production build uses Webpack because the current Turbopack production path crashes in this repo
+
+Set all server environment variables in Vercel. `SUPABASE_SERVICE_ROLE_KEY` must remain server-only.
+
+### Worker
+
+Deploy a separate always-on worker service from `Dockerfile.worker`.
+
+- Start command: `npm run worker:analysis`
+- Required system dependency: `ffmpeg` and `ffprobe` are installed in the image
+- Recommended shape: one small instance for the public beta
+
+Any container host that supports long-running Node processes works here.
+
+## Verification
+
+Run these checks before shipping:
+
+```bash
+npm run lint
+npm run build
+```
+
+Then verify:
+
+- email signup/login
+- Google OAuth callback
+- video upload and project creation
+- transcription
+- frame descriptions
+- source indexing jobs moving from queued to completed
+- rate limits returning `429` once daily caps are reached

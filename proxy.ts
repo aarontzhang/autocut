@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
@@ -24,7 +24,17 @@ export async function middleware(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isPublic = pathname.startsWith('/auth') || pathname.startsWith('/_next') || pathname.startsWith('/ffmpeg') || pathname === '/favicon.ico';
+  const isPublicAsset = /\.[A-Za-z0-9]+$/.test(pathname);
+  const isPublic = (
+    pathname === '/'
+    || pathname.startsWith('/api')
+    || pathname.startsWith('/auth')
+    || pathname.startsWith('/_next')
+    || pathname.startsWith('/ffmpeg')
+    || pathname.startsWith('/landing')
+    || pathname === '/favicon.ico'
+    || isPublicAsset
+  );
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
