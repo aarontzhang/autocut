@@ -103,7 +103,6 @@ export default function Timeline({
   const [activeTool, setActiveTool] = useState<TimelineTool>('none');
 
   const videoDuration = useEditorStore(s => s.videoDuration);
-  const currentTime = useEditorStore(s => s.currentTime);
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);

@@ -173,15 +173,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         if (e.shiftKey) redo(); else undo();
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyB') {
+        e.preventDefault();
+        useEditorStore.getState().splitClipAtTime(useEditorStore.getState().currentTime);
+        return;
+      }
       if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && useEditorStore.getState().selectedItem) {
         e.preventDefault();
         deleteSelectedItem();
-        return;
-      }
-      if (e.code === 'KeyS' && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault();
-        useEditorStore.getState().splitClipAtTime(useEditorStore.getState().currentTime);
         return;
       }
       if (e.code === 'Space') {
