@@ -49,7 +49,7 @@ function findTimelineEntryAtTime(schedule: ReturnType<typeof buildClipSchedule>,
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [sourceDimensions, setSourceDimensions] = useState<Record<string, { width: number; height: number }>>({});
-  const [isActiveSourceReady, setIsActiveSourceReady] = useState(false);
+  const [sourceReadyState, setSourceReadyState] = useState<Record<string, boolean>>({});
   const [activeSourceUrl, setActiveSourceUrl] = useState('');
 
   const setVideoDuration = useEditorStore(s => s.setVideoDuration);
@@ -175,6 +175,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     ? activeSourceUrl
     : '';
   const displaySourceUrl = resolvedActiveSourceUrl || desiredSourceUrl;
+  const isDisplaySourceReady = Boolean(sourceReadyState[displaySourceUrl]);
   const activeDimensions = sourceDimensions[displaySourceUrl || uniqueSourceUrls[0] || videoUrl] ?? null;
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, activeDimensions),
@@ -209,7 +210,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (activeSourceUrlRef.current === sourceUrl) return;
     activeSourceUrlRef.current = sourceUrl;
     setActiveSourceUrl(sourceUrl);
-    setIsActiveSourceReady(false);
     const el = sourceVideoMapRef.current.get(sourceUrl);
     if (el) {
       (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
@@ -441,6 +441,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                   return;
                 }
                 sourceVideoMapRef.current.set(srcUrl, el);
+                setSourceReadyState(prev => (
+                  prev[srcUrl] === (el.readyState >= 2)
+                    ? prev
+                    : { ...prev, [srcUrl]: el.readyState >= 2 }
+                ));
                 if (srcUrl === displaySourceUrl) {
                   activeSourceUrlRef.current = displaySourceUrl;
                   (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
@@ -469,19 +474,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 if (srcUrl === videoUrl) {
                   setVideoDuration(el.duration);
                 }
-                if (srcUrl === displaySourceUrl) {
-                  setIsActiveSourceReady(el.readyState >= 1);
-                }
+                setSourceReadyState(prev => (
+                  prev[srcUrl] === (el.readyState >= 2)
+                    ? prev
+                    : { ...prev, [srcUrl]: el.readyState >= 2 }
+                ));
               }}
               onLoadedData={e => {
-                if (srcUrl === displaySourceUrl) {
-                  setIsActiveSourceReady((e.currentTarget as HTMLVideoElement).readyState >= 2);
-                }
+                const isReady = (e.currentTarget as HTMLVideoElement).readyState >= 2;
+                setSourceReadyState(prev => (prev[srcUrl] === isReady ? prev : { ...prev, [srcUrl]: isReady }));
               }}
               onCanPlay={e => {
-                if (srcUrl === displaySourceUrl) {
-                  setIsActiveSourceReady((e.currentTarget as HTMLVideoElement).readyState >= 2);
-                }
+                const isReady = (e.currentTarget as HTMLVideoElement).readyState >= 2;
+                setSourceReadyState(prev => (prev[srcUrl] === isReady ? prev : { ...prev, [srcUrl]: isReady }));
+              }}
+              onLoadStart={() => {
+                setSourceReadyState(prev => (prev[srcUrl] === false ? prev : { ...prev, [srcUrl]: false }));
               }}
               onTimeUpdate={handleTimeUpdate}
               onClick={togglePlay}
@@ -491,7 +499,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             />
           ))}
 
-          {!isActiveSourceReady && (
+          {!isDisplaySourceReady && (
             <div
               style={{
                 position: 'absolute',

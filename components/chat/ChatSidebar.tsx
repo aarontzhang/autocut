@@ -12,6 +12,9 @@ import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 12;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
+const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 45000;
+const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
+const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
 const AUTO_NARROWED_FRAME_WINDOW_SECONDS = 6;
 const REVIEW_PREROLL_SECONDS = 2.5;
@@ -70,6 +73,12 @@ async function parseJsonResponse<T>(res: Response): Promise<T | null> {
   }
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 async function postChatRequest(
   payload: {
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -107,19 +116,69 @@ async function requestFrameDescriptions(batchFrames: Array<{
   timelineTime: number;
   sourceTime: number;
 }>): Promise<FrameDescriptionResponse> {
-  const res = await fetch('/api/frame-descriptions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
-      frames: batchFrames,
-    }),
-  });
-  const data = await parseJsonResponse<FrameDescriptionResponse>(res);
-  if (!res.ok) {
-    throw new Error(data?.error ?? 'Failed to describe video frames.');
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_FRAME_DESCRIPTION_REQUEST_RETRIES; attempt += 1) {
+    const ctrl = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      try {
+        ctrl.abort(new DOMException('The frame description request timed out.', 'AbortError'));
+      } catch {
+        ctrl.abort();
+      }
+    }, FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS);
+
+    try {
+      const res = await fetch('/api/frame-descriptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
+          frames: batchFrames,
+        }),
+      });
+      const data = await parseJsonResponse<FrameDescriptionResponse>(res);
+      if (!res.ok) {
+        const retryAfterSeconds = Number(res.headers.get('Retry-After'));
+        const error = new Error(data?.error ?? 'Failed to describe video frames.');
+        if (
+          attempt < MAX_FRAME_DESCRIPTION_REQUEST_RETRIES
+          && (res.status >= 500 || res.status === 429)
+        ) {
+          const retryDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS * (attempt + 1);
+          lastError = error;
+          await sleep(retryDelay);
+          continue;
+        }
+        throw error;
+      }
+      return data ?? {};
+    } catch (error) {
+      const nextError = error instanceof Error ? error : new Error('Failed to describe video frames.');
+      lastError = nextError;
+      const isAbort = nextError.name === 'AbortError';
+      if (attempt >= MAX_FRAME_DESCRIPTION_REQUEST_RETRIES) {
+        break;
+      }
+      await sleep((isAbort ? FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS * 2 : FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS) * (attempt + 1));
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
   }
-  return data ?? {};
+
+  throw lastError ?? new Error('Failed to describe video frames.');
+}
+
+function buildFallbackFrameDescriptions(frameCount: number): FrameDescriptionResponse {
+  return {
+    descriptions: Array.from({ length: frameCount }, (_, index) => ({
+      index,
+      description: 'Visual summary unavailable.',
+    })),
+  };
 }
 
 function clampProgress(value: number): number {
@@ -286,7 +345,13 @@ async function runFrameDescriptionBatches(
       const batchIndex = nextBatchIndex;
       nextBatchIndex += 1;
       const batch = batches[batchIndex];
-      const data = await requestFrameDescriptions(batch.batchFrames);
+      let data: FrameDescriptionResponse;
+      try {
+        data = await requestFrameDescriptions(batch.batchFrames);
+      } catch (error) {
+        console.warn('Failed to describe a frame batch; using fallback summaries.', error);
+        data = buildFallbackFrameDescriptions(batch.batchFrames.length);
+      }
       onBatchComplete({ start: batch.start, data });
     }
   };

@@ -16,9 +16,12 @@ import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 
+const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
+  const lastSignedMediaRefreshAtRef = useRef(0);
 
   // Resizable panel sizes
   const [chatWidth, setChatWidth] = useState(340);
@@ -149,6 +152,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           : clip
       )),
     }));
+    lastSignedMediaRefreshAtRef.current = Date.now();
   }, []);
 
   useEffect(() => {
@@ -217,6 +221,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     if (useEditorStore.getState().currentProjectId !== projectId) {
       resetEditor();
     }
+    lastSignedMediaRefreshAtRef.current = 0;
     (async () => {
       setIsProjectLoading(true);
       try {
@@ -245,12 +250,18 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
     const maybeRefresh = () => {
       if (document.visibilityState !== 'visible') return;
+      if (
+        lastSignedMediaRefreshAtRef.current > 0
+        && Date.now() - lastSignedMediaRefreshAtRef.current < SIGNED_MEDIA_REFRESH_INTERVAL_MS
+      ) {
+        return;
+      }
       void refreshSignedMediaUrls(projectId).catch((error) => {
         console.warn('Failed to refresh signed media URLs:', error);
       });
     };
 
-    const intervalId = window.setInterval(maybeRefresh, 45 * 60 * 1000);
+    const intervalId = window.setInterval(maybeRefresh, SIGNED_MEDIA_REFRESH_INTERVAL_MS);
     window.addEventListener('focus', maybeRefresh);
     document.addEventListener('visibilitychange', maybeRefresh);
 
