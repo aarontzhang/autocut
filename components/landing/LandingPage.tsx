@@ -225,7 +225,7 @@ function HeroEditorMock() {
                 maxWidth: '88%',
                 lineHeight: 1.5,
               }}>
-                Cut every time I say "um" or pause awkwardly
+                Cut the flat sections between each jump
               </div>
             </div>
 
@@ -497,11 +497,11 @@ export default function LandingPage() {
 
       {/* ── Hero ─────────────────────────────────────────────── */}
       <section style={{
-        maxWidth: 1100,
+        maxWidth: 1200,
         margin: '0 auto',
         width: '100%',
         display: 'grid',
-        gridTemplateColumns: '380px 1fr',
+        gridTemplateColumns: '360px 1fr',
         minHeight: 'calc(100vh - 54px)',
         padding: '0 48px',
         gap: 48,
@@ -509,7 +509,7 @@ export default function LandingPage() {
       }}>
         <div style={{
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          paddingTop: 60, paddingBottom: 60,
+          paddingTop: 40, paddingBottom: 40,
         }}>
           <h1 style={{
             fontSize: 'clamp(38px, 3.6vw, 52px)',
@@ -537,7 +537,7 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <div style={{ padding: '28px 0', display: 'flex', alignItems: 'stretch' }}>
+        <div style={{ padding: '20px 0', display: 'flex', alignItems: 'stretch' }}>
           <HeroEditorMock />
         </div>
       </section>
@@ -545,13 +545,13 @@ export default function LandingPage() {
       {/* ── Feature 1: Chat flow — text LEFT, mock RIGHT ─────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
-        maxWidth: 1100,
+        maxWidth: 1280,
         margin: '0 auto',
         width: '100%',
         display: 'grid',
         gridTemplateColumns: '340px 1fr',
         alignItems: 'center',
-        padding: '96px 48px',
+        padding: '72px 40px',
         gap: 64,
       }}>
         <div>
@@ -581,7 +581,7 @@ export default function LandingPage() {
         display: 'grid',
         gridTemplateColumns: '1fr 340px',
         alignItems: 'center',
-        padding: '96px 48px',
+        padding: '72px 40px',
         gap: 64,
       }}>
         <TimelineMock />
@@ -605,7 +605,7 @@ export default function LandingPage() {
       {/* ── Pull quote + CTA ─────────────────────────────────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
-        padding: '110px 64px',
+        padding: '80px 64px',
         textAlign: 'center',
       }}>
         <p style={{
