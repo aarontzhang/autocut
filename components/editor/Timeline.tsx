@@ -741,27 +741,40 @@ export default function Timeline({
                     position: 'absolute',
                     left: x,
                     transform: 'translateX(-50%)',
-                    top: 1,
-                    minWidth: 20,
-                    height: 20,
-                    padding: '0 4px',
-                    borderRadius: 999,
-                    border: isSelected || isTagged ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
-                    background: isTagged
-                      ? 'rgba(250,204,21,0.34)'
-                      : isSelected
-                        ? 'rgba(250,204,21,0.2)'
-                        : 'rgba(250,204,21,0.12)',
-                    boxShadow: isTagged ? '0 0 0 1px rgba(250,204,21,0.22)' : 'none',
+                    top: 0,
+                    width: 22,
+                    height: 26,
+                    padding: 0,
+                    border: 'none',
+                    background: 'transparent',
                     color: isSelected || isTagged ? '#fef08a' : '#fde68a',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    fontFamily: 'var(--font-serif)',
                     cursor: 'pointer',
                     zIndex: 2,
                   }}
                 >
-                  {marker.number}
+                  <span
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      clipPath: 'polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%)',
+                      border: isSelected || isTagged ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
+                      background: isTagged
+                        ? 'rgba(250,204,21,0.34)'
+                        : isSelected
+                          ? 'rgba(250,204,21,0.2)'
+                          : 'rgba(250,204,21,0.12)',
+                      boxShadow: isTagged ? '0 0 0 1px rgba(250,204,21,0.22)' : 'none',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      fontFamily: 'var(--font-serif)',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {marker.number}
+                  </span>
                 </button>
               );
             })}

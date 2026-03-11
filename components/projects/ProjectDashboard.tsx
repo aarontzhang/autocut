@@ -383,13 +383,15 @@ export default function ProjectDashboard({
         </button>
       </div>
 
-      <div style={{ marginBottom: 20, maxWidth: 520 }}>
-        <StorageQuotaBanner
-          quota={storageQuota}
-          loading={storageQuotaLoading}
-          title="Account storage"
-        />
-      </div>
+      {(storageQuota?.warningLevel === 'warning' || storageQuota?.warningLevel === 'critical' || storageQuota?.warningLevel === 'limit') && (
+        <div style={{ marginBottom: 20, maxWidth: 520 }}>
+          <StorageQuotaBanner
+            quota={storageQuota}
+            loading={storageQuotaLoading}
+            title="Account storage"
+          />
+        </div>
+      )}
 
       {loading ? (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>

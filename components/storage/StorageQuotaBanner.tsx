@@ -58,7 +58,7 @@ export default function StorageQuotaBanner({
   message = null,
   compact = false,
 }: StorageQuotaBannerProps) {
-  if (!loading && !quota && !message) return null;
+  if (!quota && !message) return null;
 
   const colors = getColors(quota?.warningLevel);
   const resolvedMessage = message ?? (quota ? getQuotaWarningMessage(quota) : '');
