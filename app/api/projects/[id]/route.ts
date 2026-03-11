@@ -104,14 +104,15 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
   }
 
+  const { error } = await supabase.from('projects').delete().eq('id', id).eq('user_id', user.id);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
   try {
     await removeProjectStorageObjects(user.id, id);
   } catch (storageError) {
-    console.error('[projects.delete] failed to delete project storage objects', storageError);
-    return NextResponse.json({ error: 'Failed to delete project media' }, { status: 500 });
+    console.error('[projects.delete] deleted project row but failed to delete project storage objects', storageError);
+    return NextResponse.json({ ok: true, cleanupWarning: 'Project media cleanup failed after deleting the project row' });
   }
 
-  const { error } = await supabase.from('projects').delete().eq('id', id).eq('user_id', user.id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

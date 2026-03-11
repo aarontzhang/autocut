@@ -26,11 +26,24 @@ export default function ProjectsPage() {
   const router = useRouter();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
+  const loadProjects = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/projects', { cache: 'no-store' });
+      if (!response.ok) {
+        setProjects([]);
+        return;
+      }
+
+      const data = await response.json();
+      setProjects(Array.isArray(data) ? data : []);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    fetch('/api/projects')
-      .then(r => r.json())
-      .then(data => { setProjects(Array.isArray(data) ? data : []); setLoading(false); })
-      .catch(() => setLoading(false));
+    void loadProjects();
   }, []);
 
   const handleNew = async () => {
@@ -48,7 +61,12 @@ export default function ProjectsPage() {
   const handleOpen = (id: string) => router.push(`/editor?project=${id}`);
 
   const handleDelete = async (id: string) => {
-    await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    const response = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    if (!response.ok) {
+      await loadProjects();
+      return;
+    }
+
     setProjects(prev => prev.filter(p => p.id !== id));
     await refreshQuota();
   };
