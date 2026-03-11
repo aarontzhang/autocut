@@ -148,15 +148,16 @@ export default function LoginPage() {
         position: 'relative',
         overflow: 'hidden',
       }}>
-        {/* Subtle glow */}
+        {/* Subtle glow — centered behind the headline text */}
         <div style={{
           position: 'absolute',
-          top: '30%',
-          left: '20%',
-          width: 500,
-          height: 500,
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: 600,
+          height: 400,
           borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(33,212,255,0.05) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse, rgba(33,212,255,0.07) 0%, transparent 70%)',
           pointerEvents: 'none',
         }} />
 
