@@ -101,6 +101,7 @@ export default function Timeline({
   const [snapIndicatorX, setSnapIndicatorX] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [activeTool, setActiveTool] = useState<TimelineTool>('none');
+  const [linkingEnabled, setLinkingEnabled] = useState(true);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
@@ -148,6 +149,11 @@ export default function Timeline({
           setActiveTool((value) => (value === 'marker' ? 'none' : 'marker'));
           return;
         }
+        if (key === 'l') {
+          e.preventDefault();
+          setLinkingEnabled((value) => !value);
+          return;
+        }
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTrackClipId) {
         e.preventDefault();
@@ -157,7 +163,7 @@ export default function Timeline({
           if (clip) {
             store.removeTrackClip(track.id, selectedTrackClipId);
             // Remove linked partner (video↔audio pair)
-            if (clip.linkedClipId) {
+            if (linkingEnabled && clip.linkedClipId) {
               for (const t2 of store.extraTracks) {
                 if (t2.clips.find(c => c.id === clip.linkedClipId)) {
                   store.removeTrackClip(t2.id, clip.linkedClipId);
@@ -173,7 +179,7 @@ export default function Timeline({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedTrackClipId, splitClipAtTime]);
+  }, [linkingEnabled, selectedTrackClipId, splitClipAtTime]);
 
   // Dynamic track height — shrinks as more tracks are added
   const totalMediaTracks = 2 + extraTracks.length; // main video + main audio + extras
@@ -457,7 +463,7 @@ export default function Timeline({
     let linkedTrackId: string | undefined;
     let linkedClipId: string | undefined;
     let linkedOrigStart: number | undefined;
-    if (clip.linkedClipId) {
+    if (linkingEnabled && clip.linkedClipId) {
       for (const t of state.extraTracks) {
         const linked = t.clips.find(c => c.id === clip.linkedClipId);
         if (linked) {
@@ -486,7 +492,7 @@ export default function Timeline({
       linkedOrigStart,
     };
     document.body.style.cursor = 'grabbing';
-  }, [totalW, totalTimelineDuration]);
+  }, [linkingEnabled, totalW, totalTimelineDuration]);
 
   const startTrackClipTrimLeft = useCallback((e: React.MouseEvent, trackId: string, clipId: string) => {
     e.stopPropagation(); e.preventDefault();
@@ -636,6 +642,24 @@ export default function Timeline({
       });
     }
   };
+
+  const handleRemoveTrackClip = useCallback((trackId: string, clipId: string) => {
+    const store = useEditorStore.getState();
+    const track = store.extraTracks.find((entry) => entry.id === trackId);
+    const clip = track?.clips.find((entry) => entry.id === clipId);
+    removeTrackClip(trackId, clipId);
+    if (linkingEnabled && clip?.linkedClipId) {
+      for (const siblingTrack of store.extraTracks) {
+        if (siblingTrack.clips.find((entry) => entry.id === clip.linkedClipId)) {
+          removeTrackClip(siblingTrack.id, clip.linkedClipId);
+          break;
+        }
+      }
+    }
+    setSelectedTrackClipId((selectedId) => (
+      selectedId === clipId || (linkingEnabled && selectedId === clip?.linkedClipId) ? null : selectedId
+    ));
+  }, [linkingEnabled, removeTrackClip]);
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -810,17 +834,6 @@ export default function Timeline({
           }}>
             Timeline
           </span>
-          {clips.length > 1 && (
-            <span style={{
-              fontSize: 10, padding: '3px 8px', borderRadius: 999,
-              background: 'rgba(33,212,255,0.1)',
-              border: '1px solid rgba(33,212,255,0.22)',
-              color: 'rgba(184,243,255,0.92)',
-              fontFamily: 'var(--font-serif)',
-            }}>
-              {clips.length} clips
-            </span>
-          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <TimelineToolButton
               label="Cut tool"
@@ -835,6 +848,13 @@ export default function Timeline({
               active={activeTool === 'marker'}
               onClick={() => setActiveTool((value) => (value === 'marker' ? 'none' : 'marker'))}
               icon={<MarkerToolIcon />}
+            />
+            <TimelineToolButton
+              label="Linked clips"
+              shortcut="L"
+              active={linkingEnabled}
+              onClick={() => setLinkingEnabled((value) => !value)}
+              icon={<LinkToolIcon />}
             />
           </div>
         </div>
@@ -1094,12 +1114,13 @@ export default function Timeline({
               height={TRACK_HEIGHT}
               track={track}
               tPx={tPx}
+              linkingEnabled={linkingEnabled}
               selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
               onTrimLeft={(e, clipId) => startTrackClipTrimLeft(e, track.id, clipId)}
               onTrimRight={(e, clipId) => startTrackClipTrimRight(e, track.id, clipId)}
-              onRemoveClip={clipId => removeTrackClip(track.id, clipId)}
+              onRemoveClip={clipId => handleRemoveTrackClip(track.id, clipId)}
               onDeselect={() => setSelectedTrackClipId(null)}
             />
           ))}
@@ -1167,12 +1188,13 @@ export default function Timeline({
               height={TRACK_HEIGHT}
               track={track}
               tPx={tPx}
+              linkingEnabled={linkingEnabled}
               selectedTrackClipId={selectedTrackClipId}
               onDrop={e => handleTrackFileDrop(e, track.id)}
               onClipDrag={(e, clipId) => startTrackClipDrag(e, track.id, clipId)}
               onTrimLeft={(e, clipId) => startTrackClipTrimLeft(e, track.id, clipId)}
               onTrimRight={(e, clipId) => startTrackClipTrimRight(e, track.id, clipId)}
-              onRemoveClip={clipId => removeTrackClip(track.id, clipId)}
+              onRemoveClip={clipId => handleRemoveTrackClip(track.id, clipId)}
               onDeselect={() => setSelectedTrackClipId(null)}
             />
           ))}
@@ -1502,31 +1524,45 @@ function TimelineToolButton({
 
 function CutToolIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 4l7.2 7.2" />
-      <path d="M4 20l7.2-7.2" />
-      <path d="M13 12h7" />
-      <circle cx="5" cy="5" r="2.25" />
-      <circle cx="5" cy="19" r="2.25" />
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.5 12h13" />
+      <path d="M8.5 7.5v9" />
+      <path d="M15.5 7.5v9" />
+      <path d="M12 6v12" />
+      <path d="M3.5 9.5l3-3" />
+      <path d="M20.5 9.5l-3-3" />
+      <path d="M3.5 14.5l3 3" />
+      <path d="M20.5 14.5l-3 3" />
     </svg>
   );
 }
 
 function MarkerToolIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 3v18" />
-      <path d="M12 5h6l-2.4 3L18 11h-6" />
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 4.5h8a1.5 1.5 0 0 1 1.5 1.5v10.2L12 19.5l-5.5-3.3V6A1.5 1.5 0 0 1 8 4.5Z" />
+    </svg>
+  );
+}
+
+function LinkToolIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 7h6" />
+      <path d="M9 17h6" />
+      <path d="M8 7H6.5A2.5 2.5 0 0 0 4 9.5v5A2.5 2.5 0 0 0 6.5 17H8" />
+      <path d="M16 7h1.5A2.5 2.5 0 0 1 20 9.5v5a2.5 2.5 0 0 1-2.5 2.5H16" />
     </svg>
   );
 }
 
 const EXTRA_CLIP_COLOR = { bg: 'rgba(59,130,246,0.35)', border: 'rgba(96,165,250,0.6)' };
 
-const ExtraTrackRow = memo(function ExtraTrackRow({ height, track, tPx, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
+const ExtraTrackRow = memo(function ExtraTrackRow({ height, track, tPx, linkingEnabled, selectedTrackClipId, onDrop, onClipDrag, onTrimLeft, onTrimRight, onRemoveClip, onDeselect }: {
   height: number;
   track: import('@/lib/types').MediaTrack;
   tPx: (t: number) => number;
+  linkingEnabled: boolean;
   selectedTrackClipId?: string | null;
   onDrop: (e: React.DragEvent) => void;
   onClipDrag: (e: React.MouseEvent, clipId: string) => void;
@@ -1571,7 +1607,7 @@ const ExtraTrackRow = memo(function ExtraTrackRow({ height, track, tPx, selected
         const clipW = Math.max(HANDLE_W * 2 + 4, tPx(clip.timelineStart + clip.sourceDuration / clip.speed) - clipLeft);
         // A clip is "selected" if it is the selected clip OR its linked partner is selected
         const isSelected = selectedTrackClipId !== null && selectedTrackClipId !== undefined &&
-          (clip.id === selectedTrackClipId || clip.linkedClipId === selectedTrackClipId);
+          (clip.id === selectedTrackClipId || (linkingEnabled && clip.linkedClipId === selectedTrackClipId));
         return (
           <div
             key={clip.id}
