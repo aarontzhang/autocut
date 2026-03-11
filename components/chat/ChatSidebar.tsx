@@ -987,7 +987,6 @@ function AssistantMessage({
   const [reviewIndex, setReviewIndex] = useState(0);
   const [acceptedSteps, setAcceptedSteps] = useState(0);
   const [skippedSteps, setSkippedSteps] = useState(0);
-  const [reviewReadyToCommit, setReviewReadyToCommit] = useState(false);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
   const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<Array<{ sourceStart: number; sourceEnd: number }>>([]);
@@ -999,7 +998,7 @@ function AssistantMessage({
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
-  const reviewInProgress = reviewDraft !== null && !reviewReadyToCommit && reviewIndex < reviewSteps.length;
+  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
   const activeReviewAction = reviewInProgress ? reviewSteps[reviewIndex] : action ?? null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
@@ -1033,25 +1032,9 @@ function AssistantMessage({
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
     setSkippedSteps(skipped);
-    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
     setReviewResult(result);
   }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
-
-  const completeReviewSteps = useCallback((
-    draft: EditSnapshot,
-    accepted: number,
-    skipped: number,
-    nextCommittedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
-  ) => {
-    setReviewDraft(draft);
-    setReviewIndex(reviewSteps.length);
-    setAcceptedSteps(accepted);
-    setSkippedSteps(skipped);
-    setAcceptedSourceRanges(nextCommittedSourceRanges);
-    setReviewReadyToCommit(true);
-    setPreviewSnapshot(msg.id, draft);
-  }, [msg.id, reviewSteps.length, setPreviewSnapshot]);
 
   const startReview = useCallback(() => {
     if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
@@ -1069,7 +1052,6 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
-    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
     setReviewResult(null);
     setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstStep));
@@ -1088,7 +1070,7 @@ function AssistantMessage({
     const accepted = acceptedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      completeReviewSteps(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
+      finalizeReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
       return;
     }
     const nextStep = reviewSteps[nextIndex];
@@ -1099,14 +1081,14 @@ function AssistantMessage({
     setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextStep));
     const reviewSeekTime = getReviewSeekTime(nextDraft, nextStep);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, completeReviewSteps, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const handleSkipStep = useCallback(() => {
     if (!reviewDraft || !reviewSteps[reviewIndex]) return;
     const skipped = skippedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
-      completeReviewSteps(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
+      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
       return;
     }
     const nextStep = reviewSteps[nextIndex];
@@ -1115,12 +1097,7 @@ function AssistantMessage({
     setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextStep));
     const reviewSeekTime = getReviewSeekTime(reviewDraft, nextStep);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, completeReviewSteps, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
-
-  const handleCommitReview = useCallback(() => {
-    if (!reviewDraft) return;
-    finalizeReview(reviewDraft, acceptedSteps, skippedSteps, acceptedSourceRanges);
-  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, reviewDraft, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
@@ -1128,7 +1105,6 @@ function AssistantMessage({
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
-    setReviewReadyToCommit(false);
     setAcceptedSourceRanges([]);
   }, [clearPreviewSnapshot, msg.id]);
 
@@ -1255,9 +1231,7 @@ function AssistantMessage({
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   {reviewInProgress
                     ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
-                    : reviewReadyToCommit
-                      ? `Review complete. ${acceptedSteps} accepted, ${skippedSteps} skipped. Commit the accepted changes or discard them.`
-                      : `Review ${reviewSteps.length} proposed changes before committing them.`}
+                    : `Review ${reviewSteps.length} proposed changes.`}
                 </p>
               )}
               {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && (
@@ -1354,43 +1328,6 @@ function AssistantMessage({
                     }}
                   >
                     Cancel
-                  </button>
-                </div>
-              ) : reviewReadyToCommit ? (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    onClick={handleCommitReview}
-                    style={{
-                      flex: 1,
-                      padding: '5px 0',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      background: 'var(--accent)',
-                      border: 'none',
-                      color: '#000',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                    }}
-                  >
-                    Commit changes
-                  </button>
-                  <button
-                    onClick={cancelReview}
-                    style={{
-                      flex: 1,
-                      padding: '5px 0',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      background: 'rgba(255,255,255,0.06)',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      color: 'var(--fg-secondary)',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                    }}
-                  >
-                    Discard review
                   </button>
                 </div>
               ) : (
@@ -1557,7 +1494,7 @@ function EmptyState({
         Find moments. Tag them. Review the cut.
       </p>
       <p style={{ fontSize: 12, color: 'var(--fg-muted)', margin: 0, lineHeight: 1.6, fontFamily: 'var(--font-serif)' }}>
-        Describe the event you want to find, then review the markers and proposed cuts before committing anything.
+        Describe the event you want to find, then review the markers and proposed cuts before applying them.
       </p>
       {isIndexing && (
         <div style={{ width: '100%', maxWidth: 290, marginTop: 10 }}>
