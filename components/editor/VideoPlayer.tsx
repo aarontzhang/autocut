@@ -3,7 +3,6 @@
 import { forwardRef, useImperativeHandle, useCallback, useRef, useEffect, useMemo, useState } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { buildClipSchedule } from '@/lib/playbackEngine';
-import { TrackClip } from '@/lib/types';
 
 export interface VideoPlayerHandle {
   seekTo: (timelineTime: number) => void;
@@ -41,13 +40,6 @@ function fitVideoFrame(
   return { width: container.height * videoRatio, height: container.height };
 }
 
-function findActiveTrackClip(clips: TrackClip[], timelineTime: number): TrackClip | null {
-  return clips.find(c => {
-    const end = c.timelineStart + c.sourceDuration / c.speed;
-    return timelineTime >= c.timelineStart && timelineTime < end;
-  }) ?? null;
-}
-
 function findTimelineEntryAtTime(schedule: ReturnType<typeof buildClipSchedule>, timelineTime: number) {
   let targetEntry = schedule.find(entry => timelineTime >= entry.timelineStart && timelineTime <= entry.timelineEnd);
   if (!targetEntry && schedule.length > 0) targetEntry = schedule[schedule.length - 1];
@@ -58,6 +50,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [sourceDimensions, setSourceDimensions] = useState<Record<string, { width: number; height: number }>>({});
   const [isActiveSourceReady, setIsActiveSourceReady] = useState(false);
+  const [activeSourceUrl, setActiveSourceUrl] = useState('');
+
   const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const requestedSeekTime = useEditorStore(s => s.requestedSeekTime);
@@ -68,43 +62,30 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
   const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
-  const extraTracks = useEditorStore(s => s.extraTracks);
 
   const clipsRef = useRef(clips);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
 
-  // Re-seek the video when clips change while paused (e.g. after a delete while paused)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !video.paused || clips.length === 0) return;
-    const sched = buildClipSchedule(clips);
-    if (sched.length === 0) return;
-    const ct = useEditorStore.getState().currentTime;
-    const targetEntry = findTimelineEntryAtTime(sched, ct);
+    const schedule = buildClipSchedule(clips);
+    if (schedule.length === 0) return;
+    const timelineTime = useEditorStore.getState().currentTime;
+    const targetEntry = findTimelineEntryAtTime(schedule, timelineTime);
     if (!targetEntry) return;
-    const offsetInTimeline = Math.max(0, ct - targetEntry.timelineStart);
+    const offsetInTimeline = Math.max(0, timelineTime - targetEntry.timelineStart);
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
     video.currentTime = Math.max(0, sourceTime);
   }, [clips, videoRef]);
 
-  const extraTracksRef = useRef(extraTracks);
-  useEffect(() => { extraTracksRef.current = extraTracks; }, [extraTracks]);
-
-  const extraVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const extraAudioRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const extraAudioNodes = useRef<Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>>(new Map());
-
-  // Multi-source refs
   const sourceVideoMapRef = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const activeSourceUrlRef = useRef<string>('');
-  const [activeSourceUrl, setActiveSourceUrl] = useState('');
+  const activeSourceUrlRef = useRef('');
   const currentTimeRef = useRef(currentTime);
   useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
 
-  // Ref for the inner video container div (for ResizeObserver)
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
-  // Track the available preview area so the frame can follow the source aspect ratio.
   useEffect(() => {
     const container = videoContainerRef.current;
     if (!container) return;
@@ -115,7 +96,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     return () => observer.disconnect();
   }, [videoUrl]);
 
-  // Web Audio
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
 
@@ -130,68 +110,23 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       audioCtxRef.current = ctx;
       gainNodeRef.current = gainNode;
     } catch {
-      // AudioContext may fail if already connected
+      // AudioContext may fail if already connected.
     }
   }, [videoRef]);
 
-  function ensureExtraAudioRouted(trackId: string, el: HTMLVideoElement) {
-    const ctx = audioCtxRef.current;
-    if (!ctx || extraAudioNodes.current.has(trackId)) return;
-    try {
-      const source = ctx.createMediaElementSource(el);
-      const gain = ctx.createGain();
-      gain.gain.value = 1.0;
-      source.connect(gain);
-      gain.connect(ctx.destination);
-      extraAudioNodes.current.set(trackId, { source, gain });
-    } catch {}
-  }
+  const activeCaption = captions.find(caption => currentTime >= caption.startTime && currentTime < caption.endTime);
+  const activeTextOverlays = textOverlays.filter(overlay => currentTime >= overlay.startTime && currentTime < overlay.endTime);
 
-  // Cleanup stale track audio nodes when tracks are removed
-  useEffect(() => {
-    const ids = new Set(extraTracks.map(t => t.id));
-    for (const [id, nodes] of extraAudioNodes.current) {
-      if (!ids.has(id)) {
-        nodes.source.disconnect();
-        nodes.gain.disconnect();
-        extraAudioNodes.current.delete(id);
-      }
-    }
-  }, [extraTracks]);
-
-  // Find active caption and text overlay
-  const activeCaption = captions.find(c => currentTime >= c.startTime && currentTime < c.endTime);
-  const activeTextOverlays = textOverlays.filter(t => currentTime >= t.startTime && currentTime < t.endTime);
-
-  // Build total timeline duration
   const schedule = buildClipSchedule(clips);
   const totalTimelineDuration = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
 
-  const syncExtraTracks = useCallback((timelineTime: number, mainPaused: boolean) => {
-    for (const track of extraTracksRef.current) {
-      const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
-      const el = map.get(track.id);
-      if (!el) continue;
-      const activeClip = findActiveTrackClip(track.clips, timelineTime);
-      if (!activeClip) {
-        if (!el.paused) el.pause();
-        continue;
-      }
-      const targetSrc = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
-      if (Math.abs(el.currentTime - targetSrc) > 0.15) el.currentTime = targetSrc;
-      el.playbackRate = activeClip.speed;
-      if (el.paused && !mainPaused) el.play().catch(() => {});
-    }
-  }, []);
-
-  // Apply active clip's CSS filter and speed
   const applyClipEffects = useCallback((sourceTime: number) => {
-    const curClips = clipsRef.current;
+    const currentClips = clipsRef.current;
     const video = videoRef.current;
     if (!video) return;
 
     let activeClip = null;
-    for (const clip of curClips) {
+    for (const clip of currentClips) {
       const clipSource = clip.sourceUrl ?? videoUrl;
       if (clipSource !== (activeSourceUrlRef.current || videoUrl)) continue;
       if (sourceTime >= clip.sourceStart && sourceTime < clip.sourceStart + clip.sourceDuration) {
@@ -199,8 +134,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         break;
       }
     }
-    if (!activeClip && curClips.length > 0) {
-      activeClip = curClips[curClips.length - 1];
+    if (!activeClip && currentClips.length > 0) {
+      activeClip = currentClips[currentClips.length - 1];
     }
     if (!activeClip) return;
 
@@ -216,12 +151,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
 
     if (gainNodeRef.current && audioCtxRef.current) {
-      const targetGain = activeClip.volume;
-      gainNodeRef.current.gain.setTargetAtTime(targetGain, audioCtxRef.current.currentTime, 0.05);
+      gainNodeRef.current.gain.setTargetAtTime(activeClip.volume, audioCtxRef.current.currentTime, 0.05);
     }
   }, [videoRef, videoUrl]);
 
-  // Compute unique source URLs across all clips + main videoUrl
   const uniqueSourceUrls = useMemo(() => {
     const urls = new Set<string>();
     if (videoUrl) urls.add(videoUrl);
@@ -232,8 +165,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   }, [clips, videoUrl]);
 
   const desiredSourceUrl = useMemo(() => {
-    const sched = buildClipSchedule(clips);
-    const targetEntry = sched.find(entry => currentTime >= entry.timelineStart && currentTime <= entry.timelineEnd) ?? sched[0];
+    const currentSchedule = buildClipSchedule(clips);
+    const targetEntry = currentSchedule.find(entry => currentTime >= entry.timelineStart && currentTime <= entry.timelineEnd) ?? currentSchedule[0];
     const targetClip = targetEntry ? clips.find(clip => clip.id === targetEntry.clipId) : null;
     return targetClip?.sourceUrl ?? videoUrl ?? uniqueSourceUrls[0] ?? '';
   }, [clips, currentTime, uniqueSourceUrls, videoUrl]);
@@ -252,8 +185,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const activeEl = displaySourceUrl ? sourceVideoMapRef.current.get(displaySourceUrl) : null;
     if (!activeEl) return;
 
-    const sched = buildClipSchedule(clipsRef.current);
-    const targetEntry = findTimelineEntryAtTime(sched, currentTimeRef.current);
+    const currentSchedule = buildClipSchedule(clipsRef.current);
+    const targetEntry = findTimelineEntryAtTime(currentSchedule, currentTimeRef.current);
     if (!targetEntry) return;
 
     const targetClip = clipsRef.current.find((clip) => clip.id === targetEntry.clipId);
@@ -272,40 +205,39 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [displaySourceUrl, uniqueSourceUrls, videoUrl]);
 
-  // Activate a source URL — show its element, hide others, update videoRef
   const activateSource = useCallback((sourceUrl: string) => {
     if (activeSourceUrlRef.current === sourceUrl) return;
     activeSourceUrlRef.current = sourceUrl;
     setActiveSourceUrl(sourceUrl);
     setIsActiveSourceReady(false);
     const el = sourceVideoMapRef.current.get(sourceUrl);
-    if (el) (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+    if (el) {
+      (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+    }
   }, [videoRef]);
 
-  // The time update handler (named so it can be passed to each video element)
   const handleTimeUpdate = useCallback(() => {
     if (!videoRef.current) return;
+
     const sourceTime = videoRef.current.currentTime;
-    const curClips = clipsRef.current;
-    if (curClips.length === 0) {
+    const currentClips = clipsRef.current;
+    if (currentClips.length === 0) {
       if (Math.abs(currentTimeRef.current - sourceTime) > 1 / 240) {
         currentTimeRef.current = sourceTime;
         setCurrentTime(sourceTime);
       }
-      syncExtraTracks(sourceTime, videoRef.current.paused);
       return;
     }
 
     applyClipEffects(sourceTime);
 
-    const curSource = activeSourceUrlRef.current || videoUrl;
-    const sched = buildClipSchedule(curClips);
+    const currentSource = activeSourceUrlRef.current || videoUrl;
+    const currentSchedule = buildClipSchedule(currentClips);
 
-    // Find the schedule entry (from the current source) that contains sourceTime
-    let activeEntry: typeof sched[0] | null = null;
-    for (const entry of sched) {
-      const clip = curClips.find(c => c.id === entry.clipId);
-      if (!clip || (clip.sourceUrl ?? videoUrl) !== curSource) continue;
+    let activeEntry: typeof currentSchedule[0] | null = null;
+    for (const entry of currentSchedule) {
+      const clip = currentClips.find(item => item.id === entry.clipId);
+      if (!clip || (clip.sourceUrl ?? videoUrl) !== currentSource) continue;
       if (sourceTime >= entry.sourceStart && sourceTime < entry.sourceStart + entry.sourceDuration) {
         activeEntry = entry;
         break;
@@ -318,31 +250,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         currentTimeRef.current = timelineTime;
         setCurrentTime(timelineTime);
       }
-      syncExtraTracks(timelineTime, videoRef.current.paused);
       return;
     }
 
-    // Not in any clip from the current source.
-    // Find the furthest timelineEnd of current-source clips we've played past.
     let lastSourceTimelineEnd = 0;
-    for (const entry of sched) {
-      const clip = curClips.find(c => c.id === entry.clipId);
-      if (!clip || (clip.sourceUrl ?? videoUrl) !== curSource) continue;
+    for (const entry of currentSchedule) {
+      const clip = currentClips.find(item => item.id === entry.clipId);
+      if (!clip || (clip.sourceUrl ?? videoUrl) !== currentSource) continue;
       if (sourceTime >= entry.sourceStart + entry.sourceDuration - 0.05) {
         lastSourceTimelineEnd = Math.max(lastSourceTimelineEnd, entry.timelineEnd);
       }
     }
 
-    // Find the next entry in the full schedule after that point
-    const nextEntry = sched.find(e => e.timelineStart >= lastSourceTimelineEnd - 0.01 && e.timelineEnd > lastSourceTimelineEnd);
+    const nextEntry = currentSchedule.find(entry => (
+      entry.timelineStart >= lastSourceTimelineEnd - 0.01
+      && entry.timelineEnd > lastSourceTimelineEnd
+    ));
 
     if (nextEntry) {
-      const nextClip = curClips.find(c => c.id === nextEntry.clipId);
+      const nextClip = currentClips.find(item => item.id === nextEntry.clipId);
       const nextSource = nextClip?.sourceUrl ?? videoUrl;
-      if (nextSource !== curSource) {
-        // Switch to the new source
+      if (nextSource !== currentSource) {
         const wasPlaying = !videoRef.current.paused;
-        sourceVideoMapRef.current.get(curSource)?.pause();
+        sourceVideoMapRef.current.get(currentSource)?.pause();
         activateSource(nextSource);
         const nextEl = sourceVideoMapRef.current.get(nextSource);
         if (nextEl) {
@@ -352,26 +282,23 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         currentTimeRef.current = nextEntry.timelineStart;
         setCurrentTime(nextEntry.timelineStart);
       } else {
-        // Same source, gap between clips — jump to next clip's source start
         videoRef.current.currentTime = nextEntry.sourceStart;
       }
       return;
     }
 
-    // Past all clips — end of timeline
     videoRef.current.pause();
     for (const el of sourceVideoMapRef.current.values()) el.pause();
-    for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) el.pause();
-    const lastEntry = sched[sched.length - 1];
+    const lastEntry = currentSchedule[currentSchedule.length - 1];
     if (lastEntry) {
-      const lastClip = curClips.find(c => c.id === lastEntry.clipId);
+      const lastClip = currentClips.find(clip => clip.id === lastEntry.clipId);
       const lastSource = lastClip?.sourceUrl ?? videoUrl;
       const lastEl = sourceVideoMapRef.current.get(lastSource);
       if (lastEl) lastEl.currentTime = lastEntry.sourceStart + lastEntry.sourceDuration - 0.001;
     }
     currentTimeRef.current = totalTimelineDuration;
     setCurrentTime(totalTimelineDuration);
-  }, [applyClipEffects, videoRef, videoUrl, setCurrentTime, syncExtraTracks, activateSource, totalTimelineDuration]);
+  }, [activateSource, applyClipEffects, setCurrentTime, totalTimelineDuration, videoRef, videoUrl]);
 
   useEffect(() => {
     const activeVideo = videoRef.current;
@@ -388,10 +315,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       if (!video.paused && !video.ended && !video.seeking && video.readyState >= 2) {
         handleTimeUpdate();
       }
-      schedule();
+      scheduleNext();
     };
 
-    const schedule = () => {
+    const scheduleNext = () => {
       const video = videoRef.current;
       if (!video || cancelled) return;
       if ('requestVideoFrameCallback' in video) {
@@ -403,7 +330,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       }
     };
 
-    schedule();
+    scheduleNext();
 
     return () => {
       cancelled = true;
@@ -417,23 +344,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   }, [activeSourceUrl, handleTimeUpdate, videoRef]);
 
   const seekToTimelineTime = useCallback((timelineTime: number) => {
-    const sched = buildClipSchedule(clipsRef.current);
-    const targetEntry = findTimelineEntryAtTime(sched, timelineTime);
+    const currentSchedule = buildClipSchedule(clipsRef.current);
+    const targetEntry = findTimelineEntryAtTime(currentSchedule, timelineTime);
     if (!targetEntry) return;
 
-    const clip = clipsRef.current.find(c => c.id === targetEntry.clipId);
+    const clip = clipsRef.current.find(entry => entry.id === targetEntry.clipId);
     const targetSourceUrl = clip?.sourceUrl ?? videoUrl;
     const activeEl = sourceVideoMapRef.current.get(targetSourceUrl);
     if (!activeEl) return;
+
     const previousActiveEl = videoRef.current;
     const switchingSource = previousActiveEl !== activeEl;
     const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
     const offsetInTimeline = timelineTime - targetEntry.timelineStart;
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
     const shouldApplySeek =
-      switchingSource ||
-      activeEl.seeking ||
-      Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
+      switchingSource
+      || activeEl.seeking
+      || Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
 
     if (switchingSource) {
       for (const el of sourceVideoMapRef.current.values()) {
@@ -450,19 +378,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setCurrentTime(timelineTime);
     }
     applyClipEffects(sourceTime);
-    syncExtraTracks(timelineTime, !wasPlaying);
     if (switchingSource && wasPlaying) activeEl.play().catch(() => {});
-
-    for (const track of extraTracksRef.current) {
-      const map = track.type === 'video' ? extraVideoRefs.current : extraAudioRefs.current;
-      const el = map.get(track.id);
-      if (!el) continue;
-      const activeClip = findActiveTrackClip(track.clips, timelineTime);
-      if (activeClip) {
-        el.currentTime = activeClip.sourceStart + (timelineTime - activeClip.timelineStart) * activeClip.speed;
-      }
-    }
-  }, [activateSource, applyClipEffects, setCurrentTime, syncExtraTracks, videoRef, videoUrl]);
+  }, [activateSource, applyClipEffects, setCurrentTime, videoRef, videoUrl]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;
@@ -482,14 +399,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         setupAudio();
         if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
         video.play().catch(() => {});
-        for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
-          if (el.src) el.play().catch(() => {});
-        }
       } else {
         for (const el of sourceVideoMapRef.current.values()) el.pause();
-        for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
-          el.pause();
-        }
       }
     },
   }), [seekToTimelineTime, setupAudio, videoRef]);
@@ -501,16 +412,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setupAudio();
       if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
       video.play().catch(() => {});
-      for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
-        if (el.src) el.play().catch(() => {});
-      }
     } else {
       for (const el of sourceVideoMapRef.current.values()) el.pause();
-      for (const el of [...extraVideoRefs.current.values(), ...extraAudioRefs.current.values()]) {
-        el.pause();
-      }
     }
-  }, [videoRef, setupAudio]);
+  }, [setupAudio, videoRef]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -531,7 +436,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             <video
               key={srcUrl}
               ref={el => {
-                if (!el) { sourceVideoMapRef.current.delete(srcUrl); return; }
+                if (!el) {
+                  sourceVideoMapRef.current.delete(srcUrl);
+                  return;
+                }
                 sourceVideoMapRef.current.set(srcUrl, el);
                 if (srcUrl === displaySourceUrl) {
                   activeSourceUrlRef.current = displaySourceUrl;
@@ -611,99 +519,55 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             </div>
           )}
 
-          {/* Extra video track overlays */}
-          {extraTracks.filter(t => t.type === 'video').map(track => {
-            const activeClip = findActiveTrackClip(track.clips, currentTime);
-            return (
-              <video
-                key={track.id + '-' + (activeClip?.id ?? 'empty')}
-                ref={el => {
-                  if (el) {
-                    extraVideoRefs.current.set(track.id, el);
-                    ensureExtraAudioRouted(track.id, el);
-                  } else {
-                    extraVideoRefs.current.delete(track.id);
-                    extraAudioNodes.current.delete(track.id);
-                  }
-                }}
-                src={activeClip?.sourceUrl ?? undefined}
-                style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%',
-                  objectFit: 'contain',
-                  display: activeClip ? 'block' : 'none',
-                  pointerEvents: 'none',
-                }}
-                muted={false}
-                playsInline
-                preload="auto"
-              />
-            );
-          })}
-
-          {/* Extra audio tracks (hidden video elements for audio mixing) */}
-          {extraTracks.filter(t => t.type === 'audio').map(track => {
-            const activeClip = findActiveTrackClip(track.clips, currentTime);
-            return (
-              <video
-                key={track.id + '-' + (activeClip?.id ?? 'empty')}
-                ref={el => {
-                  if (el) {
-                    extraAudioRefs.current.set(track.id, el);
-                    ensureExtraAudioRouted(track.id, el);
-                  } else {
-                    extraAudioRefs.current.delete(track.id);
-                    extraAudioNodes.current.delete(track.id);
-                  }
-                }}
-                src={activeClip?.sourceUrl ?? undefined}
-                style={{ display: 'none' }}
-                muted={false}
-                playsInline
-                preload="auto"
-              />
-            );
-          })}
-
-          {/* Overlays anchored to the actual video frame */}
           {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0) && (
-            <div style={{
-              position: 'absolute',
-              inset: 0,
-              pointerEvents: 'none',
-            }}>
+            <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
               {activeCaption && (
-                <div style={{
-                  position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-                  maxWidth: '85%', background: 'rgba(0,0,0,0.78)', color: '#fff',
-                  fontSize: 18, fontWeight: 700, lineHeight: 1.3, padding: '6px 14px',
-                  borderRadius: 5, textAlign: 'center',
-                  textShadow: '0 1px 3px rgba(0,0,0,0.5)',
-                }}>
+                <div
+                  style={{
+                    position: 'absolute',
+                    bottom: 24,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    maxWidth: '85%',
+                    background: 'rgba(0,0,0,0.78)',
+                    color: '#fff',
+                    fontSize: 18,
+                    fontWeight: 700,
+                    lineHeight: 1.3,
+                    padding: '6px 14px',
+                    borderRadius: 5,
+                    textAlign: 'center',
+                    textShadow: '0 1px 3px rgba(0,0,0,0.5)',
+                  }}
+                >
                   {activeCaption.text}
                 </div>
               )}
 
               {activeTextOverlays.map(overlay => (
-                <div key={overlay.id ?? overlay.text} style={{
-                  position: 'absolute',
-                  left: '50%',
-                  maxWidth: '90%',
-                  color: '#fff',
-                  fontSize: overlay.fontSize ?? 16,
-                  fontWeight: 700,
-                  lineHeight: 1.3,
-                  textAlign: 'center',
-                  textShadow: '0 2px 8px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9)',
-                  padding: '4px 12px',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  ...(overlay.position === 'top'
-                    ? { top: 20, transform: 'translateX(-50%)' }
-                    : overlay.position === 'bottom'
-                    ? { bottom: 60, transform: 'translateX(-50%)' }
-                    : { top: '50%', transform: 'translate(-50%, -50%)' }),
-                }}>
+                <div
+                  key={overlay.id ?? overlay.text}
+                  style={{
+                    position: 'absolute',
+                    left: '50%',
+                    maxWidth: '90%',
+                    color: '#fff',
+                    fontSize: overlay.fontSize ?? 16,
+                    fontWeight: 700,
+                    lineHeight: 1.3,
+                    textAlign: 'center',
+                    textShadow: '0 2px 8px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9)',
+                    padding: '4px 12px',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    ...(overlay.position === 'top'
+                      ? { top: 20, transform: 'translateX(-50%)' }
+                      : overlay.position === 'bottom'
+                        ? { bottom: 60, transform: 'translateX(-50%)' }
+                        : { top: '50%', transform: 'translate(-50%, -50%)' }),
+                  }}
+                >
                   {overlay.text}
                 </div>
               ))}

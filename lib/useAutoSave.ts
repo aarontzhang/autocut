@@ -41,7 +41,6 @@ export function useAutoSave() {
   const transitions = useEditorStore(s => s.transitions);
   const markers = useEditorStore(s => s.markers);
   const textOverlays = useEditorStore(s => s.textOverlays);
-  const extraTracks = useEditorStore(s => s.extraTracks);
   const messages = useEditorStore(s => s.messages);
   const appliedActions = useEditorStore(s => s.appliedActions);
   const aiSettings = useEditorStore(s => s.aiSettings);
@@ -87,10 +86,6 @@ export function useAutoSave() {
                 .filter(frame => frame.kind === 'overview' && !!frame.description?.trim())
                 .map(persistOverviewFrame)
             : null,
-          extraTracks: state.extraTracks.map(track => ({
-            ...track,
-            clips: track.clips.map(stripSourceUrl),
-          })),
           mediaLibrary: state.mediaLibrary
             .filter(item => item.sourcePath)
             .map(persistMediaLibraryItem),
@@ -113,5 +108,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, markers, textOverlays, extraTracks, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, mediaLibrary, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, mediaLibrary, setSaveStatus]);
 }

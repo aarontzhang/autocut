@@ -796,13 +796,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const sourceItem = clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null;
       return sourceItem?.url ? { ...clip, sourceUrl: sourceItem.url } : clip;
     });
-    const hydratedTracks = ((editState.extraTracks as MediaTrack[] | undefined) ?? []).map((track) => ({
-      ...track,
-      clips: track.clips.map((clip) => {
-        const sourceItem = clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null;
-        return sourceItem?.url ? { ...clip, sourceUrl: sourceItem.url } : clip;
-      }),
-    }));
     const mainLibraryItem = videoUrl
       ? [{
           id: uuidv4(),
@@ -826,7 +819,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
       previewSnapshot: null, previewOwnerId: null,
-      extraTracks: hydratedTracks,
+      extraTracks: [],
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
       appliedActions: (editState.appliedActions as AppliedActionRecord[] | undefined) ?? [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],

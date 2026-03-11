@@ -125,12 +125,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     state.clips.forEach((clip) => {
       if (clip.sourcePath) paths.add(clip.sourcePath);
     });
-    state.extraTracks.forEach((track) => {
-      track.clips.forEach((clip) => {
-        if (clip.sourcePath) paths.add(clip.sourcePath);
-      });
-    });
-
     if (paths.size === 0) return;
 
     const signedPaths = await createSignedUrls([...paths]);
@@ -154,14 +148,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
           : clip
       )),
-      extraTracks: currentState.extraTracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => (
-          clip.sourcePath && signedPaths.get(clip.sourcePath)
-            ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
-            : clip
-        )),
-      })),
     }));
   }, []);
 
@@ -171,11 +157,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
         e.preventDefault();
         if (e.shiftKey) redo(); else undo();
-        return;
-      }
-      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyB') {
-        e.preventDefault();
-        useEditorStore.getState().splitClipAtTime(useEditorStore.getState().currentTime);
         return;
       }
       if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
