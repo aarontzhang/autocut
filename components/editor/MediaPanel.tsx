@@ -48,7 +48,13 @@ export default function MediaPanel({
             background: 'var(--bg-elevated)',
           }}>
             <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', position: 'relative', overflow: 'hidden' }}>
-              <video src={item.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted />
+              <video
+                src={item.url}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                muted
+                preload="none"
+                playsInline
+              />
               {item.duration > 0 && (
                 <div style={{
                   position: 'absolute', bottom: 5, right: 6,

@@ -494,7 +494,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               onTimeUpdate={handleTimeUpdate}
               onClick={togglePlay}
               playsInline
-              preload="auto"
+              preload={srcUrl === displaySourceUrl ? 'auto' : 'none'}
               crossOrigin="anonymous"
             />
           ))}

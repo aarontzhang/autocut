@@ -247,6 +247,7 @@ interface EditorState {
       storagePath: string | null;
       videoFilename?: string | null;
       duration?: number;
+      signedUrls?: Record<string, string>;
     }
   ) => void;
   setUploadProgress: (pct: number | null) => void;
@@ -746,7 +747,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   loadProject: (editState, project) => {
-    const { videoUrl, storagePath, projectId, videoFilename, duration } = project;
+    const { videoUrl, storagePath, projectId, videoFilename, duration, signedUrls = {} } = project;
     const clips = (editState.clips as VideoClip[] | undefined) ?? [];
     const rawTranscriptCaptions = (editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null;
     const persistedMediaLibrary = Array.isArray(editState.mediaLibrary)
@@ -757,7 +758,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ))
           .map((item) => ({
             id: uuidv4(),
-            url: '',
+            url: typeof item.sourcePath === 'string' ? (signedUrls[item.sourcePath] ?? '') : '',
             name: item.name as string,
             duration: item.duration as number,
             sourcePath: typeof item.sourcePath === 'string' ? item.sourcePath : undefined,
@@ -799,7 +800,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const mainLibraryItem = videoUrl
       ? [{
           id: uuidv4(),
-          url: videoUrl,
+          url: storagePath ? (signedUrls[storagePath] ?? videoUrl) : videoUrl,
           name: videoFilename?.trim() || 'Main video',
           duration: duration ?? 0,
           ...(storagePath ? { sourcePath: storagePath } : {}),

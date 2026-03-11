@@ -234,9 +234,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           videoUrl: data.signedUrl ?? '',
           storagePath: data.video_path ?? null,
           videoFilename: data.video_filename ?? null,
+          signedUrls: data.signedUrls ?? {},
         });
+        lastSignedMediaRefreshAtRef.current = Date.now();
         setIsProjectLoading(false);
-        await refreshSignedMediaUrls(projectId);
       } catch (e) {
         console.error('Failed to load project', e);
       } finally {
