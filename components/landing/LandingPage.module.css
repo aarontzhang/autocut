@@ -1,8 +1,6 @@
 .page {
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top, rgba(33, 212, 255, 0.14), transparent 34%),
-    linear-gradient(180deg, #101010 0%, #111111 42%, #0c0c0c 100%);
+  background: var(--bg-base);
   color: var(--fg-primary);
 }
 
@@ -94,7 +92,7 @@
 .main {
   max-width: 1240px;
   margin: 0 auto;
-  padding: 32px 24px 96px;
+  padding: 0 24px 96px;
 }
 
 .snapSection {
@@ -105,9 +103,9 @@
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   gap: 36px;
-  align-items: center;
+  align-items: start;
   min-height: calc(100vh - 88px);
-  padding: 48px 0 72px;
+  padding: 0 0 72px;
 }
 
 .heroCopy h1,

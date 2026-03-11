@@ -17,6 +17,7 @@ const HEADER_W = 76;
 const RULER_H = 24;
 
 const SNAP_PX = 14; // pixels within which clips snap to each other's edges
+type TimelineTool = 'none' | 'cut' | 'marker';
 
 type DragInfo = {
   type: 'clip-move' | 'clip-trim-left' | 'clip-trim-right' | 'caption' | 'text' | 'transition' | 'track-clip-move' | 'track-clip-trim-left' | 'track-clip-trim-right';
@@ -99,6 +100,7 @@ export default function Timeline({
   // Snap indicator: pixel X position within the tracks content div, null when not snapping
   const [snapIndicatorX, setSnapIndicatorX] = useState<number | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [activeTool, setActiveTool] = useState<TimelineTool>('none');
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const currentTime = useEditorStore(s => s.currentTime);
@@ -122,12 +124,7 @@ export default function Timeline({
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const toggleTaggedMarker = useEditorStore(s => s.toggleTaggedMarker);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
-  const reorderClip = useEditorStore(s => s.reorderClip);
-  const trimClipWithHistory = useEditorStore(s => s.trimClipWithHistory);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
-  const updateMarker = useEditorStore(s => s.updateMarker);
-  const removeMarker = useEditorStore(s => s.removeMarker);
-  const deleteSelectedItem = useEditorStore(s => s.deleteSelectedItem);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const { user } = useAuth();
 
@@ -135,6 +132,24 @@ export default function Timeline({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
+      const key = e.key.toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && key === 'b') {
+        e.preventDefault();
+        splitClipAtTime(useEditorStore.getState().currentTime);
+        return;
+      }
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (key === 'b') {
+          e.preventDefault();
+          setActiveTool((value) => (value === 'cut' ? 'none' : 'cut'));
+          return;
+        }
+        if (key === 'm') {
+          e.preventDefault();
+          setActiveTool((value) => (value === 'marker' ? 'none' : 'marker'));
+          return;
+        }
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTrackClipId) {
         e.preventDefault();
         const store = useEditorStore.getState();
@@ -159,7 +174,7 @@ export default function Timeline({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedTrackClipId]);
+  }, [selectedTrackClipId, splitClipAtTime]);
 
   // Dynamic track height — shrinks as more tracks are added
   const totalMediaTracks = 2 + extraTracks.length; // main video + main audio + extras
@@ -195,26 +210,6 @@ export default function Timeline({
   const hasCaptions = captions.length > 0;
   const hasTextOverlays = textOverlays.length > 0;
   const hasTransitions = transitions.length > 0;
-  const selectedMarker = selectedItem?.type === 'marker'
-    ? markers.find((marker) => marker.id === selectedItem.id) ?? null
-    : null;
-  const selectedClipDetails = useMemo(() => {
-    if (!selectedItem || selectedItem.type !== 'clip') return null;
-    const clipIndex = clips.findIndex((clip) => clip.id === selectedItem.id);
-    if (clipIndex === -1) return null;
-    const clip = clips[clipIndex];
-    const entry = schedule.find((item) => item.clipId === clip.id) ?? null;
-    if (!entry) return null;
-    return { clip, entry, clipIndex };
-  }, [clips, schedule, selectedItem]);
-  const clipAtPlayhead = useMemo(
-    () => schedule.find((entry) => currentTime > entry.timelineStart && currentTime < entry.timelineEnd) ?? null,
-    [currentTime, schedule],
-  );
-  const canSplitAtPlayhead = clipAtPlayhead !== null;
-  const canTrimSelectedClipToPlayhead = selectedClipDetails !== null
-    && currentTime > selectedClipDetails.entry.timelineStart + 0.05
-    && currentTime < selectedClipDetails.entry.timelineEnd - 0.05;
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -270,13 +265,15 @@ export default function Timeline({
     return (t / totalTimelineDuration) * totalW;
   }, [totalTimelineDuration, totalW]);
 
-  const seek = useCallback((clientX: number, containerEl: HTMLDivElement) => {
-    if (panRef.current?.moved) return; // was a pan drag, not a click
-    if (clipDragJustEnded.current) { clipDragJustEnded.current = false; return; } // suppress seek after clip drag
+  const getTimelineTimeFromClientX = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     const rect = containerEl.getBoundingClientRect();
     const scrollLeft = containerEl.scrollLeft;
     const px = (clientX - rect.left - HEADER_W) + scrollLeft;
-    const t = Math.max(0, Math.min(contentDuration, (px / totalW) * totalTimelineDuration));
+    return Math.max(0, Math.min(contentDuration, (px / totalW) * totalTimelineDuration));
+  }, [contentDuration, totalTimelineDuration, totalW]);
+
+  const seekToTimelineTime = useCallback((timelineTime: number) => {
+    const t = Math.max(0, Math.min(contentDuration, timelineTime));
     playerRef?.current?.seekTo(t);
     if (!playerRef?.current) {
       setCurrentTime(t);
@@ -291,7 +288,29 @@ export default function Timeline({
       }
     }
     setSelectedItem(null);
-  }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, totalTimelineDuration, totalW, videoRef]);
+  }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, videoRef]);
+
+  const handleTimelineActionAtTime = useCallback((timelineTime: number) => {
+    seekToTimelineTime(timelineTime);
+    if (activeTool === 'cut') {
+      splitClipAtTime(timelineTime);
+      return;
+    }
+    if (activeTool === 'marker') {
+      createMarkerAtTime(timelineTime, { createdBy: 'human' });
+    }
+  }, [activeTool, createMarkerAtTime, seekToTimelineTime, splitClipAtTime]);
+
+  const seek = useCallback((clientX: number, containerEl: HTMLDivElement) => {
+    if (panRef.current?.moved) return; // was a pan drag, not a click
+    if (clipDragJustEnded.current) { clipDragJustEnded.current = false; return; } // suppress seek after clip drag
+    const t = getTimelineTimeFromClientX(clientX, containerEl);
+    if (activeTool === 'none') {
+      seekToTimelineTime(t);
+      return;
+    }
+    handleTimelineActionAtTime(t);
+  }, [activeTool, getTimelineTimeFromClientX, handleTimelineActionAtTime, seekToTimelineTime]);
 
   const scrubPlayhead = useCallback((clientX: number, dragInfo: PlayheadDragInfo) => {
     const el = scrollRef.current;
@@ -770,304 +789,95 @@ export default function Timeline({
     splitClipAtTime(useEditorStore.getState().currentTime);
   }, [splitClipAtTime]);
 
-  const moveSelectedClip = useCallback((direction: -1 | 1) => {
-    if (!selectedClipDetails) return;
-    reorderClip(selectedClipDetails.clip.id, selectedClipDetails.clipIndex + direction);
-  }, [reorderClip, selectedClipDetails]);
-
-  const trimSelectedClipStartToPlayhead = useCallback(() => {
-    if (!selectedClipDetails || !canTrimSelectedClipToPlayhead) return;
-    const timelineDelta = currentTime - selectedClipDetails.entry.timelineStart;
-    const sourceDelta = timelineDelta * selectedClipDetails.clip.speed;
-    const nextSourceStart = selectedClipDetails.clip.sourceStart + sourceDelta;
-    const nextSourceDuration = selectedClipDetails.clip.sourceDuration - sourceDelta;
-    if (nextSourceDuration < 0.05) return;
-    trimClipWithHistory(selectedClipDetails.clip.id, nextSourceStart, nextSourceDuration);
-    requestSeek(selectedClipDetails.entry.timelineStart);
-  }, [canTrimSelectedClipToPlayhead, currentTime, requestSeek, selectedClipDetails, trimClipWithHistory]);
-
-  const trimSelectedClipEndToPlayhead = useCallback(() => {
-    if (!selectedClipDetails || !canTrimSelectedClipToPlayhead) return;
-    const timelineDelta = currentTime - selectedClipDetails.entry.timelineStart;
-    const nextSourceDuration = timelineDelta * selectedClipDetails.clip.speed;
-    if (nextSourceDuration < 0.05) return;
-    trimClipWithHistory(selectedClipDetails.clip.id, selectedClipDetails.clip.sourceStart, nextSourceDuration);
-  }, [canTrimSelectedClipToPlayhead, currentTime, selectedClipDetails, trimClipWithHistory]);
-
   const px = (t: number) => tPx(t);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
       {/* Toolbar */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '0 12px', height: 34,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        flexWrap: 'wrap',
+        padding: '8px 12px',
         borderBottom: '1px solid var(--border)',
         background: 'var(--bg-panel)',
         flexShrink: 0,
+        minHeight: 50,
       }}>
-        <span style={{
-          fontSize: 10, color: 'var(--fg-muted)',
-          fontFamily: 'var(--font-serif)',
-          letterSpacing: '0.06em', textTransform: 'uppercase',
-        }}>
-          Timeline
-        </span>
-
-        {clips.length > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
           <span style={{
-            fontSize: 10, padding: '1px 7px', borderRadius: 3,
-            background: 'rgba(33,212,255,0.12)',
-            border: '1px solid rgba(33,212,255,0.26)',
-            color: 'rgba(184,243,255,0.92)',
+            fontSize: 10, color: 'var(--fg-muted)',
             fontFamily: 'var(--font-serif)',
+            letterSpacing: '0.06em', textTransform: 'uppercase',
           }}>
-            {clips.length} clips
+            Timeline
           </span>
-        )}
-
-        <button
-          onClick={() => splitClipAtTime(currentTime)}
-          disabled={!canSplitAtPlayhead}
-          title="Split the clip under the playhead"
-          style={{
-            height: 22,
-            padding: '0 9px',
-            borderRadius: 999,
-            border: `1px solid ${canSplitAtPlayhead ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
-            background: canSplitAtPlayhead ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
-            color: canSplitAtPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
-            cursor: canSplitAtPlayhead ? 'pointer' : 'not-allowed',
-            fontSize: 10,
-            fontFamily: 'var(--font-serif)',
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase',
-          }}
-        >
-          Cut at playhead
-        </button>
-
-        {selectedClipDetails && (
-          <>
+          {clips.length > 1 && (
             <span style={{
-              fontSize: 10,
-              padding: '1px 7px',
-              borderRadius: 999,
-              background: 'rgba(96,165,250,0.12)',
-              border: '1px solid rgba(96,165,250,0.24)',
-              color: 'rgba(191,219,254,0.95)',
+              fontSize: 10, padding: '3px 8px', borderRadius: 999,
+              background: 'rgba(33,212,255,0.1)',
+              border: '1px solid rgba(33,212,255,0.22)',
+              color: 'rgba(184,243,255,0.92)',
               fontFamily: 'var(--font-serif)',
             }}>
-              Clip {selectedClipDetails.clipIndex + 1}
+              {clips.length} clips
             </span>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <TimelineToolButton
+              label="Cut tool"
+              shortcut="B / ⌘B"
+              active={activeTool === 'cut'}
+              onClick={() => setActiveTool((value) => (value === 'cut' ? 'none' : 'cut'))}
+              icon={<CutToolIcon />}
+            />
+            <TimelineToolButton
+              label="Marker tool"
+              shortcut="M"
+              active={activeTool === 'marker'}
+              onClick={() => setActiveTool((value) => (value === 'marker' ? 'none' : 'marker'))}
+              icon={<MarkerToolIcon />}
+            />
+          </div>
+        </div>
 
-            <button
-              onClick={() => moveSelectedClip(-1)}
-              disabled={selectedClipDetails.clipIndex === 0}
-              title="Move the selected clip earlier in the timeline"
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent',
-                color: selectedClipDetails.clipIndex === 0 ? 'var(--fg-muted)' : 'var(--fg-secondary)',
-                cursor: selectedClipDetails.clipIndex === 0 ? 'not-allowed' : 'pointer',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Move left
-            </button>
-
-            <button
-              onClick={() => moveSelectedClip(1)}
-              disabled={selectedClipDetails.clipIndex === clips.length - 1}
-              title="Move the selected clip later in the timeline"
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent',
-                color: selectedClipDetails.clipIndex === clips.length - 1 ? 'var(--fg-muted)' : 'var(--fg-secondary)',
-                cursor: selectedClipDetails.clipIndex === clips.length - 1 ? 'not-allowed' : 'pointer',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Move right
-            </button>
-
-            <button
-              onClick={trimSelectedClipStartToPlayhead}
-              disabled={!canTrimSelectedClipToPlayhead}
-              title="Trim the selected clip so it starts at the playhead"
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent',
-                color: canTrimSelectedClipToPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
-                cursor: canTrimSelectedClipToPlayhead ? 'pointer' : 'not-allowed',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Trim in
-            </button>
-
-            <button
-              onClick={trimSelectedClipEndToPlayhead}
-              disabled={!canTrimSelectedClipToPlayhead}
-              title="Trim the selected clip so it ends at the playhead"
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent',
-                color: canTrimSelectedClipToPlayhead ? 'var(--fg-secondary)' : 'var(--fg-muted)',
-                cursor: canTrimSelectedClipToPlayhead ? 'pointer' : 'not-allowed',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Trim out
-            </button>
-
-            <button
-              onClick={deleteSelectedItem}
-              title="Delete the selected clip"
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(248,113,113,0.2)',
-                background: 'rgba(248,113,113,0.08)',
-                color: '#fca5a5',
-                cursor: 'pointer',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Delete
-            </button>
-          </>
-        )}
-
-        <button
-          onClick={() => {
-            createMarkerAtTime(currentTime, {
-              createdBy: 'human',
-            });
-          }}
-          style={{
-            height: 22,
-            padding: '0 9px',
-            borderRadius: 999,
-            border: '1px solid rgba(255,255,255,0.12)',
-            background: 'rgba(255,255,255,0.04)',
-            color: 'var(--fg-secondary)',
-            cursor: 'pointer',
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginLeft: 'auto' }}>
+          <span style={{
             fontSize: 10,
+            color: activeTool === 'cut' ? 'var(--accent-strong)' : activeTool === 'marker' ? '#fde68a' : 'var(--fg-muted)',
             fontFamily: 'var(--font-serif)',
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase',
-          }}
-        >
-          Add marker
-        </button>
+            whiteSpace: 'nowrap',
+          }}>
+            {activeTool === 'cut'
+              ? 'Cut mode: click the timeline to split'
+              : activeTool === 'marker'
+                ? 'Marker mode: click the timeline to drop a marker'
+                : '⌘B splits at the playhead'}
+          </span>
 
-        {selectedMarker && (
-          <>
-            <span style={{
-              fontSize: 10,
-              padding: '1px 7px',
+          <button
+            onClick={() => setSnapEnabled(v => !v)}
+            style={{
+              height: 28,
+              padding: '0 11px',
               borderRadius: 999,
-              background: 'rgba(250,204,21,0.12)',
-              border: '1px solid rgba(250,204,21,0.24)',
-              color: '#fde68a',
+              border: `1px solid ${snapEnabled ? 'var(--accent-border)' : 'var(--border)'}`,
+              background: snapEnabled ? 'rgba(33,212,255,0.18)' : 'transparent',
+              color: snapEnabled ? 'var(--accent-strong)' : 'var(--fg-secondary)',
+              cursor: 'pointer',
+              fontSize: 10,
               fontFamily: 'var(--font-serif)',
-            }}>
-              Marker {selectedMarker.number}
-            </span>
-            <button
-              onClick={() => {
-                const label = window.prompt('Rename marker', selectedMarker.label ?? '')?.trim();
-                if (label === undefined) return;
-                updateMarker(selectedMarker.id, { label: label || undefined });
-              }}
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'transparent',
-                color: 'var(--fg-secondary)',
-                cursor: 'pointer',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Rename
-            </button>
-            <button
-              onClick={() => removeMarker(selectedMarker.id)}
-              style={{
-                height: 22,
-                padding: '0 8px',
-                borderRadius: 999,
-                border: '1px solid rgba(248,113,113,0.2)',
-                background: 'rgba(248,113,113,0.08)',
-                color: '#fca5a5',
-                cursor: 'pointer',
-                fontSize: 10,
-                fontFamily: 'var(--font-serif)',
-              }}
-            >
-              Delete
-            </button>
-          </>
-        )}
+              letterSpacing: '0.05em',
+              textTransform: 'uppercase',
+            }}
+          >
+            {snapEnabled ? 'Snapping On' : 'Snapping Off'}
+          </button>
 
-        <div style={{ flex: 1 }} />
-
-        <span style={{
-          fontSize: 10,
-          color: 'var(--fg-muted)',
-          fontFamily: 'var(--font-serif)',
-          whiteSpace: 'nowrap',
-        }}>
-          Drag clips to reorder, drag edges to trim, press S to cut
-        </span>
-
-        <button
-          onClick={() => setSnapEnabled(v => !v)}
-          style={{
-            height: 22,
-            padding: '0 9px',
-            borderRadius: 999,
-            border: `1px solid ${snapEnabled ? 'var(--accent-border)' : 'var(--border)'}`,
-            background: snapEnabled ? 'rgba(33,212,255,0.18)' : 'transparent',
-            color: snapEnabled ? 'var(--accent-strong)' : 'var(--fg-secondary)',
-            cursor: 'pointer',
-            fontSize: 10,
-            fontFamily: 'var(--font-serif)',
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase',
-          }}
-        >
-          {snapEnabled ? 'Snapping On' : 'Free Move'}
-        </button>
-
-        {/* Zoom controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => setZoom(Math.round(zoom / 1.25 * 100) / 100)}
             style={{
-              width: 22, height: 22, borderRadius: 4, background: 'transparent',
+              width: 28, height: 28, borderRadius: 8, background: 'transparent',
               border: '1px solid var(--border)', cursor: 'pointer',
               color: 'var(--fg-muted)', fontSize: 14, lineHeight: 1,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1079,12 +889,13 @@ export default function Timeline({
           <button
             onClick={() => setZoom(Math.round(zoom * 1.25 * 10) / 10)}
             style={{
-              width: 22, height: 22, borderRadius: 4, background: 'transparent',
+              width: 28, height: 28, borderRadius: 8, background: 'transparent',
               border: '1px solid var(--border)', cursor: 'pointer',
               color: 'var(--fg-muted)', fontSize: 14, lineHeight: 1,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >+</button>
+          </div>
         </div>
       </div>
 
@@ -1094,6 +905,7 @@ export default function Timeline({
         style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', display: 'flex', flexDirection: 'row', cursor: 'grab', position: 'relative' }}
         className="no-select"
         onMouseDown={e => {
+          if (activeTool !== 'none') return;
           // Don't start a pan if clicking on a clip/effect block or playhead dot
           if ((e.target as HTMLElement).closest('.clip-block, .clip-caption, .clip-textoverlay, .clip-audio, .playhead-dot')) return;
           panRef.current = { startX: e.clientX, startScrollLeft: scrollRef.current?.scrollLeft ?? 0, moved: false };
@@ -1172,7 +984,7 @@ export default function Timeline({
               height: RULER_H, position: 'relative',
               background: 'var(--bg-elevated)',
               borderBottom: '1px solid var(--border)',
-              cursor: 'pointer', overflow: 'hidden',
+              cursor: activeTool === 'none' ? 'pointer' : 'crosshair', overflow: 'hidden',
             }}
             onClick={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }}
           >
@@ -1244,7 +1056,7 @@ export default function Timeline({
           </div>
 
           {/* Video track — clip blocks */}
-          <TrackRow height={TRACK_HEIGHT} onSeek={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }} onContextMenu={handleVideoTrackContextMenu}>
+          <TrackRow height={TRACK_HEIGHT} tool={activeTool} onSeek={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }} onContextMenu={handleVideoTrackContextMenu}>
             {videoDuration > 0 && schedule.map((entry, i) => {
               const clip = clips.find(c => c.id === entry.clipId);
               if (!clip) return null;
@@ -1259,10 +1071,18 @@ export default function Timeline({
                   height={TRACK_HEIGHT}
                   isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
                   index={i}
-                  onSelect={e => { e.stopPropagation(); setSelectedItem({ type: 'clip', id: clip.id }); }}
-                  onMouseDown={e => startClipMove(e, clip.id)}
-                  onTrimLeftStart={e => startClipTrimLeft(e, clip.id)}
-                  onTrimRightStart={e => startClipTrimRight(e, clip.id)}
+                  onSelect={e => {
+                    e.stopPropagation();
+                    if (activeTool !== 'none') {
+                      const c = scrollRef.current;
+                      if (c) seek(e.clientX, c);
+                      return;
+                    }
+                    setSelectedItem({ type: 'clip', id: clip.id });
+                  }}
+                  onMouseDown={e => { if (activeTool !== 'none') { e.preventDefault(); return; } startClipMove(e, clip.id); }}
+                  onTrimLeftStart={e => { if (activeTool !== 'none') return; startClipTrimLeft(e, clip.id); }}
+                  onTrimRightStart={e => { if (activeTool !== 'none') return; startClipTrimRight(e, clip.id); }}
                 />
               );
             })}
@@ -1286,7 +1106,7 @@ export default function Timeline({
           ))}
 
           {/* Audio track */}
-          <TrackRow height={TRACK_HEIGHT} onSeek={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }}>
+          <TrackRow height={TRACK_HEIGHT} tool={activeTool} onSeek={e => { const c = scrollRef.current; if (c) seek(e.clientX, c); }}>
             {videoDuration > 0 && schedule.map((entry) => {
               const clip = clips.find(c => c.id === entry.clipId);
               if (!clip) return null;
@@ -1317,7 +1137,15 @@ export default function Timeline({
                     boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
                     opacity: isClipSelected ? 1 : 0.92,
                   }}
-                  onClick={e => { e.stopPropagation(); setSelectedItem({ type: 'clip', id: clip.id }); }}
+                  onClick={e => {
+                    e.stopPropagation();
+                    if (activeTool !== 'none') {
+                      const c = scrollRef.current;
+                      if (c) seek(e.clientX, c);
+                      return;
+                    }
+                    setSelectedItem({ type: 'clip', id: clip.id });
+                  }}
                 >
                   <div style={{
                     position: 'absolute', inset: 0,
@@ -1468,10 +1296,11 @@ export default function Timeline({
 
 // ─── Sub-components ─────────────────────────────────────────────────────────
 
-function TrackRow({ height, onSeek, onContextMenu, children }: {
+function TrackRow({ height, onSeek, onContextMenu, tool, children }: {
   height: number;
   onSeek: (e: React.MouseEvent) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
+  tool?: TimelineTool;
   children: React.ReactNode;
 }) {
   return (
@@ -1480,7 +1309,7 @@ function TrackRow({ height, onSeek, onContextMenu, children }: {
         height, position: 'relative',
         background: 'rgba(255,255,255,0.015)',
         borderBottom: '1px solid var(--border)',
-        cursor: 'pointer', overflow: 'hidden',
+        cursor: tool === 'none' ? 'pointer' : 'crosshair', overflow: 'hidden',
       }}
       onClick={onSeek}
       onContextMenu={onContextMenu}
@@ -1633,6 +1462,63 @@ function TrackHeader({ icon, label, height, color, onRemove }: {
         </button>
       )}
     </div>
+  );
+}
+
+function TimelineToolButton({
+  label,
+  shortcut,
+  active,
+  onClick,
+  icon,
+}: {
+  label: string;
+  shortcut: string;
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={`${label} (${shortcut})`}
+      style={{
+        width: 32,
+        height: 32,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 10,
+        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border)'}`,
+        background: active ? 'rgba(33,212,255,0.16)' : 'rgba(255,255,255,0.03)',
+        color: active ? 'var(--accent-strong)' : 'var(--fg-secondary)',
+        cursor: 'pointer',
+        boxShadow: active ? 'inset 0 0 0 1px rgba(255,255,255,0.05)' : 'none',
+      }}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function CutToolIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 4l7.2 7.2" />
+      <path d="M4 20l7.2-7.2" />
+      <path d="M13 12h7" />
+      <circle cx="5" cy="5" r="2.25" />
+      <circle cx="5" cy="19" r="2.25" />
+    </svg>
+  );
+}
+
+function MarkerToolIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v18" />
+      <path d="M12 5h6l-2.4 3L18 11h-6" />
+    </svg>
   );
 }
 
