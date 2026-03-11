@@ -571,7 +571,7 @@ export default function Timeline({
               whiteSpace: 'nowrap',
             }}
           >
-            C cuts at the playhead. M adds a marker. Clicks only move the playhead.
+            C to cut at the playhead. M to add a marker.
           </span>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

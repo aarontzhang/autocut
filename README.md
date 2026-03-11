@@ -41,6 +41,10 @@ Optional tuning:
 - `ANALYSIS_WORKER_ID`
 - `ANALYSIS_WORKER_POLL_MS`
 - `ANALYSIS_WORKER_CONCURRENCY`
+- `ANALYSIS_INDEX_SEGMENT_CONCURRENCY`
+- `ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY`
+- `ANALYSIS_VERIFY_FRAME_CONCURRENCY`
+- `ANALYSIS_INDEX_SHARD_SECONDS`
 - `BETA_MAX_CHAT_REQUESTS_PER_DAY`
 - `BETA_MAX_TRANSCRIBE_SECONDS_PER_DAY`
 - `BETA_MAX_FRAME_DESCRIPTIONS_PER_DAY`
@@ -82,8 +86,11 @@ Deploy a separate always-on worker service from `Dockerfile.worker`.
 
 - Start command: `npm run worker:analysis`
 - Required system dependency: `ffmpeg` and `ffprobe` are installed in the image
-- The worker now processes multiple queued jobs per process. Tune `ANALYSIS_WORKER_CONCURRENCY` to match available CPU and memory.
-- Recommended starting point: `ANALYSIS_WORKER_CONCURRENCY=2` on a small instance, then increase if FFmpeg and API throughput stay healthy.
+- The worker now auto-sizes its process slot count from host CPU capacity when `ANALYSIS_WORKER_CONCURRENCY` is unset.
+- Each indexing job also fans out internally:
+  frame extraction is sharded across `ANALYSIS_INDEX_SEGMENT_CONCURRENCY` FFmpeg workers and frame-description batches are sent with `ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY`.
+- `ANALYSIS_INDEX_SHARD_SECONDS` controls how much video each FFmpeg shard handles before the next shard is launched.
+- Recommended starting point on a small instance: `ANALYSIS_WORKER_CONCURRENCY=2`, `ANALYSIS_INDEX_SEGMENT_CONCURRENCY=2`, `ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY=2`.
 
 Any container host that supports long-running Node processes works here.
 

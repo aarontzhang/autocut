@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import os from 'node:os';
 import process from 'node:process';
 import { createClient } from '@supabase/supabase-js';
 import { indexAssetFromStorage, verifyCandidatesAgainstQuery } from '../lib/server/visionIndexing.mjs';
@@ -18,12 +19,14 @@ const supabase = createClient(url, serviceRoleKey, {
 
 const WORKER_ID = process.env.ANALYSIS_WORKER_ID ?? `worker-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.ANALYSIS_WORKER_POLL_MS ?? 3000);
+const HOST_PARALLELISM = typeof os.availableParallelism === 'function' ? os.availableParallelism() : Math.max(os.cpus().length, 1);
+const DEFAULT_WORKER_CONCURRENCY = Math.min(8, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
 const WORKER_CONCURRENCY = normalizeWorkerConcurrency(process.env.ANALYSIS_WORKER_CONCURRENCY);
 
 function normalizeWorkerConcurrency(value) {
-  if (!value) return 2;
+  if (!value) return DEFAULT_WORKER_CONCURRENCY;
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 2;
+  if (!Number.isFinite(parsed)) return DEFAULT_WORKER_CONCURRENCY;
   return Math.min(8, Math.max(1, Math.floor(parsed)));
 }
 
@@ -42,7 +45,7 @@ async function leaseNextJob(lockerId) {
     .eq('status', 'queued')
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(Math.max(1, WORKER_CONCURRENCY * 2));
+    .limit(Math.max(1, WORKER_CONCURRENCY * 3));
 
   if (error) throw error;
   if (!jobs?.length) return null;
