@@ -690,13 +690,12 @@ export default function LandingPage() {
       {/* ── Footer ───────────────────────────────────────────── */}
       <footer className="lp-footer" style={{
         borderTop: '1px solid rgba(255,255,255,0.06)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        display: 'flex', alignItems: 'center',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <AutocutMark size={20} withTile />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.35)' }}>Autocut</span>
         </div>
-        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.2)' }}>© 2025 Autocut</span>
       </footer>
     </div>
   );

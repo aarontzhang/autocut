@@ -51,8 +51,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [sourceDimensions, setSourceDimensions] = useState<Record<string, { width: number; height: number }>>({});
   const [sourceReadyState, setSourceReadyState] = useState<Record<string, boolean>>({});
   const [activeSourceUrl, setActiveSourceUrl] = useState('');
-  const [warmedSourceSetKey, setWarmedSourceSetKey] = useState('');
-  const warmInactiveSourcesTimeoutRef = useRef<number | null>(null);
 
   const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
@@ -183,34 +181,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     () => fitVideoFrame(containerSize, activeDimensions),
     [activeDimensions, containerSize],
   );
-  const sourceSetKey = useMemo(() => uniqueSourceUrls.join('|'), [uniqueSourceUrls]);
-  const shouldWarmInactiveSources = warmedSourceSetKey === sourceSetKey;
-
-  useEffect(() => {
-    if (warmInactiveSourcesTimeoutRef.current !== null) {
-      window.clearTimeout(warmInactiveSourcesTimeoutRef.current);
-      warmInactiveSourcesTimeoutRef.current = null;
-    }
-  }, [sourceSetKey]);
-
-  const scheduleInactiveSourceWarmup = useCallback(() => {
-    if (shouldWarmInactiveSources) return;
-    if (warmInactiveSourcesTimeoutRef.current !== null) {
-      window.clearTimeout(warmInactiveSourcesTimeoutRef.current);
-    }
-    warmInactiveSourcesTimeoutRef.current = window.setTimeout(() => {
-      setWarmedSourceSetKey(sourceSetKey);
-      warmInactiveSourcesTimeoutRef.current = null;
-    }, 600);
-  }, [shouldWarmInactiveSources, sourceSetKey]);
-
-  useEffect(() => (
-    () => {
-      if (warmInactiveSourcesTimeoutRef.current !== null) {
-        window.clearTimeout(warmInactiveSourcesTimeoutRef.current);
-      }
-    }
-  ), []);
 
   useEffect(() => {
     const activeEl = displaySourceUrl ? sourceVideoMapRef.current.get(displaySourceUrl) : null;
@@ -513,16 +483,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               onLoadedData={e => {
                 const isReady = (e.currentTarget as HTMLVideoElement).readyState >= 2;
                 setSourceReadyState(prev => (prev[srcUrl] === isReady ? prev : { ...prev, [srcUrl]: isReady }));
-                if (isReady && srcUrl === displaySourceUrl) {
-                  scheduleInactiveSourceWarmup();
-                }
               }}
               onCanPlay={e => {
                 const isReady = (e.currentTarget as HTMLVideoElement).readyState >= 2;
                 setSourceReadyState(prev => (prev[srcUrl] === isReady ? prev : { ...prev, [srcUrl]: isReady }));
-                if (isReady && srcUrl === displaySourceUrl) {
-                  scheduleInactiveSourceWarmup();
-                }
               }}
               onLoadStart={() => {
                 setSourceReadyState(prev => (prev[srcUrl] === false ? prev : { ...prev, [srcUrl]: false }));
@@ -530,7 +494,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               onTimeUpdate={handleTimeUpdate}
               onClick={togglePlay}
               playsInline
-              preload={srcUrl === displaySourceUrl || shouldWarmInactiveSources ? 'auto' : 'none'}
+              preload="auto"
               crossOrigin="anonymous"
             />
           ))}

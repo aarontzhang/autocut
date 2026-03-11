@@ -17,11 +17,18 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+const BLOB_URL_PREFIX = 'blob:';
+
+function isBlobUrl(url: string | undefined | null) {
+  return Boolean(url && url.startsWith(BLOB_URL_PREFIX));
+}
 
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
   const lastSignedMediaRefreshAtRef = useRef(0);
+  const cachedMediaUrlsRef = useRef<Map<string, string>>(new Map());
+  const projectLoadSequenceRef = useRef(0);
 
   // Resizable panel sizes
   const [chatWidth, setChatWidth] = useState(340);
@@ -116,6 +123,81 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     setStorageNotice(message);
   }, []);
 
+  const releaseCachedMediaUrls = useCallback(() => {
+    cachedMediaUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    cachedMediaUrlsRef.current.clear();
+  }, []);
+
+  const applyCachedMediaUrl = useCallback((targetProjectId: string, sourcePath: string, objectUrl: string) => {
+    useEditorStore.setState((currentState) => {
+      if (currentState.currentProjectId !== targetProjectId) return currentState;
+
+      const nextVideoUrl = currentState.storagePath === sourcePath ? objectUrl : currentState.videoUrl;
+      let mediaLibraryChanged = false;
+      const nextMediaLibrary = currentState.mediaLibrary.map((item) => {
+        if (item.sourcePath !== sourcePath || item.url === objectUrl) return item;
+        mediaLibraryChanged = true;
+        return { ...item, url: objectUrl };
+      });
+      let clipsChanged = false;
+      const nextClips = currentState.clips.map((clip) => {
+        if (clip.sourcePath !== sourcePath || clip.sourceUrl === objectUrl) return clip;
+        clipsChanged = true;
+        return { ...clip, sourceUrl: objectUrl };
+      });
+
+      if (nextVideoUrl === currentState.videoUrl && !mediaLibraryChanged && !clipsChanged) {
+        return currentState;
+      }
+
+      return {
+        videoUrl: nextVideoUrl,
+        mediaLibrary: nextMediaLibrary,
+        clips: nextClips,
+      };
+    });
+  }, []);
+
+  const cacheProjectMediaLocally = useCallback(async (targetProjectId: string) => {
+    const state = useEditorStore.getState();
+    if (state.currentProjectId !== targetProjectId) return;
+
+    const entriesByPath = new Map<string, string>();
+    if (state.storagePath && state.videoUrl && !isBlobUrl(state.videoUrl)) {
+      entriesByPath.set(state.storagePath, state.videoUrl);
+    }
+    state.mediaLibrary.forEach((item) => {
+      if (item.sourcePath && item.url && !isBlobUrl(item.url) && !entriesByPath.has(item.sourcePath)) {
+        entriesByPath.set(item.sourcePath, item.url);
+      }
+    });
+    state.clips.forEach((clip) => {
+      if (clip.sourcePath && clip.sourceUrl && !isBlobUrl(clip.sourceUrl) && !entriesByPath.has(clip.sourcePath)) {
+        entriesByPath.set(clip.sourcePath, clip.sourceUrl);
+      }
+    });
+
+    for (const [sourcePath, sourceUrl] of entriesByPath) {
+      if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
+      if (cachedMediaUrlsRef.current.has(sourcePath)) {
+        applyCachedMediaUrl(targetProjectId, sourcePath, cachedMediaUrlsRef.current.get(sourcePath)!);
+        continue;
+      }
+
+      try {
+        const response = await fetch(sourceUrl);
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
+        const objectUrl = URL.createObjectURL(blob);
+        cachedMediaUrlsRef.current.set(sourcePath, objectUrl);
+        applyCachedMediaUrl(targetProjectId, sourcePath, objectUrl);
+      } catch (error) {
+        console.warn('Failed to cache media locally:', error);
+      }
+    }
+  }, [applyCachedMediaUrl]);
+
   const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
     const state = useEditorStore.getState();
     if (state.currentProjectId !== targetProjectId) return;
@@ -134,10 +216,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     if (signedPaths.size === 0 || useEditorStore.getState().currentProjectId !== targetProjectId) return;
 
     useEditorStore.setState((currentState) => ({
-      videoUrl: currentState.storagePath && signedPaths.get(currentState.storagePath)
-        ? signedPaths.get(currentState.storagePath)!
-        : currentState.videoUrl,
+      videoUrl: isBlobUrl(currentState.videoUrl)
+        ? currentState.videoUrl
+        : (
+          currentState.storagePath && signedPaths.get(currentState.storagePath)
+            ? signedPaths.get(currentState.storagePath)!
+            : currentState.videoUrl
+        ),
       mediaLibrary: currentState.mediaLibrary.map((item, index) => {
+        if (isBlobUrl(item.url)) return item;
         if (item.sourcePath && signedPaths.get(item.sourcePath)) {
           return { ...item, url: signedPaths.get(item.sourcePath)! };
         }
@@ -147,7 +234,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         return item;
       }),
       clips: currentState.clips.map((clip) => (
-        clip.sourcePath && signedPaths.get(clip.sourcePath)
+        clip.sourcePath && signedPaths.get(clip.sourcePath) && !isBlobUrl(clip.sourceUrl)
           ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
           : clip
       )),
@@ -221,7 +308,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     if (useEditorStore.getState().currentProjectId !== projectId) {
       resetEditor();
     }
+    releaseCachedMediaUrls();
     lastSignedMediaRefreshAtRef.current = 0;
+    const loadSequence = projectLoadSequenceRef.current + 1;
+    projectLoadSequenceRef.current = loadSequence;
     (async () => {
       setIsProjectLoading(true);
       try {
@@ -236,15 +326,24 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           videoFilename: data.video_filename ?? null,
           signedUrls: data.signedUrls ?? {},
         });
+        await cacheProjectMediaLocally(projectId);
+        if (projectLoadSequenceRef.current !== loadSequence) return;
         lastSignedMediaRefreshAtRef.current = Date.now();
-        setIsProjectLoading(false);
       } catch (e) {
         console.error('Failed to load project', e);
       } finally {
-        setIsProjectLoading(false);
+        if (projectLoadSequenceRef.current === loadSequence) {
+          setIsProjectLoading(false);
+        }
       }
     })();
-  }, [loadProject, projectId, refreshSignedMediaUrls, resetEditor]);
+  }, [cacheProjectMediaLocally, loadProject, projectId, refreshSignedMediaUrls, releaseCachedMediaUrls, resetEditor]);
+
+  useEffect(() => (
+    () => {
+      releaseCachedMediaUrls();
+    }
+  ), [releaseCachedMediaUrls]);
 
   useEffect(() => {
     if (!projectId) return;
