@@ -15,7 +15,42 @@ export async function POST(req: NextRequest) {
   const candidateIds = Array.isArray(body?.candidateIds)
     ? body.candidateIds.filter((value: unknown): value is string => typeof value === 'string')
     : [];
-  const candidateWindows = Array.isArray(body?.candidateWindows) ? body.candidateWindows : [];
+  const candidateWindows = Array.isArray(body?.candidateWindows)
+    ? body.candidateWindows
+        .slice(0, 12)
+        .flatMap((window: unknown) => {
+          if (!window || typeof window !== 'object') return [];
+          const candidate = window as {
+            id?: unknown;
+            sourceStart?: unknown;
+            sourceEnd?: unknown;
+            retrievalScore?: unknown;
+            retrievalReasons?: unknown;
+          };
+          if (
+            typeof candidate.id !== 'string' ||
+            typeof candidate.sourceStart !== 'number' ||
+            typeof candidate.sourceEnd !== 'number' ||
+            !Number.isFinite(candidate.sourceStart) ||
+            !Number.isFinite(candidate.sourceEnd) ||
+            candidate.sourceEnd <= candidate.sourceStart
+          ) {
+            return [];
+          }
+
+          return [{
+            id: candidate.id,
+            sourceStart: candidate.sourceStart,
+            sourceEnd: candidate.sourceEnd,
+            retrievalScore: typeof candidate.retrievalScore === 'number' && Number.isFinite(candidate.retrievalScore)
+              ? candidate.retrievalScore
+              : 0,
+            retrievalReasons: Array.isArray(candidate.retrievalReasons)
+              ? candidate.retrievalReasons.filter((reason): reason is string => typeof reason === 'string').slice(0, 6)
+              : [],
+          }];
+        })
+    : [];
 
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
@@ -35,7 +70,13 @@ export async function POST(req: NextRequest) {
   }
 
   const resolvedAsset = assetId
-    ? { id: assetId }
+    ? await supabase
+        .from('media_assets')
+        .select('id')
+        .eq('id', assetId)
+        .eq('project_id', projectId)
+        .maybeSingle()
+        .then(({ data }) => data)
     : await getPrimaryMediaAsset(supabase, projectId);
 
   if (!resolvedAsset) return NextResponse.json({ error: 'No indexed asset found for this project' }, { status: 404 });

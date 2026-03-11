@@ -1836,6 +1836,7 @@ export default function ChatSidebar() {
             linkedRange: marker.linkedRange ?? null,
             note: marker.note ?? null,
           })),
+          textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
