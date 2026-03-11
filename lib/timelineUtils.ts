@@ -1,4 +1,4 @@
-import { VideoClip, CaptionEntry, EditAction } from './types';
+import { VideoClip, CaptionEntry, EditAction, SilenceCandidate } from './types';
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
@@ -319,6 +319,128 @@ export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionE
   }
 
   return lines.join('\n');
+}
+
+type TimelineSpeechSegment = {
+  startTime: number;
+  endTime: number;
+};
+
+function getTimelineDuration(clips: VideoClip[]): number {
+  return clips.reduce((total, clip) => total + clip.sourceDuration / clip.speed, 0);
+}
+
+function mergeTimelineSpeechSegments(segments: TimelineSpeechSegment[]): TimelineSpeechSegment[] {
+  if (segments.length === 0) return [];
+
+  const sorted = [...segments]
+    .filter((segment) => segment.endTime > segment.startTime)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+
+  if (sorted.length === 0) return [];
+
+  const merged = [{ ...sorted[0] }];
+  for (const segment of sorted.slice(1)) {
+    const current = merged[merged.length - 1];
+    if (segment.startTime <= current.endTime + 0.01) {
+      current.endTime = Math.max(current.endTime, segment.endTime);
+    } else {
+      merged.push({ ...segment });
+    }
+  }
+
+  return merged;
+}
+
+export function buildTimelineSpeechSegments(clips: VideoClip[], rawCaptions: CaptionEntry[]): TimelineSpeechSegment[] {
+  if (clips.length === 0 || rawCaptions.length === 0) return [];
+
+  const speechSegments: TimelineSpeechSegment[] = [];
+  let timelineCursor = 0;
+
+  for (const clip of clips) {
+    const clipSourceStart = clip.sourceStart;
+    const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
+    const clipSpeed = clip.speed || 1;
+    const clipTimelineStart = timelineCursor;
+    const clipTimelineDuration = clip.sourceDuration / clipSpeed;
+
+    for (const caption of rawCaptions) {
+      const overlapStart = Math.max(caption.startTime, clipSourceStart);
+      const overlapEnd = Math.min(caption.endTime, clipSourceEnd);
+      if (overlapEnd <= overlapStart) continue;
+
+      speechSegments.push({
+        startTime: clipTimelineStart + (overlapStart - clipSourceStart) / clipSpeed,
+        endTime: clipTimelineStart + (overlapEnd - clipSourceStart) / clipSpeed,
+      });
+    }
+
+    timelineCursor += clipTimelineDuration;
+  }
+
+  return mergeTimelineSpeechSegments(speechSegments);
+}
+
+export function buildTimelineSilenceCandidates(
+  clips: VideoClip[],
+  rawCaptions: CaptionEntry[],
+  settings: {
+    paddingSeconds: number;
+    minDurationSeconds: number;
+    preserveShortPauses?: boolean;
+  },
+): SilenceCandidate[] {
+  const timelineDuration = getTimelineDuration(clips);
+  if (timelineDuration <= 0) return [];
+
+  const speechSegments = buildTimelineSpeechSegments(clips, rawCaptions);
+  const paddingSeconds = Math.max(0, settings.paddingSeconds);
+  const minDurationSeconds = Math.max(0, settings.minDurationSeconds);
+  const preserveShortPauses = settings.preserveShortPauses ?? false;
+  const gaps: Array<{ gapStart: number; gapEnd: number }> = [];
+
+  if (speechSegments.length === 0) {
+    gaps.push({ gapStart: 0, gapEnd: timelineDuration });
+  } else {
+    if (speechSegments[0].startTime > 0) {
+      gaps.push({ gapStart: 0, gapEnd: speechSegments[0].startTime });
+    }
+
+    for (let index = 0; index < speechSegments.length - 1; index += 1) {
+      const current = speechSegments[index];
+      const next = speechSegments[index + 1];
+      if (next.startTime > current.endTime) {
+        gaps.push({ gapStart: current.endTime, gapEnd: next.startTime });
+      }
+    }
+
+    const lastSpeechSegment = speechSegments[speechSegments.length - 1];
+    if (lastSpeechSegment.endTime < timelineDuration) {
+      gaps.push({ gapStart: lastSpeechSegment.endTime, gapEnd: timelineDuration });
+    }
+  }
+
+  return gaps.flatMap((gap) => {
+    const gapDuration = gap.gapEnd - gap.gapStart;
+    if (gapDuration <= 0) return [];
+    if (preserveShortPauses && gapDuration < Math.max(0.35, minDurationSeconds + paddingSeconds * 2)) {
+      return [];
+    }
+
+    const deleteStart = Math.min(gap.gapEnd, gap.gapStart + paddingSeconds);
+    const deleteEnd = Math.max(deleteStart, gap.gapEnd - paddingSeconds);
+    const duration = deleteEnd - deleteStart;
+    if (duration < minDurationSeconds) return [];
+
+    return [{
+      gapStart: gap.gapStart,
+      gapEnd: gap.gapEnd,
+      deleteStart,
+      deleteEnd,
+      duration,
+    }];
+  });
 }
 
 /** Generate a deterministic pseudo-waveform array (normalized 0-1) for visual display */

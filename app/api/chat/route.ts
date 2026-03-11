@@ -6,6 +6,7 @@ import {
   AIEditingSettings,
   EditAction,
   IndexedVideoFrame,
+  SilenceCandidate,
   VerifiedSourceRange,
   VideoClip,
   VisualSearchSession,
@@ -65,6 +66,8 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - IMPORTANT: use the silence-removal settings provided in context. Treat them as the current default behavior unless the user explicitly overrides them in the latest request.
 - IMPORTANT: delete_ranges is a complete, one-shot operation. After issuing it, immediately return type:none. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
 - IMPORTANT: when removing silence, use the transcript's sub-second timing and cut as tightly as possible without clipping spoken words. Leaving a tiny bit of extra room is better than cutting into speech.
+- IMPORTANT: if the latest message is a short refinement like "before @1", "only the short ones", or "not the whole section", treat it as modifying the active unfinished silence-removal task instead of starting over.
+- IMPORTANT: keep large delete_ranges payloads compact. Do not add commentary inside the JSON. Return a single valid <action> block only.
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
 Example — delete two silent sections (original silence was 22s–45s and 70s–90s):
@@ -210,6 +213,8 @@ No action:
 - Never use markdown formatting (no **bold**, no *italic*, no bullet points). Plain text only.
 - If context says "Selected clip: Clip N (index I)", and the user says "this clip", "it", "the selected clip" — use clipIndex I for the operation.
 - Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
+- Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
+- Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
 - You are a single-action editor per request. Complete ONE operation unless the user explicitly asked for multiple distinct edits in one message. After executing any edit, return type:none immediately unless more work is clearly required by the original request.
 
 ## Visual and audio context
@@ -267,6 +272,13 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
 
 type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
 type ChatTurn = { role: string; content: string };
+type RichChatTurn = ChatTurn & {
+  actionType?: EditAction['type'];
+  actionMessage?: string;
+  actionStatus?: 'pending' | 'completed';
+  actionResult?: string;
+  autoApplied?: boolean;
+};
 
 const MAX_TRANSCRIPT_LINES = 160;
 
@@ -553,6 +565,331 @@ function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
   return priorUserMessage?.content?.trim() || null;
 }
 
+function normalizeRichChatTurns(value: unknown): RichChatTurn[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .flatMap((entry): RichChatTurn[] => {
+      if (!entry || typeof entry !== 'object') return [];
+      const role = (entry as { role?: unknown }).role;
+      if (role !== 'user' && role !== 'assistant') return [];
+
+      const content = sanitizeInlineUntrustedText((entry as { content?: unknown }).content, 4000);
+      if (!content) return [];
+
+      const actionTypeValue = (entry as { actionType?: unknown }).actionType;
+      const actionType = typeof actionTypeValue === 'string' ? actionTypeValue as EditAction['type'] : undefined;
+      const actionStatusValue = (entry as { actionStatus?: unknown }).actionStatus;
+      const actionStatus = actionStatusValue === 'pending' || actionStatusValue === 'completed'
+        ? actionStatusValue
+        : undefined;
+
+      return [{
+        role,
+        content,
+        actionType,
+        actionMessage: sanitizeInlineUntrustedText((entry as { actionMessage?: unknown }).actionMessage, 160) || undefined,
+        actionStatus,
+        actionResult: sanitizeInlineUntrustedText((entry as { actionResult?: unknown }).actionResult, 160) || undefined,
+        autoApplied: (entry as { autoApplied?: unknown }).autoApplied === true,
+      }];
+    })
+    .slice(-MAX_TRANSCRIPT_LINES);
+}
+
+function isActionCompleted(turn: RichChatTurn): boolean {
+  return turn.actionStatus === 'completed' || turn.autoApplied === true;
+}
+
+function isLikelySilenceRequest(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return /\b(remove|cut|trim|delete|auto[- ]?edit)\b[\w\s]{0,32}\b(silence|silent|dead air|pauses?)\b/.test(normalized)
+    || /\bnot speaking\b/.test(normalized)
+    || /\bwhere i(?:'| a)?m not speaking\b/.test(normalized)
+    || /\bwhere i am not speaking\b/.test(normalized)
+    || /\bcut out silence\b/.test(normalized)
+    || /\bremove the parts where\b/.test(normalized);
+}
+
+function isLikelyContextDependentFollowUp(message: string, previousUserMessage?: string | null): boolean {
+  const normalized = message
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s@:'".-]/g, ' ')
+    .replace(/\s+/g, ' ');
+
+  if (!normalized) return false;
+
+  if (
+    /^(no|actually|instead|rather|before|after|only|just|except|but|and|also|keep|make that|not that|not the whole)/.test(normalized)
+  ) {
+    return true;
+  }
+
+  if (/\b(before|after|between|from|until|up to|only|just)\b/.test(normalized) && /@\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?/.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(only|just)\b[\w\s]{0,18}\b(short|brief|tiny|very short|extremely short)\b/.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(those|them|that|it|ones|sections|parts)\b/.test(normalized) && normalized.split(/\s+/).length <= 14) {
+    return true;
+  }
+
+  if (
+    previousUserMessage
+    && isLikelySilenceRequest(previousUserMessage)
+    && /\b(before|after|between|from|until|up to)\b/.test(normalized)
+    && !isLikelySilenceRequest(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+type ConversationTaskState = {
+  latestUserMessage: string;
+  activeUserMessages: string[];
+  carriesPriorContext: boolean;
+  latestAssistantActionSummary: string | null;
+  latestAssistantActionCompleted: boolean;
+};
+
+function buildConversationTaskState(messages: RichChatTurn[]): ConversationTaskState | null {
+  const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex === -1) return null;
+
+  const latestUserMessage = messages[latestUserIndex]?.content ?? '';
+  if (!latestUserMessage.trim()) return null;
+
+  const activeUserMessages = [latestUserMessage];
+  let anchor = latestUserMessage;
+
+  for (let index = latestUserIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user') continue;
+    const shouldAttach = isLikelyContextDependentFollowUp(anchor, message.content);
+    if (!shouldAttach) break;
+    activeUserMessages.unshift(message.content);
+    anchor = message.content;
+  }
+
+  const latestAssistantWithAction = [...messages.slice(0, latestUserIndex)]
+    .reverse()
+    .find((message) => message.role === 'assistant' && !!message.actionType && message.actionType !== 'none');
+
+  return {
+    latestUserMessage,
+    activeUserMessages,
+    carriesPriorContext: activeUserMessages.length > 1,
+    latestAssistantActionSummary: latestAssistantWithAction?.actionMessage ?? latestAssistantWithAction?.actionType ?? null,
+    latestAssistantActionCompleted: latestAssistantWithAction ? isActionCompleted(latestAssistantWithAction) : false,
+  };
+}
+
+function summarizeConversationTaskState(taskState: ConversationTaskState): string[] {
+  const lines = [
+    `Active user task: ${taskState.activeUserMessages.map((message, index) => `${index + 1}. "${sanitizeInlineUntrustedText(message, 180)}"`).join(' | ')}`,
+  ];
+
+  if (taskState.carriesPriorContext) {
+    lines.push('Latest user message is a follow-up refinement. Preserve the unresolved constraints from the earlier task messages unless the latest message clearly replaces them.');
+  }
+
+  if (taskState.latestAssistantActionSummary) {
+    lines.push(
+      `Last assistant edit for this conversation: ${taskState.latestAssistantActionSummary} (${taskState.latestAssistantActionCompleted ? 'completed' : 'not completed yet'}).`,
+    );
+  }
+
+  return lines;
+}
+
+function sanitizeSilenceCandidates(value: unknown, safeDuration: number): SilenceCandidate[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const candidate = entry as Record<string, unknown>;
+    const gapStart = sanitizeTime(candidate.gapStart, safeDuration);
+    const gapEnd = sanitizeTime(candidate.gapEnd, safeDuration);
+    const deleteStart = sanitizeTime(candidate.deleteStart, safeDuration);
+    const deleteEnd = sanitizeTime(candidate.deleteEnd, safeDuration);
+
+    if (gapStart === null || gapEnd === null || deleteStart === null || deleteEnd === null) return [];
+    if (gapEnd <= gapStart || deleteEnd <= deleteStart) return [];
+
+    return [{
+      gapStart,
+      gapEnd,
+      deleteStart,
+      deleteEnd,
+      duration: deleteEnd - deleteStart,
+    }];
+  });
+}
+
+type ResolvedBoundary = {
+  time: number;
+  label: string;
+};
+
+function resolveBoundaryReference(
+  rawReference: string,
+  markers: Array<{ number?: number; timelineTime?: number }>,
+): ResolvedBoundary | null {
+  const trimmed = rawReference.trim();
+  const markerMatch = trimmed.match(/^@(\d+)$/) ?? trimmed.match(/^marker\s+(\d+)$/i);
+  if (markerMatch) {
+    const markerNumber = Number(markerMatch[1]);
+    const marker = markers.find((entry) => entry.number === markerNumber && typeof entry.timelineTime === 'number');
+    if (marker && typeof marker.timelineTime === 'number') {
+      return { time: marker.timelineTime, label: `@${markerNumber}` };
+    }
+  }
+
+  const timeMatch = trimmed.match(/^(\d+):([0-5]\d)$/) ?? trimmed.match(/^(\d+(?:\.\d+)?)\s*seconds?$/i);
+  if (timeMatch) {
+    if (trimmed.includes(':')) {
+      return {
+        time: parseInt(timeMatch[1] ?? '0', 10) * 60 + parseInt(timeMatch[2] ?? '0', 10),
+        label: trimmed,
+      };
+    }
+
+    return {
+      time: parseFloat(timeMatch[1] ?? '0'),
+      label: trimmed,
+    };
+  }
+
+  return null;
+}
+
+type SilenceTaskConstraints = {
+  startTime: number;
+  endTime: number;
+  maxDurationSeconds?: number;
+  referencedLabels: string[];
+};
+
+function applySilenceConstraintMessage(
+  message: string,
+  constraints: SilenceTaskConstraints,
+  markers: Array<{ number?: number; timelineTime?: number }>,
+) {
+  const normalized = message.toLowerCase();
+  const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  if (betweenMatch) {
+    const start = resolveBoundaryReference(betweenMatch[1], markers);
+    const end = resolveBoundaryReference(betweenMatch[2], markers);
+    if (start && end) {
+      constraints.startTime = Math.min(start.time, end.time);
+      constraints.endTime = Math.max(start.time, end.time);
+      constraints.referencedLabels = [start.label, end.label];
+    }
+  }
+
+  const beforeMatch = message.match(/\b(?:before|until|up to)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  if (beforeMatch) {
+    const boundary = resolveBoundaryReference(beforeMatch[1], markers);
+    if (boundary) {
+      constraints.endTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+    }
+  }
+
+  const afterMatch = message.match(/\b(?:after|since)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  if (afterMatch) {
+    const boundary = resolveBoundaryReference(afterMatch[1], markers);
+    if (boundary) {
+      constraints.startTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+    }
+  }
+
+  const explicitShortMatch = message.match(/\b(?:under|shorter than|less than)\s+(\d+(?:\.\d+)?)\s*seconds?\b/i);
+  if (explicitShortMatch) {
+    constraints.maxDurationSeconds = parseFloat(explicitShortMatch[1] ?? '0');
+  } else if (/\b(?:only|just)\b[\w\s]{0,18}\b(very short|extremely short)\b/i.test(normalized)) {
+    constraints.maxDurationSeconds = 0.75;
+  } else if (/\b(?:only|just)\b[\w\s]{0,18}\b(short|brief|tiny)\b/i.test(normalized)) {
+    constraints.maxDurationSeconds = 1.25;
+  }
+}
+
+function buildSilenceActionFromTaskState(
+  taskState: ConversationTaskState | null,
+  silenceCandidates: SilenceCandidate[],
+  markers: Array<{ number?: number; timelineTime?: number }>,
+  videoDuration: number,
+): EditAction | null {
+  if (!taskState) return null;
+  if (!taskState.activeUserMessages.some((message) => isLikelySilenceRequest(message))) {
+    return null;
+  }
+
+  if (silenceCandidates.length === 0) {
+    return {
+      type: 'none',
+      message: 'I checked the transcript timings but there were no removable silent gaps in that scope.',
+    };
+  }
+
+  const constraints: SilenceTaskConstraints = {
+    startTime: 0,
+    endTime: videoDuration,
+    referencedLabels: [],
+  };
+
+  for (const message of taskState.activeUserMessages) {
+    applySilenceConstraintMessage(message, constraints, markers);
+  }
+
+  if (constraints.endTime <= constraints.startTime) {
+    return {
+      type: 'none',
+      message: 'That silence-removal scope collapsed to an empty range after the latest refinement.',
+    };
+  }
+
+  const ranges = silenceCandidates
+    .map((candidate) => ({
+      start: Math.max(candidate.deleteStart, constraints.startTime),
+      end: Math.min(candidate.deleteEnd, constraints.endTime),
+    }))
+    .filter((candidate) => candidate.end > candidate.start)
+    .filter((candidate) => (
+      constraints.maxDurationSeconds === undefined
+        ? true
+        : (candidate.end - candidate.start) <= constraints.maxDurationSeconds + 1e-6
+    ));
+
+  if (ranges.length === 0) {
+    const scopeSuffix = constraints.referencedLabels.length > 0
+      ? ` in the requested scope around ${constraints.referencedLabels.join(' and ')}`
+      : '';
+    return {
+      type: 'none',
+      message: `I checked the transcript timings but there were no silent gaps to cut${scopeSuffix}.`,
+    };
+  }
+
+  const scopeSuffix = constraints.referencedLabels.length > 0
+    ? ` ${constraints.startTime > 0 ? 'after' : 'before'} ${constraints.referencedLabels[0]}`
+    : '';
+  const shortSuffix = constraints.maxDurationSeconds !== undefined ? ' short' : '';
+
+  return {
+    type: 'delete_ranges',
+    ranges,
+    message: `Removed ${ranges.length}${shortSuffix} silent section${ranges.length === 1 ? '' : 's'}${scopeSuffix}.`,
+  };
+}
+
 function extractMentionedMarkers(
   message: string,
   markers: Array<{
@@ -717,9 +1054,11 @@ export async function POST(req: NextRequest) {
     }
 
     const normalizedMessages = normalizeChatTurns(messages);
+    const richMessages = normalizeRichChatTurns(messages);
     const latestUserMessage = [...normalizedMessages]
       .reverse()
       .find((message) => message.role === 'user')?.content ?? '';
+    const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}
 
@@ -940,6 +1279,10 @@ Honor these defaults unless the user explicitly asks for something different in 
       contextLines.push(...formatVisualSearchContext(priorVisualSearch, fmtSec));
     }
 
+    if (taskState) {
+      contextLines.push(...summarizeConversationTaskState(taskState));
+    }
+
     const mentionedTimes = extractMentionedTimes(normalizedMessages, clipSummaries);
     if (mentionedTimes.length > 0) {
       contextLines.push(
@@ -1010,6 +1353,24 @@ Honor these defaults unless the user explicitly asks for something different in 
         );
       }
     }
+
+    const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
+    const availableMarkers = Array.isArray(context?.markers)
+      ? (context.markers as Array<{ number?: number; timelineTime?: number }>)
+      : [];
+    const deterministicSilenceAction = buildSilenceActionFromTaskState(
+      taskState,
+      silenceCandidates,
+      availableMarkers,
+      Number(context?.videoDuration ?? 0),
+    );
+    if (deterministicSilenceAction) {
+      return NextResponse.json({
+        message: deterministicSilenceAction.message,
+        action: deterministicSilenceAction,
+      });
+    }
+
     if (context?.transcript) {
       const transcriptExcerpt = selectRelevantTranscriptLines(context.transcript, normalizedMessages);
       const transcriptBlock = buildUntrustedDataBlock(
@@ -1097,7 +1458,7 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: 2048,
       system: systemPrompt,
       messages: anthropicMessages,
     });

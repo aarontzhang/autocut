@@ -2,8 +2,8 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, MarkerEntry, VisualSearchSession } from '@/lib/types';
-import { formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
+import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, VisualSearchSession } from '@/lib/types';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -46,6 +46,16 @@ type ChatResponse = {
   error?: string;
 };
 
+type ChatRequestMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+  actionType?: EditAction['type'];
+  actionMessage?: string;
+  actionStatus?: ChatMessageType['actionStatus'];
+  actionResult?: string;
+  autoApplied?: boolean;
+};
+
 type IndexingProgress = {
   stage: 'extracting_frames' | 'describing_frames' | 'transcribing';
   completed: number;
@@ -81,7 +91,7 @@ function sleep(ms: number) {
 
 async function postChatRequest(
   payload: {
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    messages: ChatRequestMessage[];
     context: Record<string, unknown>;
   },
   ctrl: AbortController,
@@ -312,6 +322,32 @@ function serializeActionForComparison(value: unknown): string {
 function actionsMatch(a?: EditAction, b?: EditAction): boolean {
   if (!a || !b) return false;
   return serializeActionForComparison(a) === serializeActionForComparison(b);
+}
+
+function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: string): ChatRequestMessage[] {
+  const history = messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    actionType: message.action?.type,
+    actionMessage: message.action?.message,
+    actionStatus: message.actionStatus,
+    actionResult: message.actionResult,
+    autoApplied: message.autoApplied,
+  }));
+
+  if (latestUserText) {
+    history.push({ role: 'user', content: latestUserText });
+  }
+
+  return history;
+}
+
+function buildSilenceCandidatePayload(): SilenceCandidate[] {
+  const state = useEditorStore.getState();
+  const rawCaptions = state.rawTranscriptCaptions;
+  if (!rawCaptions || rawCaptions.length === 0) return [];
+
+  return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
 }
 
 function mergeFrameDescriptions(
@@ -1797,7 +1833,7 @@ export default function ChatSidebar() {
   }, []);
 
   const runSingleTurn = useCallback(async (
-    history: Array<{ role: 'user' | 'assistant'; content: string }>,
+    history: ChatRequestMessage[],
     ctrl: AbortController,
   ) => {
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
@@ -1813,6 +1849,7 @@ export default function ChatSidebar() {
       const freshState = useEditorStore.getState();
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
+      const silenceCandidates = buildSilenceCandidatePayload();
       const source = freshState.videoData ?? freshState.videoFile ?? freshState.videoUrl;
 
       const { message = '', action, visualSearch } = await postChatRequest({
@@ -1840,6 +1877,7 @@ export default function ChatSidebar() {
           })),
           textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
+          silenceCandidates,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
           frames: buildFrameContextPayload(currentFrames, currentClips),
@@ -1948,10 +1986,7 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      const history: Array<{ role: 'user' | 'assistant'; content: string }> = [
-        ...messages.map(m => ({ role: m.role, content: m.content })),
-        { role: 'user' as const, content: text },
-      ];
+      const history = buildChatRequestHistory(messages, text);
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
@@ -1979,13 +2014,7 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      const history: Array<{ role: 'user' | 'assistant'; content: string }> = [
-        ...currentMessages.map(m => ({ role: m.role, content: m.content })),
-        {
-          role: 'user',
-          content: `Continue my previous request now that the requested transcript is available. Original request: "${triggeringUser.content}". Do not ask to transcribe the same section again.`,
-        },
-      ];
+      const history = buildChatRequestHistory(currentMessages, `Continue my previous request now that the requested transcript is available. Original request: "${triggeringUser.content}". Do not ask to transcribe the same section again.`);
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {

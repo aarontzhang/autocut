@@ -30,6 +30,14 @@ export interface CaptionEntry {
   text: string;
 }
 
+export interface SilenceCandidate {
+  gapStart: number;
+  gapEnd: number;
+  deleteStart: number;
+  deleteEnd: number;
+  duration: number;
+}
+
 export interface TransitionEntry {
   id?: string;
   atTime: number;

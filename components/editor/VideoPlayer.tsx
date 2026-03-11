@@ -120,6 +120,25 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const schedule = buildClipSchedule(clips);
   const totalTimelineDuration = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
 
+  const primeSourceAtTime = useCallback((sourceUrl: string, sourceTime: number) => {
+    const sourceEl = sourceVideoMapRef.current.get(sourceUrl);
+    if (!sourceEl) return false;
+
+    if (sourceEl.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+      sourceEl.load();
+    }
+
+    if (Number.isFinite(sourceTime) && Math.abs(sourceEl.currentTime - sourceTime) > 0.2) {
+      try {
+        sourceEl.currentTime = Math.max(0, sourceTime);
+      } catch {
+        // Ignore browsers that reject pre-seeks before metadata is ready.
+      }
+    }
+
+    return sourceEl.readyState >= 2;
+  }, []);
+
   const applyClipEffects = useCallback((sourceTime: number) => {
     const currentClips = clipsRef.current;
     const video = videoRef.current;
@@ -206,6 +225,27 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [displaySourceUrl, uniqueSourceUrls, videoUrl]);
 
+  useEffect(() => {
+    if (schedule.length === 0) return;
+
+    const targetEntry = findTimelineEntryAtTime(schedule, currentTime);
+    if (!targetEntry) return;
+
+    const targetIndex = schedule.findIndex((entry) => entry.clipId === targetEntry.clipId);
+    const entriesToPrime = [
+      schedule[targetIndex - 1],
+      schedule[targetIndex],
+      schedule[targetIndex + 1],
+    ].filter((entry): entry is typeof schedule[number] => Boolean(entry));
+
+    for (const entry of entriesToPrime) {
+      const clip = clips.find((item) => item.id === entry.clipId);
+      const sourceUrl = clip?.sourceUrl ?? videoUrl;
+      if (!sourceUrl) continue;
+      primeSourceAtTime(sourceUrl, entry.sourceStart);
+    }
+  }, [clips, currentTime, primeSourceAtTime, schedule, videoUrl]);
+
   const activateSource = useCallback((sourceUrl: string) => {
     if (activeSourceUrlRef.current === sourceUrl) return;
     activeSourceUrlRef.current = sourceUrl;
@@ -272,12 +312,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const nextSource = nextClip?.sourceUrl ?? videoUrl;
       if (nextSource !== currentSource) {
         const wasPlaying = !videoRef.current.paused;
+        const nextReady = primeSourceAtTime(nextSource, nextEntry.sourceStart);
         sourceVideoMapRef.current.get(currentSource)?.pause();
         activateSource(nextSource);
         const nextEl = sourceVideoMapRef.current.get(nextSource);
         if (nextEl) {
           nextEl.currentTime = nextEntry.sourceStart;
-          if (wasPlaying) nextEl.play().catch(() => {});
+          if (wasPlaying) {
+            if (nextReady) {
+              nextEl.play().catch(() => {});
+            } else {
+              const resumePlayback = () => {
+                nextEl.play().catch(() => {});
+              };
+              nextEl.addEventListener('canplay', resumePlayback, { once: true });
+            }
+          }
         }
         currentTimeRef.current = nextEntry.timelineStart;
         setCurrentTime(nextEntry.timelineStart);
@@ -298,7 +348,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
     currentTimeRef.current = totalTimelineDuration;
     setCurrentTime(totalTimelineDuration);
-  }, [activateSource, applyClipEffects, setCurrentTime, totalTimelineDuration, videoRef, videoUrl]);
+  }, [activateSource, applyClipEffects, primeSourceAtTime, setCurrentTime, totalTimelineDuration, videoRef, videoUrl]);
 
   useEffect(() => {
     const activeVideo = videoRef.current;
@@ -358,6 +408,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const wasPlaying = Array.from(sourceVideoMapRef.current.values()).some(el => !el.paused);
     const offsetInTimeline = timelineTime - targetEntry.timelineStart;
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
+    const targetReady = primeSourceAtTime(targetSourceUrl, sourceTime);
     const shouldApplySeek =
       switchingSource
       || activeEl.seeking
@@ -378,8 +429,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setCurrentTime(timelineTime);
     }
     applyClipEffects(sourceTime);
-    if (switchingSource && wasPlaying) activeEl.play().catch(() => {});
-  }, [activateSource, applyClipEffects, setCurrentTime, videoRef, videoUrl]);
+    if (switchingSource && wasPlaying) {
+      if (targetReady) {
+        activeEl.play().catch(() => {});
+      } else {
+        const resumePlayback = () => {
+          activeEl.play().catch(() => {});
+        };
+        activeEl.addEventListener('canplay', resumePlayback, { once: true });
+      }
+    }
+  }, [activateSource, applyClipEffects, primeSourceAtTime, setCurrentTime, videoRef, videoUrl]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;
@@ -458,10 +518,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 width: '100%',
                 height: '100%',
                 objectFit: 'contain',
-                display: srcUrl === displaySourceUrl ? 'block' : 'none',
+                opacity: srcUrl === displaySourceUrl ? 1 : 0,
                 visibility: srcUrl === displaySourceUrl ? 'visible' : 'hidden',
                 pointerEvents: srcUrl === displaySourceUrl ? 'auto' : 'none',
                 cursor: 'pointer',
+                transition: 'opacity 0.12s ease',
               }}
               onLoadedMetadata={() => {
                 const el = sourceVideoMapRef.current.get(srcUrl);
