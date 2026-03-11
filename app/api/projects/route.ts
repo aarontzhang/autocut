@@ -1,5 +1,6 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 export async function GET() {
   const supabase = await getSupabaseServer();
@@ -34,10 +35,20 @@ export async function GET() {
   return NextResponse.json(result);
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const csrfError = enforceSameOrigin(request);
+  if (csrfError) return csrfError;
+
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `projects-create:${getRateLimitIdentity(request.headers, user.id)}`,
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const body = await request.json().catch(() => ({}));
   const { data, error } = await supabase

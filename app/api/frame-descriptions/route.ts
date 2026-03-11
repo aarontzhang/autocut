@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 const client = new Anthropic();
 const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-sonnet-4-6';
@@ -49,9 +50,19 @@ function parseDescriptions(text: string): FrameDescription[] | null {
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = enforceSameOrigin(req);
+    if (csrfError) return csrfError;
+
     const supabase = await getSupabaseServer();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const rateLimitError = enforceRateLimit({
+      key: `frame-descriptions:${getRateLimitIdentity(req.headers, user.id)}`,
+      limit: 20,
+      windowMs: 60_000,
+    });
+    if (rateLimitError) return rateLimitError;
 
     const body = await req.json();
     const frames = (Array.isArray(body?.frames) ? body.frames : []) as FrameRequest[];

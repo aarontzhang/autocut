@@ -28,6 +28,7 @@ import {
   sanitizeInlineUntrustedText,
   validateEditAction,
 } from '@/lib/server/llmGuardrails';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 const client = new Anthropic();
 
@@ -695,10 +696,20 @@ function filterCandidatesAgainstRemovedSourceRanges(
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = enforceSameOrigin(req);
+    if (csrfError) return csrfError;
+
     const { messages, context } = await req.json();
     const supabase = await getSupabaseServer();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const rateLimitError = enforceRateLimit({
+      key: `chat:${getRateLimitIdentity(req.headers, user.id)}`,
+      limit: 20,
+      windowMs: 60_000,
+    });
+    if (rateLimitError) return rateLimitError;
 
     const chatUsage = await consumeBetaUsage('chat_requests', user.id, 1);
     if (!chatUsage.allowed) {

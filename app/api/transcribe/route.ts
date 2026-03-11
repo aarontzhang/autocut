@@ -3,15 +3,26 @@ import OpenAI from 'openai';
 import { CaptionEntry } from '@/lib/types';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 type WhisperWord = { start: number; end: number; word: string };
 
 export async function POST(req: NextRequest) {
   try {
+    const csrfError = enforceSameOrigin(req);
+    if (csrfError) return csrfError;
+
     const supabase = await getSupabaseServer();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const rateLimitError = enforceRateLimit({
+      key: `transcribe:${getRateLimitIdentity(req.headers, user.id)}`,
+      limit: 10,
+      windowMs: 60_000,
+    });
+    if (rateLimitError) return rateLimitError;
 
     const formData = await req.formData();
     const audio = formData.get('audio') as Blob | null;

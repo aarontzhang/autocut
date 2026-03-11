@@ -1,7 +1,8 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -29,11 +30,21 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({ ...project, signedUrl });
 }
 
-export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const csrfError = enforceSameOrigin(request);
+  if (csrfError) return csrfError;
+
   const { id } = await params;
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `projects-update:${getRateLimitIdentity(request.headers, user.id)}`,
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const body = await request.json().catch(() => ({}));
   const patch: Record<string, unknown> = {};
@@ -72,11 +83,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   return NextResponse.json({ ok: true, assetId, indexingJobId });
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const csrfError = enforceSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const { id } = await params;
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `projects-delete:${getRateLimitIdentity(req.headers, user.id)}`,
+    limit: 20,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const { data: project } = await supabase.from('projects').select('id').eq('id', id).eq('user_id', user.id).single();
   if (!project) {

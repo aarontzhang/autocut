@@ -2,11 +2,22 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { enqueueAnalysisJob, getPrimaryMediaAsset } from '@/lib/analysisJobs';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 export async function POST(req: NextRequest) {
+  const csrfError = enforceSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `visual-verify:${getRateLimitIdentity(req.headers, user.id)}`,
+    limit: 12,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const body = await req.json().catch(() => ({}));
   const projectId = typeof body?.projectId === 'string' ? body.projectId : '';

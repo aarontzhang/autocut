@@ -7,11 +7,22 @@ import {
   parseVisualQuery,
   retrieveVisualCandidates,
 } from '@/lib/visualRetrieval';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 export async function POST(req: NextRequest) {
+  const csrfError = enforceSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `visual-search:${getRateLimitIdentity(req.headers, user.id)}`,
+    limit: 20,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const body = await req.json().catch(() => ({}));
   const projectId = typeof body?.projectId === 'string' ? body.projectId : '';

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import {
   STORAGE_FILE_LIMIT_BYTES,
@@ -8,15 +8,26 @@ import {
   type ManagedUploadKind,
 } from '@/lib/storageQuota';
 import { getProjectedQuotaSnapshot } from '@/lib/server/storageQuota';
+import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 function isUploadKind(value: unknown): value is ManagedUploadKind {
   return value === 'project-main' || value === 'main' || value === 'sources' || value === 'tracks';
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const csrfError = enforceSameOrigin(request);
+  if (csrfError) return csrfError;
+
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const rateLimitError = enforceRateLimit({
+    key: `uploads-initiate:${getRateLimitIdentity(request.headers, user.id)}`,
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (rateLimitError) return rateLimitError;
 
   const body = await request.json().catch(() => ({}));
   const kind = body.kind;
