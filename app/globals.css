@@ -51,10 +51,10 @@
 
 html, body {
   height: 100%;
-  overflow: hidden;
 }
 
 body {
+  min-height: 100vh;
   background: var(--bg-base);
   color: var(--fg-primary);
   font-family: var(--font-serif), system-ui, sans-serif;

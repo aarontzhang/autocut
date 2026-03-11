@@ -9,6 +9,7 @@ import { uploadVideoToSupabase } from '@/lib/uploadVideo';
 import AutocutMark from '@/components/branding/AutocutMark';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
+import { STORAGE_FILE_LIMIT_BYTES, getFileSizeErrorMessage } from '@/lib/storageQuota';
 
 export default function UploadScreen() {
   const setVideoCloud = useEditorStore(s => s.setVideoCloud);
@@ -23,9 +24,10 @@ export default function UploadScreen() {
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
-    if (file.size > 2 * 1024 * 1024 * 1024) {
-      const ok = window.confirm(`This file is ${(file.size / 1e9).toFixed(1)} GB. Large uploads may take a while. Continue?`);
-      if (!ok) return;
+    if (file.size > STORAGE_FILE_LIMIT_BYTES) {
+      setUploadError(getFileSizeErrorMessage());
+      setUploadProgress(null);
+      return;
     }
     if (!user) {
       setUploadError('You must be signed in before uploading to Supabase.');
@@ -45,7 +47,7 @@ export default function UploadScreen() {
       console.log('Upload success:', { projectId, storagePath });
       const blobUrl = URL.createObjectURL(file);
       setVideoCloud(file, blobUrl, storagePath, projectId);
-      router.push(`/?project=${projectId}`);
+      router.push(`/editor?project=${projectId}`);
     } catch (err) {
       console.error('Upload error:', err);
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
@@ -130,6 +132,9 @@ export default function UploadScreen() {
           <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>
             Drag & drop or click to browse
           </p>
+          <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8 }}>
+            Up to 1 GB per video
+          </p>
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
@@ -173,7 +178,7 @@ export default function UploadScreen() {
 
       {/* Bottom hint */}
       <p style={{ marginTop: 28, fontSize: 12, color: 'var(--fg-muted)' }}>
-        Powered by Claude AI · 10 GB total storage per account
+        Powered by Claude AI · 1 GB per video · 10 GB total storage per account
       </p>
     </div>
   );

@@ -1,0 +1,31 @@
+<svg width="1200" height="780" viewBox="0 0 1200 780" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="780" rx="32" fill="#101010"/>
+  <rect x="34" y="34" width="1132" height="712" rx="28" fill="#141414" stroke="rgba(255,255,255,0.1)"/>
+  <rect x="72" y="92" width="260" height="550" rx="26" fill="#151515" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="106" y="132" width="192" height="110" rx="20" fill="url(#cmd)" stroke="rgba(33,212,255,0.22)"/>
+  <text x="136" y="190" fill="white" font-family="Arial, sans-serif" font-size="30">"Tighten the intro."</text>
+  <rect x="106" y="276" width="192" height="84" rx="18" fill="#1C1C1C"/>
+  <rect x="106" y="378" width="192" height="84" rx="18" fill="#1C1C1C"/>
+  <rect x="106" y="480" width="192" height="84" rx="18" fill="#1C1C1C"/>
+  <rect x="374" y="92" width="754" height="402" rx="28" fill="url(#panel)" stroke="rgba(255,255,255,0.08)"/>
+  <text x="424" y="160" fill="white" font-family="Arial, sans-serif" font-size="48">Edit with natural language.</text>
+  <text x="424" y="222" fill="rgba(255,255,255,0.68)" font-family="Arial, sans-serif" font-size="26">Chat requests become concrete timeline changes.</text>
+  <rect x="424" y="322" width="256" height="22" rx="11" fill="#67E8FF"/>
+  <rect x="696" y="322" width="180" height="22" rx="11" fill="#149BFF"/>
+  <rect x="894" y="322" width="132" height="22" rx="11" fill="#18ACFF"/>
+  <rect x="424" y="364" width="210" height="22" rx="11" fill="#F59E0B"/>
+  <rect x="652" y="364" width="278" height="22" rx="11" fill="#149BFF"/>
+  <rect x="948" y="364" width="116" height="22" rx="11" fill="#F59E0B"/>
+  <rect x="374" y="530" width="754" height="112" rx="24" fill="#171717" stroke="rgba(255,255,255,0.08)"/>
+  <text x="424" y="595" fill="white" font-family="Arial, sans-serif" font-size="34">Review the result in the same workspace.</text>
+  <defs>
+    <linearGradient id="cmd" x1="202" y1="132" x2="202" y2="242" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2AE0FF" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#2AE0FF" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="751" y1="92" x2="751" y2="494" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111B2A"/>
+      <stop offset="1" stop-color="#0B1019"/>
+    </linearGradient>
+  </defs>
+</svg>

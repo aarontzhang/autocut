@@ -22,7 +22,7 @@ export default function NewProjectPage() {
       }
 
       const { id } = await res.json();
-      if (!cancelled) router.replace(`/?project=${id}`);
+      if (!cancelled) router.replace(`/editor?project=${id}`);
     })();
 
     return () => {

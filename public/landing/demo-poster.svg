@@ -1,0 +1,57 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1600" height="900" fill="#0B0B0B"/>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <circle cx="1250" cy="180" r="220" fill="url(#glow)" opacity="0.7"/>
+  <rect x="120" y="120" width="1360" height="660" rx="30" fill="#121212" stroke="rgba(255,255,255,0.12)"/>
+  <rect x="120" y="120" width="1360" height="66" rx="30" fill="#171717"/>
+  <circle cx="170" cy="153" r="8" fill="#3D3D3D"/>
+  <circle cx="196" cy="153" r="8" fill="#3D3D3D"/>
+  <circle cx="222" cy="153" r="8" fill="#3D3D3D"/>
+  <rect x="282" y="137" width="172" height="32" rx="16" fill="#1F1F1F" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="472" y="137" width="146" height="32" rx="16" fill="#1A1A1A"/>
+  <rect x="636" y="137" width="110" height="32" rx="16" fill="#1A1A1A"/>
+  <rect x="120" y="186" width="298" height="594" fill="#131313"/>
+  <rect x="152" y="232" width="234" height="94" rx="22" fill="url(#accent)" stroke="rgba(33,212,255,0.28)"/>
+  <text x="180" y="278" fill="white" font-family="Arial, sans-serif" font-size="30">"Cut the long pauses and caption it."</text>
+  <rect x="152" y="362" width="234" height="84" rx="20" fill="#1B1B1B" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="152" y="466" width="234" height="84" rx="20" fill="#1B1B1B" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="152" y="570" width="234" height="84" rx="20" fill="#1B1B1B" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="454" y="220" width="974" height="340" rx="28" fill="url(#player)" stroke="rgba(255,255,255,0.08)"/>
+  <text x="500" y="266" fill="rgba(255,255,255,0.72)" font-family="Arial, sans-serif" font-size="24">Product walkthrough</text>
+  <text x="1210" y="266" fill="rgba(255,255,255,0.72)" font-family="Arial, sans-serif" font-size="24">01:24 / 08:36</text>
+  <text x="500" y="514" fill="white" font-family="Arial, sans-serif" font-size="32">"Jump to the demo section where the search result appears."</text>
+  <rect x="454" y="590" width="974" height="150" rx="28" fill="#171717" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="500" y="650" width="240" height="34" rx="12" fill="url(#clip1)"/>
+  <rect x="758" y="650" width="200" height="34" rx="12" fill="#1771D2"/>
+  <rect x="976" y="650" width="264" height="34" rx="12" fill="#1660B6"/>
+  <rect x="500" y="696" width="220" height="18" rx="9" fill="#38D6FF"/>
+  <rect x="736" y="696" width="352" height="18" rx="9" fill="#18ACFF"/>
+  <rect x="1104" y="696" width="138" height="18" rx="9" fill="#18ACFF"/>
+  <rect x="500" y="728" width="160" height="18" rx="9" fill="#F59E0B"/>
+  <rect x="678" y="728" width="230" height="18" rx="9" fill="#F59E0B"/>
+  <rect x="926" y="728" width="180" height="18" rx="9" fill="#F59E0B"/>
+  <rect x="905" y="610" width="3" height="118" rx="1.5" fill="white"/>
+  <defs>
+    <linearGradient id="bg" x1="800" y1="0" x2="800" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101010"/>
+      <stop offset="1" stop-color="#090909"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1250 180) rotate(90) scale(220)">
+      <stop stop-color="#21D4FF"/>
+      <stop offset="1" stop-color="#21D4FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="269" y1="232" x2="269" y2="326" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2FE0FF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#21D4FF" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="player" x1="941" y1="220" x2="717" y2="560" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#122033"/>
+      <stop offset="0.45" stop-color="#0B1420"/>
+      <stop offset="1" stop-color="#0A1020"/>
+    </linearGradient>
+    <linearGradient id="clip1" x1="620" y1="650" x2="620" y2="684" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8FF"/>
+      <stop offset="1" stop-color="#149BFF"/>
+    </linearGradient>
+  </defs>
+</svg>

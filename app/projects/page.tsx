@@ -42,10 +42,10 @@ export default function ProjectsPage() {
     if (!res.ok) return;
 
     const { id } = await res.json();
-    router.push(`/?project=${id}`);
+    router.push(`/editor?project=${id}`);
   };
 
-  const handleOpen = (id: string) => router.push(`/?project=${id}`);
+  const handleOpen = (id: string) => router.push(`/editor?project=${id}`);
 
   const handleDelete = async (id: string) => {
     await fetch(`/api/projects/${id}`, { method: 'DELETE' });
