@@ -44,7 +44,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
   }
 
-  const uploadedSize = await getStorageObjectSize(storagePath);
+  let uploadedSize = await getStorageObjectSize(storagePath);
+  if (uploadedSize <= 0 && fileSize && fileSize > 0) {
+    uploadedSize = fileSize;
+  }
   if (uploadedSize <= 0) {
     return NextResponse.json({ error: 'Uploaded file not found' }, { status: 404 });
   }

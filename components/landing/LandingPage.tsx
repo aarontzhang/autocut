@@ -466,13 +466,102 @@ export default function LandingPage() {
       flexDirection: 'column',
       overflowX: 'hidden',
     }}>
+      <style>{`
+        .lp-nav { padding: 0 48px; }
+        .lp-footer { padding: 20px 48px; }
+
+        .lp-hero {
+          display: grid;
+          grid-template-columns: 380px 1fr;
+          min-height: calc(100vh - 54px);
+          padding: 0 64px;
+          gap: 56px;
+          align-items: stretch;
+        }
+        .lp-hero-graphic {
+          padding: 32px 0;
+          display: flex;
+          align-items: stretch;
+        }
+
+        .lp-feat {
+          border-top: 1px solid rgba(255,255,255,0.05);
+          display: grid;
+          align-items: center;
+          padding: 80px 64px;
+          gap: 72px;
+        }
+        .lp-feat-1 { grid-template-columns: 1fr 340px; }
+        .lp-feat-2 { grid-template-columns: 340px 1fr; }
+
+        .lp-quote {
+          border-top: 1px solid rgba(255,255,255,0.05);
+          padding: 80px 64px;
+          text-align: center;
+        }
+
+        /* ── Tablet: proportional columns ── */
+        @media (max-width: 1100px) {
+          .lp-hero {
+            grid-template-columns: minmax(260px, 35%) 1fr;
+            padding: 0 40px;
+            gap: 40px;
+          }
+          .lp-feat {
+            padding: 64px 40px;
+            gap: 48px;
+          }
+          .lp-feat-1 { grid-template-columns: 1fr minmax(240px, 300px); }
+          .lp-feat-2 { grid-template-columns: minmax(240px, 300px) 1fr; }
+          .lp-quote { padding: 64px 40px; }
+          .lp-nav { padding: 0 40px; }
+          .lp-footer { padding: 20px 40px; }
+        }
+
+        /* ── Small tablet: equal columns ── */
+        @media (max-width: 860px) {
+          .lp-hero {
+            grid-template-columns: 1fr 1fr;
+            padding: 0 32px;
+            gap: 32px;
+          }
+          .lp-feat {
+            grid-template-columns: 1fr 1fr !important;
+            padding: 56px 32px;
+            gap: 40px;
+          }
+          .lp-quote { padding: 56px 32px; }
+          .lp-nav { padding: 0 32px; }
+          .lp-footer { padding: 20px 32px; }
+        }
+
+        /* ── Mobile: single column ── */
+        @media (max-width: 640px) {
+          .lp-hero {
+            grid-template-columns: 1fr;
+            padding: 40px 20px 48px;
+            min-height: auto;
+            gap: 36px;
+          }
+          .lp-hero-graphic { padding: 0; }
+          .lp-feat {
+            grid-template-columns: 1fr !important;
+            padding: 48px 20px;
+            gap: 28px;
+          }
+          .lp-feat-1 .lp-feat-graphic { order: -1; }
+          .lp-feat-2 .lp-feat-graphic { order: 1; }
+          .lp-quote { padding: 48px 20px; }
+          .lp-nav { padding: 0 20px; }
+          .lp-footer { padding: 16px 20px; }
+        }
+      `}</style>
 
       {/* ── Nav ─────────────────────────────────────────────── */}
-      <nav style={{
+      <nav className="lp-nav" style={{
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '0 48px',
         height: 54,
         position: 'sticky',
         top: 0,
@@ -496,20 +585,13 @@ export default function LandingPage() {
       </nav>
 
       {/* ── Hero: text LEFT, graphic RIGHT ───────────────────── */}
-      <section style={{
-        display: 'grid',
-        gridTemplateColumns: '380px 1fr',
-        minHeight: 'calc(100vh - 54px)',
-        padding: '0 64px',
-        gap: 56,
-        alignItems: 'stretch',
-      }}>
+      <section className="lp-hero">
         <div style={{
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
           paddingTop: 48, paddingBottom: 48,
         }}>
           <h1 style={{
-            fontSize: 'clamp(40px, 3.4vw, 56px)',
+            fontSize: 'clamp(36px, 3.4vw, 56px)',
             fontWeight: 700,
             letterSpacing: '-0.035em',
             lineHeight: 1.08,
@@ -534,24 +616,19 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <div style={{ padding: '32px 0', display: 'flex', alignItems: 'stretch' }}>
+        <div className="lp-hero-graphic">
           <HeroEditorMock />
         </div>
       </section>
 
       {/* ── Feature 1: graphic LEFT, text RIGHT ──────────────── */}
-      <section style={{
-        borderTop: '1px solid rgba(255,255,255,0.05)',
-        display: 'grid',
-        gridTemplateColumns: '1fr 340px',
-        alignItems: 'center',
-        padding: '80px 64px',
-        gap: 72,
-      }}>
-        <ChatFlowMock />
+      <section className="lp-feat lp-feat-1">
+        <div className="lp-feat-graphic">
+          <ChatFlowMock />
+        </div>
         <div>
           <h2 style={{
-            fontSize: 'clamp(30px, 2.8vw, 42px)',
+            fontSize: 'clamp(28px, 2.8vw, 42px)',
             fontWeight: 700, letterSpacing: '-0.03em',
             lineHeight: 1.1, margin: '0 0 18px',
           }}>
@@ -567,17 +644,10 @@ export default function LandingPage() {
       </section>
 
       {/* ── Feature 2: text LEFT, graphic RIGHT ──────────────── */}
-      <section style={{
-        borderTop: '1px solid rgba(255,255,255,0.05)',
-        display: 'grid',
-        gridTemplateColumns: '340px 1fr',
-        alignItems: 'center',
-        padding: '80px 64px',
-        gap: 72,
-      }}>
+      <section className="lp-feat lp-feat-2">
         <div>
           <h2 style={{
-            fontSize: 'clamp(30px, 2.8vw, 42px)',
+            fontSize: 'clamp(28px, 2.8vw, 42px)',
             fontWeight: 700, letterSpacing: '-0.03em',
             lineHeight: 1.1, margin: '0 0 18px',
           }}>
@@ -590,17 +660,15 @@ export default function LandingPage() {
             Cuts and text overlays land on the timeline precisely. Markers let you jump to any tagged moment before committing — you stay in control of every change.
           </p>
         </div>
-        <TimelineMock />
+        <div className="lp-feat-graphic">
+          <TimelineMock />
+        </div>
       </section>
 
       {/* ── Pull quote + CTA ─────────────────────────────────── */}
-      <section style={{
-        borderTop: '1px solid rgba(255,255,255,0.05)',
-        padding: '80px 64px',
-        textAlign: 'center',
-      }}>
+      <section className="lp-quote">
         <p style={{
-          fontSize: 'clamp(26px, 3.2vw, 44px)',
+          fontSize: 'clamp(24px, 3.2vw, 44px)',
           fontWeight: 600,
           letterSpacing: '-0.03em',
           lineHeight: 1.18,
@@ -620,9 +688,8 @@ export default function LandingPage() {
       </section>
 
       {/* ── Footer ───────────────────────────────────────────── */}
-      <footer style={{
+      <footer className="lp-footer" style={{
         borderTop: '1px solid rgba(255,255,255,0.06)',
-        padding: '20px 48px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

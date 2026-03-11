@@ -7,6 +7,11 @@ export async function GET() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const quota = await getUserStorageQuotaSnapshot(user.id);
-  return NextResponse.json({ quota });
+  try {
+    const quota = await getUserStorageQuotaSnapshot(user.id);
+    return NextResponse.json({ quota });
+  } catch (error) {
+    console.error('[storage.quota] failed to load quota', error);
+    return NextResponse.json({ quota: null }, { status: 200 });
+  }
 }

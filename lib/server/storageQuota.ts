@@ -11,6 +11,10 @@ type StorageObjectRow = {
   metadata: unknown;
 };
 
+type ProjectSizeRow = {
+  video_size: unknown;
+};
+
 const STORAGE_QUERY_PAGE_SIZE = 1000;
 const STORAGE_REMOVE_CHUNK_SIZE = 100;
 
@@ -27,6 +31,42 @@ function readObjectSize(metadata: unknown) {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+function readStoredByteCount(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, value);
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  }
+  return 0;
+}
+
+function getErrorCode(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+}
+
+function getErrorMessage(error: unknown) {
+  return typeof error === 'object' && error !== null && 'message' in error
+    ? String((error as { message?: unknown }).message ?? '')
+    : '';
+}
+
+function isRecoverableStorageQueryError(error: unknown) {
+  const code = getErrorCode(error);
+  const message = getErrorMessage(error);
+  return (
+    code === '42P01' ||
+    code === 'PGRST106' ||
+    code === 'PGRST116' ||
+    code === '42501' ||
+    /relation .*storage\.objects.* does not exist/i.test(message) ||
+    /schema .*storage.* does not exist/i.test(message) ||
+    /permission denied/i.test(message) ||
+    /not found/i.test(message)
+  );
 }
 
 async function listObjectsByPrefix(prefix: string) {
@@ -53,20 +93,50 @@ async function listObjectsByPrefix(prefix: string) {
   return rows;
 }
 
-export async function getStorageObjectSize(storagePath: string) {
-  const { data, error } = await getStorageObjectsTable()
-    .select('name, metadata')
-    .eq('bucket_id', STORAGE_BUCKET)
-    .eq('name', storagePath)
-    .maybeSingle();
+async function getProjectStorageUsageBytes(userId: string) {
+  const { data, error } = await getSupabaseAdmin()
+    .from('projects')
+    .select('video_size')
+    .eq('user_id', userId);
 
   if (error) throw error;
-  return readObjectSize((data as StorageObjectRow | null)?.metadata);
+  return ((data ?? []) as ProjectSizeRow[]).reduce((total, row) => total + readStoredByteCount(row.video_size), 0);
+}
+
+export async function getStorageObjectSize(storagePath: string) {
+  try {
+    const { data, error } = await getStorageObjectsTable()
+      .select('name, metadata')
+      .eq('bucket_id', STORAGE_BUCKET)
+      .eq('name', storagePath)
+      .maybeSingle();
+
+    if (error) throw error;
+    return readObjectSize((data as StorageObjectRow | null)?.metadata);
+  } catch (error) {
+    if (!isRecoverableStorageQueryError(error)) throw error;
+    console.warn('[storageQuota] falling back from storage object size lookup', {
+      storagePath,
+      code: getErrorCode(error),
+      message: getErrorMessage(error),
+    });
+    return 0;
+  }
 }
 
 export async function getUserStorageUsageBytes(userId: string) {
-  const rows = await listObjectsByPrefix(`${userId}/`);
-  return rows.reduce((total, row) => total + readObjectSize(row.metadata), 0);
+  try {
+    const rows = await listObjectsByPrefix(`${userId}/`);
+    return rows.reduce((total, row) => total + readObjectSize(row.metadata), 0);
+  } catch (error) {
+    if (!isRecoverableStorageQueryError(error)) throw error;
+    console.warn('[storageQuota] falling back to project metadata for quota calculation', {
+      userId,
+      code: getErrorCode(error),
+      message: getErrorMessage(error),
+    });
+    return getProjectStorageUsageBytes(userId);
+  }
 }
 
 export async function getUserStorageQuotaSnapshot(userId: string) {
