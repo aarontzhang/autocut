@@ -55,56 +55,78 @@ function EditorPreview() {
       </div>
 
       <div className={styles.previewBody}>
-        <aside className={styles.previewSidebar}>
-          <div className={styles.previewSidebarSection}>
-            <p className={styles.previewLabel}>Chat</p>
-            <div className={styles.commandChip}>“Trim pauses longer than 0.4s and add captions.”</div>
-          </div>
-          <div className={styles.previewSidebarSection}>
-            <p className={styles.previewLabel}>Results</p>
-            <div className={styles.previewResultCard}>
-              <strong>Auto actions</strong>
-              <span>12 cuts suggested</span>
+        <div className={styles.previewWorkspace}>
+          <aside className={styles.previewMediaRail}>
+            <p className={styles.previewLabel}>Media</p>
+            <div className={styles.previewMediaCard}>
+              <span>main-interview.mp4</span>
+              <small>08:36</small>
             </div>
-            <div className={styles.previewResultCard}>
-              <strong>Caption pass</strong>
-              <span>Ready for review</span>
+            <div className={styles.previewMediaCard}>
+              <span>b-roll-demo.mov</span>
+              <small>01:42</small>
             </div>
-          </div>
-        </aside>
+            <div className={styles.previewMediaCard}>
+              <span>music-bed.wav</span>
+              <small>02:10</small>
+            </div>
+          </aside>
 
-        <div className={styles.previewViewport}>
-          <div className={styles.previewPlayerFrame}>
-            <div className={styles.previewPlayerGradient} />
-            <div className={styles.previewPlayerHud}>
-              <span>Project walkthrough</span>
-              <span>01:24 / 08:36</span>
+          <div className={styles.previewViewport}>
+            <div className={styles.previewPlayerFrame}>
+              <div className={styles.previewPlayerGradient} />
+              <div className={styles.previewPlayerHud}>
+                <span>Project walkthrough</span>
+                <span>01:24 / 08:36</span>
+              </div>
+              <div className={styles.previewPlayerCaption}>“Cut to the section where the product demo starts.”</div>
             </div>
-            <div className={styles.previewPlayerCaption}>“Cut to the section where the product demo starts.”</div>
+
+            <div className={styles.previewTimeline}>
+              <div className={styles.previewTimelineHeader}>
+                <span>Timeline</span>
+                <span>3 tracks</span>
+              </div>
+              <div className={styles.previewTrack}>
+                <div className={`${styles.previewClip} ${styles.previewClipBright}`} style={{ width: '28%' }} />
+                <div className={styles.previewClip} style={{ width: '18%' }} />
+                <div className={`${styles.previewClip} ${styles.previewClipMuted}`} style={{ width: '32%' }} />
+              </div>
+              <div className={styles.previewTrack}>
+                <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '22%' }} />
+                <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '41%' }} />
+                <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '14%' }} />
+              </div>
+              <div className={styles.previewTrack}>
+                <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '16%' }} />
+                <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '24%' }} />
+                <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '19%' }} />
+              </div>
+              <div className={styles.previewPlayhead} />
+            </div>
           </div>
 
-          <div className={styles.previewTimeline}>
-            <div className={styles.previewTimelineHeader}>
-              <span>Timeline</span>
-              <span>3 tracks</span>
+          <aside className={styles.previewSidebar}>
+            <div className={styles.previewSidebarSection}>
+              <p className={styles.previewLabel}>Chat</p>
+              <div className={styles.commandChip}>“Trim pauses longer than 0.4s and add captions.”</div>
             </div>
-            <div className={styles.previewTrack}>
-              <div className={`${styles.previewClip} ${styles.previewClipBright}`} style={{ width: '28%' }} />
-              <div className={styles.previewClip} style={{ width: '18%' }} />
-              <div className={`${styles.previewClip} ${styles.previewClipMuted}`} style={{ width: '32%' }} />
+            <div className={styles.previewSidebarSection}>
+              <p className={styles.previewLabel}>Results</p>
+              <div className={styles.previewResultCard}>
+                <strong>Auto actions</strong>
+                <span>12 cuts suggested</span>
+              </div>
+              <div className={styles.previewResultCard}>
+                <strong>Caption pass</strong>
+                <span>Ready for review</span>
+              </div>
+              <div className={styles.previewResultCard}>
+                <strong>Visual search</strong>
+                <span>3 matching scenes</span>
+              </div>
             </div>
-            <div className={styles.previewTrack}>
-              <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '22%' }} />
-              <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '41%' }} />
-              <div className={`${styles.previewClip} ${styles.previewClipAudio}`} style={{ width: '14%' }} />
-            </div>
-            <div className={styles.previewTrack}>
-              <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '16%' }} />
-              <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '24%' }} />
-              <div className={`${styles.previewClip} ${styles.previewClipCaption}`} style={{ width: '19%' }} />
-            </div>
-            <div className={styles.previewPlayhead} />
-          </div>
+          </aside>
         </div>
       </div>
     </div>
@@ -151,7 +173,7 @@ export default function LandingPage() {
         </header>
 
         <main className={styles.main}>
-          <section className={styles.hero}>
+          <section id="top" className={`${styles.hero} ${styles.snapSection}`}>
             <div className={styles.heroCopy}>
               <p className={styles.eyebrow}>Cursor for video editing</p>
               <h1>Direct the edit. Review the timeline. Ship the cut.</h1>
@@ -189,7 +211,7 @@ export default function LandingPage() {
             </div>
           </section>
 
-          <section id="features" className={styles.featureSection}>
+          <section id="features" className={`${styles.featureSection} ${styles.snapSection}`}>
             <div className={styles.sectionIntro}>
               <p className={styles.eyebrow}>Built for the actual editing loop</p>
               <h2>One product surface from prompt to final export.</h2>
@@ -217,7 +239,7 @@ export default function LandingPage() {
             </div>
           </section>
 
-          <section id="workflow" className={styles.workflowSection}>
+          <section id="workflow" className={`${styles.workflowSection} ${styles.snapSection}`}>
             <div className={styles.sectionIntro}>
               <p className={styles.eyebrow}>Workflow</p>
               <h2>Import, ask, review, export.</h2>
@@ -235,7 +257,7 @@ export default function LandingPage() {
             </div>
           </section>
 
-          <section id="launch" className={styles.finalCta}>
+          <section id="launch" className={`${styles.finalCta} ${styles.snapSection}`}>
             <div className={styles.finalCtaCard}>
               <p className={styles.eyebrow}>See the product flow</p>
               <h2>Watch the walkthrough, then step into the editor.</h2>

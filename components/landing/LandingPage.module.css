@@ -4,6 +4,7 @@
     radial-gradient(circle at top, rgba(33, 212, 255, 0.14), transparent 34%),
     linear-gradient(180deg, #101010 0%, #111111 42%, #0c0c0c 100%);
   color: var(--fg-primary);
+  scroll-behavior: smooth;
 }
 
 .header {
@@ -97,12 +98,17 @@
   padding: 32px 24px 96px;
 }
 
+.snapSection {
+  scroll-margin-top: 92px;
+}
+
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   gap: 36px;
   align-items: center;
-  padding: 48px 0 40px;
+  min-height: calc(100vh - 88px);
+  padding: 48px 0 72px;
 }
 
 .heroCopy h1,
@@ -262,15 +268,28 @@
 }
 
 .previewBody {
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  display: block;
   min-height: 540px;
 }
 
+.previewWorkspace {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr) 240px;
+  min-height: 540px;
+}
+
+.previewMediaRail,
 .previewSidebar {
   padding: 18px;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.018);
+}
+
+.previewMediaRail {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.previewSidebar {
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .previewSidebarSection + .previewSidebarSection {
@@ -307,6 +326,30 @@
 
 .previewResultCard + .previewResultCard {
   margin-top: 10px;
+}
+
+.previewMediaCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.previewMediaCard + .previewMediaCard {
+  margin-top: 10px;
+}
+
+.previewMediaCard span {
+  font-size: 12px;
+  color: var(--fg-primary);
+}
+
+.previewMediaCard small {
+  font-size: 11px;
+  color: var(--fg-secondary);
 }
 
 .previewResultCard strong {
@@ -453,7 +496,12 @@
 
 .featureSection,
 .workflowSection {
+  min-height: calc(100vh - 88px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   padding-top: 26px;
+  padding-bottom: 48px;
 }
 
 .sectionIntro {
@@ -552,6 +600,9 @@
 }
 
 .finalCta {
+  min-height: calc(100vh - 88px);
+  display: flex;
+  align-items: center;
   padding-top: 64px;
 }
 
@@ -659,13 +710,18 @@
   .hero,
   .featureCard,
   .featureCardReverse,
-  .previewBody {
+  .previewWorkspace {
     grid-template-columns: 1fr;
   }
 
-  .previewSidebar {
+  .previewMediaRail {
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .previewSidebar {
+    border-left: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
   }
 
   .featureCardReverse .featureMedia,
@@ -700,12 +756,19 @@
 
   .hero {
     padding-top: 24px;
+    min-height: auto;
   }
 
   .previewViewport,
   .featureCard,
   .finalCtaCard {
     padding: 16px;
+  }
+
+  .featureSection,
+  .workflowSection,
+  .finalCta {
+    min-height: auto;
   }
 
   .workflowGrid {
