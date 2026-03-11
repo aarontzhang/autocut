@@ -495,24 +495,21 @@ export default function LandingPage() {
         </Link>
       </nav>
 
-      {/* ── Hero ─────────────────────────────────────────────── */}
+      {/* ── Hero: text LEFT, graphic RIGHT ───────────────────── */}
       <section style={{
-        maxWidth: 1200,
-        margin: '0 auto',
-        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '360px 1fr',
+        gridTemplateColumns: '380px 1fr',
         minHeight: 'calc(100vh - 54px)',
-        padding: '0 48px',
-        gap: 48,
-        alignItems: 'center',
+        padding: '0 64px',
+        gap: 56,
+        alignItems: 'stretch',
       }}>
         <div style={{
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          paddingTop: 40, paddingBottom: 40,
+          paddingTop: 48, paddingBottom: 48,
         }}>
           <h1 style={{
-            fontSize: 'clamp(38px, 3.6vw, 52px)',
+            fontSize: 'clamp(40px, 3.4vw, 56px)',
             fontWeight: 700,
             letterSpacing: '-0.035em',
             lineHeight: 1.08,
@@ -537,23 +534,21 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <div style={{ padding: '20px 0', display: 'flex', alignItems: 'stretch' }}>
+        <div style={{ padding: '32px 0', display: 'flex', alignItems: 'stretch' }}>
           <HeroEditorMock />
         </div>
       </section>
 
-      {/* ── Feature 1: Chat flow — text LEFT, mock RIGHT ─────── */}
+      {/* ── Feature 1: graphic LEFT, text RIGHT ──────────────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
-        maxWidth: 1280,
-        margin: '0 auto',
-        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '340px 1fr',
+        gridTemplateColumns: '1fr 340px',
         alignItems: 'center',
-        padding: '72px 40px',
-        gap: 64,
+        padding: '80px 64px',
+        gap: 72,
       }}>
+        <ChatFlowMock />
         <div>
           <h2 style={{
             fontSize: 'clamp(30px, 2.8vw, 42px)',
@@ -569,22 +564,17 @@ export default function LandingPage() {
             Each edit is proposed as an action card. Step through the cuts one at a time, keep what works, skip what doesn't — nothing commits until you say so.
           </p>
         </div>
-        <ChatFlowMock />
       </section>
 
-      {/* ── Feature 2: Timeline — mock LEFT, text RIGHT ──────── */}
+      {/* ── Feature 2: text LEFT, graphic RIGHT ──────────────── */}
       <section style={{
         borderTop: '1px solid rgba(255,255,255,0.05)',
-        maxWidth: 1100,
-        margin: '0 auto',
-        width: '100%',
         display: 'grid',
-        gridTemplateColumns: '1fr 340px',
+        gridTemplateColumns: '340px 1fr',
         alignItems: 'center',
-        padding: '72px 40px',
-        gap: 64,
+        padding: '80px 64px',
+        gap: 72,
       }}>
-        <TimelineMock />
         <div>
           <h2 style={{
             fontSize: 'clamp(30px, 2.8vw, 42px)',
@@ -600,6 +590,7 @@ export default function LandingPage() {
             Cuts and text overlays land on the timeline precisely. Markers let you jump to any tagged moment before committing — you stay in control of every change.
           </p>
         </div>
+        <TimelineMock />
       </section>
 
       {/* ── Pull quote + CTA ─────────────────────────────────── */}
