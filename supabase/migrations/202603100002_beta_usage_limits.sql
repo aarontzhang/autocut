@@ -24,6 +24,7 @@ execute function public.set_updated_at();
 
 alter table public.beta_usage_daily enable row level security;
 
+drop policy if exists "users can read own beta usage" on public.beta_usage_daily;
 create policy "users can read own beta usage"
 on public.beta_usage_daily
 for select

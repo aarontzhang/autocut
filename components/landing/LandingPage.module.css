@@ -31,7 +31,7 @@
 
 .headerInner {
   position: relative;
-  max-width: 1100px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 16px 24px;
   display: flex;
@@ -125,53 +125,56 @@
 .main {
   position: relative;
   z-index: 1;
-  max-width: 1100px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 0 24px 72px;
 }
 
-.snapSection {
-  scroll-margin-top: 92px;
-}
-
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 360px);
   gap: 28px;
   align-items: center;
   min-height: calc(100vh - 88px);
-  padding: 40px 0 48px;
+  padding: 40px 0 56px;
 }
 
 .heroCopy h1,
-.heroPanel h2,
-.finalCtaCard h2 {
+.sectionHeading h2,
+.ctaCard h2,
+.stepCard h3 {
   margin: 0;
   letter-spacing: -0.05em;
-  line-height: 0.98;
+}
+
+.heroCopy h1,
+.sectionHeading h2,
+.ctaCard h2 {
+  line-height: 0.95;
 }
 
 .heroCopy h1 {
   max-width: 10ch;
-  font-size: clamp(3.4rem, 7vw, 6rem);
+  font-size: clamp(3.2rem, 7vw, 5.8rem);
 }
 
 .heroDescription,
-.heroPanelText,
-.fitDescription,
-.finalCtaText {
+.summaryList li,
+.stepCard p,
+.ctaText {
   color: var(--fg-secondary);
   line-height: 1.65;
 }
 
 .heroDescription {
-  max-width: 44ch;
+  max-width: 43ch;
   margin: 22px 0 0;
-  font-size: 1.02rem;
+  font-size: 1.04rem;
 }
 
 .eyebrow,
-.panelLabel {
+.panelLabel,
+.stepNumber {
   margin: 0 0 14px;
   font-size: 12px;
   font-weight: 600;
@@ -195,11 +198,10 @@
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 20px;
+  margin-top: 22px;
 }
 
-.heroMeta span,
-.fitList span {
+.heroMeta span {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.035);
   border-radius: 999px;
@@ -209,8 +211,8 @@
 }
 
 .heroPanel,
-.finalCtaCard,
-.fitCard {
+.stepCard,
+.ctaCard {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(180deg, rgba(28, 28, 28, 0.92) 0%, rgba(16, 16, 16, 0.98) 100%);
   box-shadow:
@@ -219,88 +221,83 @@
 }
 
 .heroPanel {
-  position: relative;
-  overflow: hidden;
   border-radius: 30px;
   padding: 28px;
 }
 
-.heroPanel::after {
-  content: "";
-  position: absolute;
-  inset: auto -15% -30% auto;
-  width: 260px;
-  height: 260px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(33, 212, 255, 0.18), rgba(33, 212, 255, 0));
-  pointer-events: none;
-}
-
-.heroPanelIntro,
-.heroPanelFooter {
-  position: relative;
-  z-index: 1;
-}
-
-.heroPanel h2 {
-  max-width: 12ch;
-  font-size: clamp(2rem, 3vw, 2.7rem);
-}
-
-.heroPanelText {
-  max-width: 28ch;
-  margin: 16px 0 0;
-}
-
-.heroPanelFooter {
+.summaryList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
   display: grid;
   gap: 14px;
-  margin-top: 26px;
 }
 
-.fitCard {
-  border-radius: 22px;
-  padding: 18px;
-  background: rgba(255, 255, 255, 0.03);
+.summaryList li {
+  position: relative;
+  padding-left: 18px;
 }
 
-.fitList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+.summaryList li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.7em;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  box-shadow: 0 0 18px rgba(33, 212, 255, 0.45);
 }
 
-.fitDescription {
-  margin: 0 0 14px;
+.stepsSection,
+.ctaSection {
+  padding-top: 24px;
 }
 
-.panelLink {
-  display: inline-flex;
-  color: var(--fg-primary);
-  text-decoration: none;
-  font-weight: 600;
+.sectionHeading {
+  max-width: 560px;
 }
 
-.panelLink:hover {
-  color: var(--accent-strong);
+.sectionHeading h2,
+.ctaCard h2 {
+  font-size: clamp(2rem, 4vw, 3.1rem);
 }
 
-.finalCta {
-  padding: 12px 0 24px;
+.stepsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 24px;
 }
 
-.finalCtaCard {
+.stepCard {
+  border-radius: 26px;
+  padding: 24px;
+}
+
+.stepCard h3 {
+  font-size: 1.3rem;
+  line-height: 1.1;
+}
+
+.stepNumber {
+  display: inline-block;
+  margin-bottom: 18px;
+}
+
+.stepCard p {
+  margin: 14px 0 0;
+}
+
+.ctaCard {
   border-radius: 32px;
-  padding: 28px 32px;
+  padding: 32px;
+  margin-top: 24px;
 }
 
-.finalCtaCard h2 {
-  font-size: clamp(2rem, 4vw, 3rem);
-  max-width: 16ch;
-}
-
-.finalCtaText {
-  max-width: 42ch;
+.ctaText {
+  max-width: 38ch;
   margin: 18px 0 0;
 }
 
@@ -309,6 +306,10 @@
     grid-template-columns: 1fr;
     min-height: auto;
     padding-top: 28px;
+  }
+
+  .stepsGrid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -325,14 +326,24 @@
   }
 
   .nav {
-    margin-left: 0;
-    width: 100%;
     order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .headerActions {
+    width: 100%;
+    justify-content: flex-end;
   }
 
   .heroPanel,
-  .finalCtaCard,
-  .fitCard {
-    padding: 20px;
+  .stepCard,
+  .ctaCard {
+    padding: 22px 20px;
+    border-radius: 28px;
+  }
+
+  .heroCopy h1 {
+    font-size: clamp(2.4rem, 12vw, 3.8rem);
   }
 }

@@ -33,6 +33,7 @@ execute function public.set_updated_at();
 
 alter table public.projects enable row level security;
 
+drop policy if exists "users can manage own projects" on public.projects;
 create policy "users can manage own projects"
 on public.projects
 for all
@@ -43,6 +44,7 @@ insert into storage.buckets (id, name, public)
 values ('videos', 'videos', false)
 on conflict (id) do nothing;
 
+drop policy if exists "users can read own video objects" on storage.objects;
 create policy "users can read own video objects"
 on storage.objects
 for select
@@ -51,6 +53,7 @@ using (
   and split_part(name, '/', 1) = auth.uid()::text
 );
 
+drop policy if exists "users can upload own video objects" on storage.objects;
 create policy "users can upload own video objects"
 on storage.objects
 for insert
@@ -59,6 +62,7 @@ with check (
   and split_part(name, '/', 1) = auth.uid()::text
 );
 
+drop policy if exists "users can update own video objects" on storage.objects;
 create policy "users can update own video objects"
 on storage.objects
 for update
@@ -71,6 +75,7 @@ with check (
   and split_part(name, '/', 1) = auth.uid()::text
 );
 
+drop policy if exists "users can delete own video objects" on storage.objects;
 create policy "users can delete own video objects"
 on storage.objects
 for delete

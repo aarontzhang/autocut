@@ -1,15 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import styles from './LandingPage.module.css';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 
 export default function LandingPage() {
   const { user } = useAuth();
-
-  const accessHref = useMemo(() => (user ? '/projects' : '/auth/login'), [user]);
+  const accessHref = user ? '/projects' : '/auth/login';
+  const ctaLabel = user ? 'Open projects' : 'Sign in to try Autocut';
 
   useEffect(() => {
     const htmlOverflowY = document.documentElement.style.overflowY;
@@ -40,8 +40,8 @@ export default function LandingPage() {
           </Link>
 
           <nav className={styles.nav}>
-            <a href="#top">Home</a>
-            <Link href={accessHref}>Try</Link>
+            <a href="#how-it-works">How it works</a>
+            <a href="#login">Login</a>
           </nav>
 
           <div className={styles.headerActions}>
@@ -51,92 +51,87 @@ export default function LandingPage() {
               </Link>
             )}
             <Link href={accessHref} className={styles.headerButton}>
-              Try now
+              {user ? 'Projects' : 'Try Autocut'}
             </Link>
           </div>
         </div>
       </header>
 
       <main className={styles.main}>
-        <section id="top" className={`${styles.hero} ${styles.snapSection}`}>
+        <section className={styles.hero}>
           <div className={styles.heroCopy}>
-            <p className={styles.eyebrow}>For creators, not editors</p>
-            <h1>Describe the edit. Autocut makes it.</h1>
+            <p className={styles.eyebrow}>Simple video editing</p>
+            <h1>Edit video by describing what you want.</h1>
             <p className={styles.heroDescription}>
-              Most creators make the same edits every video. Autocut lets you say what should stay, what should go,
-              and where the interesting part starts, then it handles the cuts, captions, and cleanup for you.
+              Autocut helps you turn raw footage into a first pass. Upload a video, explain what to cut or keep, and
+              review the result in the timeline.
             </p>
 
             <div className={styles.heroActions}>
               <Link href={accessHref} className={styles.primaryButton}>
-                Try now
+                {ctaLabel}
               </Link>
               {!user && (
-                <Link href="/auth/login" className={styles.secondaryButton}>
-                  Sign in
-                </Link>
+                <a href="#how-it-works" className={styles.secondaryButton}>
+                  See how it works
+                </a>
               )}
             </div>
 
             <div className={styles.heroMeta}>
-              <span>Plain-English edits</span>
-              <span>Visual + audio indexing</span>
-              <span>Timeline review</span>
+              <span>Upload footage</span>
+              <span>Describe the edit</span>
+              <span>Review cuts and captions</span>
             </div>
           </div>
 
           <aside className={styles.heroPanel}>
-            <div className={styles.heroPanelIntro}>
-              <p className={styles.panelLabel}>Autocut</p>
-              <h2>Built for the creator who wants the result, not the software.</h2>
-              <p className={styles.heroPanelText}>
-                Instead of scrubbing through footage to find dead air, load screens, or the moment the demo actually
-                starts, you just ask for the edit directly.
-              </p>
-            </div>
-
-            <div className={styles.heroPanelFooter}>
-              <div className={styles.fitCard}>
-                <p className={styles.panelLabel}>Works well for</p>
-                <div className={styles.fitList}>
-                  <span>Gaming</span>
-                  <span>Talking head</span>
-                  <span>Product demos</span>
-                  <span>Captions</span>
-                  <span>Interviews</span>
-                </div>
-              </div>
-
-              <div className={styles.fitCard}>
-                <p className={styles.panelLabel}>Where this goes</p>
-                <p className={styles.fitDescription}>
-                  The long-term goal is simple: Autocut learns the patterns behind your videos and gets you closer to a
-                  finished first pass without you touching a timeline.
-                </p>
-                <Link href={accessHref} className={styles.panelLink}>
-                  Try now
-                </Link>
-              </div>
-            </div>
+            <p className={styles.panelLabel}>What Autocut does</p>
+            <ul className={styles.summaryList}>
+              <li>Turns plain-English instructions into a rough cut</li>
+              <li>Finds the useful parts of your footage faster</li>
+              <li>Adds captions so you can review a usable draft</li>
+            </ul>
           </aside>
         </section>
 
-        <section id="launch" className={`${styles.finalCta} ${styles.snapSection}`}>
-          <div className={styles.finalCtaCard}>
-            <p className={styles.eyebrow}>Start editing faster</p>
-            <h2>If you make the same three or four edits every upload, this is for you.</h2>
-            <p className={styles.finalCtaText}>
-              Try Autocut on real footage and see how quickly you can get to a usable cut.
-            </p>
+        <section id="how-it-works" className={styles.stepsSection}>
+          <div className={styles.sectionHeading}>
+            <p className={styles.eyebrow}>How it works</p>
+            <h2>Three steps from raw footage to first draft.</h2>
+          </div>
+
+          <div className={styles.stepsGrid}>
+            <article className={styles.stepCard}>
+              <span className={styles.stepNumber}>01</span>
+              <h3>Upload your video</h3>
+              <p>Start with a recording, demo, interview, or talking-head clip.</p>
+            </article>
+
+            <article className={styles.stepCard}>
+              <span className={styles.stepNumber}>02</span>
+              <h3>Describe the edit</h3>
+              <p>Tell Autocut what to remove, where to start, and whether you want captions.</p>
+            </article>
+
+            <article className={styles.stepCard}>
+              <span className={styles.stepNumber}>03</span>
+              <h3>Review the result</h3>
+              <p>Check the first pass in the timeline, then keep refining from there.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="login" className={styles.ctaSection}>
+          <div className={styles.ctaCard}>
+            <p className={styles.eyebrow}>Try it</p>
+            <h2>Sign in to start your first edit.</h2>
+            <p className={styles.ctaText}>Use Autocut on your own footage and go straight to the editor.</p>
+
             <div className={styles.heroActions}>
               <Link href={accessHref} className={styles.primaryButton}>
-                Try now
+                {ctaLabel}
               </Link>
-              {!user && (
-                <Link href="/auth/login" className={styles.secondaryButton}>
-                  Sign in
-                </Link>
-              )}
             </div>
           </div>
         </section>

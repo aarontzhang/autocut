@@ -82,6 +82,7 @@ alter table public.asset_visual_index enable row level security;
 alter table public.asset_transcript_words enable row level security;
 alter table public.analysis_jobs enable row level security;
 
+drop policy if exists "users can access media assets for own projects" on public.media_assets;
 create policy "users can access media assets for own projects"
 on public.media_assets
 for all
@@ -96,6 +97,7 @@ with check (exists (
     and projects.user_id = auth.uid()
 ));
 
+drop policy if exists "users can access asset scenes for own projects" on public.asset_scenes;
 create policy "users can access asset scenes for own projects"
 on public.asset_scenes
 for all
@@ -112,6 +114,7 @@ with check (exists (
     and projects.user_id = auth.uid()
 ));
 
+drop policy if exists "users can access visual samples for own projects" on public.asset_visual_index;
 create policy "users can access visual samples for own projects"
 on public.asset_visual_index
 for all
@@ -128,6 +131,7 @@ with check (exists (
     and projects.user_id = auth.uid()
 ));
 
+drop policy if exists "users can access asset transcripts for own projects" on public.asset_transcript_words;
 create policy "users can access asset transcripts for own projects"
 on public.asset_transcript_words
 for all
@@ -144,6 +148,7 @@ with check (exists (
     and projects.user_id = auth.uid()
 ));
 
+drop policy if exists "users can access analysis jobs for own projects" on public.analysis_jobs;
 create policy "users can access analysis jobs for own projects"
 on public.analysis_jobs
 for all
