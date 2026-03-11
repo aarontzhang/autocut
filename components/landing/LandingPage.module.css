@@ -273,13 +273,13 @@
 
 .previewWorkspace {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr) 240px;
+  grid-template-columns: 132px minmax(0, 1.45fr) 280px;
   min-height: 540px;
 }
 
 .previewMediaRail,
 .previewSidebar {
-  padding: 18px;
+  padding: 16px;
   background: rgba(255, 255, 255, 0.018);
 }
 
@@ -331,8 +331,8 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px 14px;
-  border-radius: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.03);
 }
@@ -342,8 +342,10 @@
 }
 
 .previewMediaCard span {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--fg-primary);
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .previewMediaCard small {
@@ -363,19 +365,20 @@
 .previewViewport {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 18px;
+  gap: 14px;
+  padding: 16px;
 }
 
 .previewPlayerFrame {
   position: relative;
   flex: 1;
-  min-height: 320px;
+  min-height: 388px;
   border-radius: 22px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background:
-    radial-gradient(circle at 20% 18%, rgba(33, 212, 255, 0.18), transparent 22%),
+    radial-gradient(circle at 18% 20%, rgba(33, 212, 255, 0.2), transparent 22%),
+    radial-gradient(circle at 75% 46%, rgba(33, 212, 255, 0.12), transparent 28%),
     linear-gradient(135deg, #111827 0%, #091019 38%, #0f172a 100%);
 }
 
@@ -385,6 +388,19 @@
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.06), transparent 30%),
     linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.42) 100%);
+}
+
+.previewPlayerFocus {
+  position: absolute;
+  inset: 18% 12% 18% 12%;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.01)),
+    linear-gradient(135deg, rgba(22, 55, 94, 0.65), rgba(7, 14, 25, 0.22));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 28px 60px rgba(2, 6, 23, 0.32);
 }
 
 .previewPlayerHud,
@@ -411,6 +427,56 @@
   font-weight: 500;
 }
 
+.previewSceneBadge,
+.previewSearchTag {
+  position: absolute;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+.previewSceneBadge {
+  top: 58px;
+  left: 18px;
+  color: var(--fg-primary);
+  background: rgba(8, 15, 26, 0.76);
+}
+
+.previewSearchTag {
+  top: 58px;
+  right: 18px;
+  color: var(--accent-strong);
+  background: rgba(33, 212, 255, 0.12);
+  border-color: rgba(33, 212, 255, 0.22);
+}
+
+.previewCaptionStack {
+  position: absolute;
+  left: 50%;
+  bottom: 74px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(82%, 460px);
+}
+
+.previewCaptionStack span {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: rgba(5, 9, 16, 0.72);
+  color: #f8fbff;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+}
+
 .previewTimeline {
   position: relative;
   border-radius: 22px;
@@ -424,7 +490,16 @@
   justify-content: space-between;
   color: var(--fg-secondary);
   font-size: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+}
+
+.previewTimelineRuler {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 10px;
+  color: var(--fg-muted);
 }
 
 .previewTrack {
@@ -437,7 +512,7 @@
 }
 
 .previewClip {
-  height: 32px;
+  height: 34px;
   border-radius: 10px;
   background: linear-gradient(180deg, #1d76d0 0%, #0f4fa3 100%);
 }
@@ -471,6 +546,59 @@
   width: 2px;
   background: rgba(255, 255, 255, 0.88);
   box-shadow: 0 0 18px rgba(255, 255, 255, 0.2);
+}
+
+.previewMessageRail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.previewAssistantBubble {
+  border-radius: 14px;
+  padding: 11px 12px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.previewToolRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.previewToolRow span {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+  background: rgba(33, 212, 255, 0.08);
+  border: 1px solid rgba(33, 212, 255, 0.16);
+}
+
+.previewSelectionCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.previewSelectionCard strong {
+  font-size: 13px;
+}
+
+.previewSelectionCard span,
+.previewSelectionCard small {
+  color: var(--fg-secondary);
 }
 
 .placeholderBand {

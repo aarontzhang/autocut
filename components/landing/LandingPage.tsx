@@ -66,18 +66,21 @@ function EditorPreview() {
               <span>b-roll-demo.mov</span>
               <small>01:42</small>
             </div>
-            <div className={styles.previewMediaCard}>
-              <span>music-bed.wav</span>
-              <small>02:10</small>
-            </div>
           </aside>
 
           <div className={styles.previewViewport}>
             <div className={styles.previewPlayerFrame}>
               <div className={styles.previewPlayerGradient} />
+              <div className={styles.previewPlayerFocus} />
               <div className={styles.previewPlayerHud}>
                 <span>Project walkthrough</span>
                 <span>01:24 / 08:36</span>
+              </div>
+              <div className={styles.previewSceneBadge}>Scene match: product demo</div>
+              <div className={styles.previewSearchTag}>Search hit at 01:24</div>
+              <div className={styles.previewCaptionStack}>
+                <span>Cut to the section</span>
+                <span>where the product demo starts.</span>
               </div>
               <div className={styles.previewPlayerCaption}>“Cut to the section where the product demo starts.”</div>
             </div>
@@ -86,6 +89,12 @@ function EditorPreview() {
               <div className={styles.previewTimelineHeader}>
                 <span>Timeline</span>
                 <span>3 tracks</span>
+              </div>
+              <div className={styles.previewTimelineRuler}>
+                <span>00:48</span>
+                <span>01:12</span>
+                <span>01:36</span>
+                <span>02:00</span>
               </div>
               <div className={styles.previewTrack}>
                 <div className={`${styles.previewClip} ${styles.previewClipBright}`} style={{ width: '28%' }} />
@@ -109,7 +118,28 @@ function EditorPreview() {
           <aside className={styles.previewSidebar}>
             <div className={styles.previewSidebarSection}>
               <p className={styles.previewLabel}>Chat</p>
-              <div className={styles.commandChip}>“Trim pauses longer than 0.4s and add captions.”</div>
+              <div className={styles.previewMessageRail}>
+                <div className={styles.previewAssistantBubble}>
+                  Find the product demo and tighten the lead-in.
+                </div>
+                <div className={styles.commandChip}>“Trim pauses longer than 0.4s and add captions.”</div>
+                <div className={styles.previewAssistantBubble}>
+                  I found 3 likely scenes. Applied 12 cuts and queued a caption pass.
+                </div>
+              </div>
+              <div className={styles.previewToolRow}>
+                <span>Search</span>
+                <span>Caption</span>
+                <span>Cut</span>
+              </div>
+            </div>
+            <div className={styles.previewSidebarSection}>
+              <p className={styles.previewLabel}>Selection</p>
+              <div className={styles.previewSelectionCard}>
+                <strong>Clip 07</strong>
+                <span>Product demo intro</span>
+                <small>01:24 - 01:51</small>
+              </div>
             </div>
             <div className={styles.previewSidebarSection}>
               <p className={styles.previewLabel}>Results</p>
