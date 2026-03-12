@@ -15,10 +15,10 @@ const BASE_TRACK_HEIGHT = 50;
 const EFFECT_TRACK_H = 26;
 const HEADER_W = 76;
 const RULER_H = 24;
-const CLIP_REORDER_INTENT_PX = 18;
+const CLIP_REORDER_INTENT_PX = 22;
 
 type DragInfo = {
-  type: 'clip-move' | 'clip-trim-left' | 'clip-trim-right' | 'caption' | 'text' | 'transition';
+  type: 'clip-move' | 'caption' | 'text' | 'transition';
   id: string;
   startX: number;
   origStart: number;
@@ -285,56 +285,6 @@ export default function Timeline({
     document.body.style.cursor = 'grabbing';
   }, [setSelectedItem, totalTimelineDuration, totalW]);
 
-  const startClipTrimLeft = useCallback((e: React.MouseEvent, clipId: string) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const state = useEditorStore.getState();
-    const clip = state.clips.find(entry => entry.id === clipId);
-    if (!clip) return;
-    dragRef.current = {
-      type: 'clip-trim-left',
-      id: clipId,
-      startX: e.clientX,
-      origStart: clip.sourceStart,
-      origEnd: clip.sourceStart + clip.sourceDuration,
-      totalW,
-      totalDuration: totalTimelineDuration,
-      preDragSnap: {
-        clips: state.clips,
-        captions: state.captions,
-        transitions: state.transitions,
-        markers: state.markers,
-        textOverlays: state.textOverlays,
-      },
-    };
-    document.body.style.cursor = 'ew-resize';
-  }, [totalTimelineDuration, totalW]);
-
-  const startClipTrimRight = useCallback((e: React.MouseEvent, clipId: string) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const state = useEditorStore.getState();
-    const clip = state.clips.find(entry => entry.id === clipId);
-    if (!clip) return;
-    dragRef.current = {
-      type: 'clip-trim-right',
-      id: clipId,
-      startX: e.clientX,
-      origStart: clip.sourceStart,
-      origEnd: clip.sourceStart + clip.sourceDuration,
-      totalW,
-      totalDuration: totalTimelineDuration,
-      preDragSnap: {
-        clips: state.clips,
-        captions: state.captions,
-        transitions: state.transitions,
-        markers: state.markers,
-        textOverlays: state.textOverlays,
-      },
-    };
-    document.body.style.cursor = 'ew-resize';
-  }, [totalTimelineDuration, totalW]);
-
   const startClipMove = useCallback((e: React.MouseEvent, clipId: string) => {
     e.stopPropagation();
     e.preventDefault();
@@ -497,25 +447,6 @@ export default function Timeline({
         return;
       }
 
-      if (drag.type === 'clip-trim-left') {
-        const clip = store.clips.find(entry => entry.id === drag.id);
-        if (!clip) return;
-        const sourceTimeDelta = timeDelta * clip.speed;
-        const newSourceStart = Math.max(0, drag.origStart + sourceTimeDelta);
-        const newSourceDuration = drag.origEnd - newSourceStart;
-        if (newSourceDuration < 0.1) return;
-        store.trimClip(drag.id, newSourceStart, newSourceDuration);
-        return;
-      }
-
-      if (drag.type === 'clip-trim-right') {
-        const clip = store.clips.find(entry => entry.id === drag.id);
-        if (!clip) return;
-        const newEnd = Math.max(drag.origStart + 0.1, drag.origEnd + timeDelta * clip.speed);
-        store.trimClip(drag.id, drag.origStart, newEnd - drag.origStart);
-        return;
-      }
-
       if (drag.type === 'transition') {
         const newAt = Math.max(0, Math.min(drag.totalDuration, drag.origStart + timeDelta));
         store.updateTransition(drag.id, { atTime: newAt });
@@ -638,7 +569,7 @@ export default function Timeline({
               whiteSpace: 'nowrap',
             }}
           >
-            C to cut. M to add a marker. Drag the dotted clip handle to reorder.
+            C to cut. M to add a marker. Drag a clip itself to move it.
           </span>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -867,9 +798,7 @@ export default function Timeline({
                     e.stopPropagation();
                     setSelectedItem({ type: 'clip', id: clip.id });
                   }}
-                  onReorderStart={e => startClipMove(e, clip.id)}
-                  onTrimLeftStart={e => startClipTrimLeft(e, clip.id)}
-                  onTrimRightStart={e => startClipTrimRight(e, clip.id)}
+                  onDragStart={e => startClipMove(e, clip.id)}
                 />
               );
             })}
@@ -906,30 +835,9 @@ export default function Timeline({
                     padding: '0 10px',
                     pointerEvents: 'none',
                     zIndex: 7,
+                    cursor: 'grabbing',
                   }}
                 >
-                  <div
-                    style={{
-                      width: 7,
-                      height: 10,
-                      display: 'grid',
-                      gridTemplateColumns: 'repeat(2, 1fr)',
-                      gap: 1.5,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {Array.from({ length: 6 }).map((_, dotIndex) => (
-                      <span
-                        key={dotIndex}
-                        style={{
-                          width: 2,
-                          height: 2,
-                          borderRadius: '50%',
-                          background: 'rgba(255,255,255,0.88)',
-                        }}
-                      />
-                    ))}
-                  </div>
                   <span
                     style={{
                       fontSize: 10,
