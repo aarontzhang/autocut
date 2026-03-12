@@ -22,6 +22,11 @@ export default function UploadScreen() {
   const router = useRouter();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
+  const explainMultipleFiles = useCallback(() => {
+    setUploadError('Start with one main video. After the project opens, import additional clips from the Media panel.');
+    setUploadProgress(null);
+  }, [setUploadProgress]);
+
   const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
     if (file.size > STORAGE_FILE_LIMIT_BYTES) {
@@ -55,12 +60,21 @@ export default function UploadScreen() {
     }
   }, [router, user, setVideoCloud, setUploadProgress, refreshQuota]);
 
+  const handleFiles = useCallback((files: File[]) => {
+    const videoFiles = files.filter((file) => file.type.startsWith('video/'));
+    if (videoFiles.length === 0) return;
+    if (videoFiles.length > 1) {
+      explainMultipleFiles();
+      return;
+    }
+    void handleFile(videoFiles[0]);
+  }, [explainMultipleFiles, handleFile]);
+
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
-  }, [handleFile]);
+    handleFiles(Array.from(e.dataTransfer.files));
+  }, [handleFiles]);
 
   return (
     <div
@@ -155,7 +169,10 @@ export default function UploadScreen() {
           type="file"
           accept="video/*"
           className="hidden"
-          onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
+          onChange={e => {
+            handleFiles(Array.from(e.target.files ?? []));
+            e.target.value = '';
+          }}
         />
       </div>
 

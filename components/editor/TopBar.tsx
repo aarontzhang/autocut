@@ -8,7 +8,13 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
 
-export default function TopBar({ onImportFile }: { onImportFile?: (file: File) => void }) {
+export default function TopBar({
+  onImportFile,
+  onImportFiles,
+}: {
+  onImportFile?: (file: File) => void;
+  onImportFiles?: (files: File[]) => void | Promise<void>;
+}) {
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
@@ -208,12 +214,20 @@ export default function TopBar({ onImportFile }: { onImportFile?: (file: File) =
         ref={inputRef}
         type="file"
         accept="video/*"
+        multiple
         style={{ display: 'none' }}
         onChange={event => {
-          const file = event.target.files?.[0];
-          if (file) {
-            if (onImportFile) onImportFile(file);
-            else setVideoFile(file);
+          const files = Array.from(event.target.files ?? []);
+          if (files.length > 0) {
+            if (onImportFiles) {
+              void onImportFiles(files);
+            } else {
+              const [file] = files;
+              if (file) {
+                if (onImportFile) onImportFile(file);
+                else setVideoFile(file);
+              }
+            }
           }
           event.target.value = '';
         }}

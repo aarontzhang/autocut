@@ -7,9 +7,11 @@ import { formatTimeShort } from '@/lib/timelineUtils';
 export default function MediaPanel({
   onImportMainFile,
   onImportLibraryFile,
+  onImportFiles,
 }: {
   onImportMainFile?: (file: File) => void;
   onImportLibraryFile?: (file: File) => Promise<void>;
+  onImportFiles?: (files: File[]) => void | Promise<void>;
 }) {
   const videoUrl = useEditorStore(s => s.videoUrl);
   const mediaLibrary = useEditorStore(s => s.mediaLibrary);
@@ -28,6 +30,18 @@ export default function MediaPanel({
       else await addToMediaLibrary(file);
     }
   }, [videoUrl, setVideoFile, addToMediaLibrary, onImportMainFile, onImportLibraryFile]);
+
+  const handleImportFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+    if (onImportFiles) {
+      await onImportFiles(files);
+      return;
+    }
+
+    for (const file of files) {
+      await handleImport(file);
+    }
+  }, [handleImport, onImportFiles]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-panel)' }}>
@@ -122,8 +136,14 @@ export default function MediaPanel({
         </button>
         <input
           ref={inputRef}
-          type="file" accept="video/*" className="hidden"
-          onChange={e => { const f = e.target.files?.[0]; if (f) handleImport(f); e.target.value = ''; }}
+          type="file"
+          accept="video/*"
+          multiple
+          className="hidden"
+          onChange={e => {
+            void handleImportFiles(Array.from(e.target.files ?? []));
+            e.target.value = '';
+          }}
         />
       </div>
     </div>

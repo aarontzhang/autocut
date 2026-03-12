@@ -225,6 +225,7 @@ interface EditorState {
   setFFmpegJob: (job: FFmpegJob) => void;
 
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
+  setProjectVideoFile: (file: File, projectId: string, storagePath?: string | null) => void;
   loadProject: (
     editState: {
       clips?: unknown[];
@@ -753,6 +754,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourcePath: storagePath }],
+    }));
+  },
+
+  setProjectVideoFile: (file, projectId, storagePath = null) => {
+    const url = URL.createObjectURL(file);
+    set((state) => ({
+      videoFile: file, videoUrl: url, videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
+      pendingAction: null, clips: [],
+      captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
+      previewSnapshot: null, previewOwnerId: null,
+      messages: state.messages, isChatLoading: false, ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
+      aiSettings: DEFAULT_AI_EDITING_SETTINGS,
+      appliedActions: [],
+      history: [], future: [],
+      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      visualSearchSession: null,
+      currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
+      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, ...(storagePath ? { sourcePath: storagePath } : {}) }],
     }));
   },
 

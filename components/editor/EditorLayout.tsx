@@ -93,7 +93,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const currentTime = useEditorStore(s => s.currentTime);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const videoFile = useEditorStore(s => s.videoFile);
-  const setVideoFile = useEditorStore(s => s.setVideoFile);
+  const setProjectVideoFile = useEditorStore(s => s.setProjectVideoFile);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
   const deleteSelectedItem = useEditorStore(s => s.deleteSelectedItem);
@@ -108,6 +108,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const setStoragePath = useEditorStore(s => s.setStoragePath);
   const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
+  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
+  const storagePath = useEditorStore(s => s.storagePath);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
@@ -375,9 +377,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     };
   }, [projectId, refreshSignedMediaUrls]);
 
-  const importFile = useCallback((file: File) => {
+  const importMainFile = useCallback((file: File) => {
     if (!file.type.startsWith('video/')) return;
-    setVideoFile(file);
+    const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
+    if (!targetProjectId) return;
+    setProjectVideoFile(file, targetProjectId);
 
     // Background upload to storage so the project persists on reload
     const { currentProjectId, storagePath } = useEditorStore.getState();
@@ -389,7 +393,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       console.warn('Background upload failed:', error.message);
       handleStorageUploadError(error);
     });
-  }, [setVideoFile, user, setStoragePath, handleStorageUploadError, handleStorageUploadSuccess]);
+  }, [projectId, setProjectVideoFile, user, setStoragePath, handleStorageUploadError, handleStorageUploadSuccess]);
 
   const importLibraryFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -417,11 +421,29 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     addMediaLibraryItem({ url: blobUrl, name: file.name, duration, sourcePath });
   }, [addMediaLibraryItem, user, handleStorageUploadError, handleStorageUploadSuccess]);
 
+  const importFiles = useCallback(async (files: File[]) => {
+    const videoFiles = files.filter((file) => file.type.startsWith('video/'));
+    if (videoFiles.length === 0) return;
+
+    const hasMainMedia = Boolean(videoFile || videoUrl || storagePath || mediaLibrary.length > 0);
+    if (!hasMainMedia) {
+      const [mainFile, ...libraryFiles] = videoFiles;
+      if (mainFile) importMainFile(mainFile);
+      for (const file of libraryFiles) {
+        await importLibraryFile(file);
+      }
+      return;
+    }
+
+    for (const file of videoFiles) {
+      await importLibraryFile(file);
+    }
+  }, [importLibraryFile, importMainFile, mediaLibrary.length, storagePath, videoFile, videoUrl]);
+
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (file) importFile(file);
-  }, [importFile]);
+    void importFiles(Array.from(e.dataTransfer.files));
+  }, [importFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -437,7 +459,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       onDragOver={handleDragOver}
     >
       {/* ── Top bar ── */}
-      <TopBar onImportFile={importFile} />
+      <TopBar onImportFile={importMainFile} onImportFiles={importFiles} />
       {(storageNotice || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (
         <div style={{ padding: '10px 14px 0', flexShrink: 0 }}>
           <StorageQuotaBanner
@@ -460,7 +482,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             {/* Media panel */}
             <div style={{ width: mediaPanelWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-              <MediaPanel onImportMainFile={importFile} onImportLibraryFile={importLibraryFile} />
+              <MediaPanel onImportMainFile={importMainFile} onImportLibraryFile={importLibraryFile} onImportFiles={importFiles} />
               {/* Media panel resize handle */}
               <div
                 onMouseDown={startMediaResize}
@@ -480,7 +502,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
                 ? <ProjectLoadingState />
                 : (videoFile || videoUrl)
                 ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
-                : <EmptyDropZone importFile={importFile} />
+                : <EmptyDropZone importFiles={importFiles} />
               }
             </div>
           </div>
@@ -501,7 +523,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               <Timeline
                 videoRef={videoRef}
                 playerRef={playerRef}
-                onImportFile={importFile}
+                onImportFile={importMainFile}
                 onStorageUploadError={handleStorageUploadError}
                 onStorageUploadSuccess={handleStorageUploadSuccess}
               />
@@ -552,7 +574,7 @@ function ProjectLoadingState() {
   );
 }
 
-function EmptyDropZone({ importFile }: { importFile: (f: File) => void }) {
+function EmptyDropZone({ importFiles }: { importFiles: (files: File[]) => void | Promise<void> }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -563,8 +585,7 @@ function EmptyDropZone({ importFile }: { importFile: (f: File) => void }) {
         onDragLeave={() => setIsDragging(false)}
         onDrop={e => {
           e.preventDefault(); e.stopPropagation(); setIsDragging(false);
-          const file = e.dataTransfer.files[0];
-          if (file) importFile(file);
+          void importFiles(Array.from(e.dataTransfer.files));
         }}
         onClick={() => inputRef.current?.click()}
         style={{
@@ -607,8 +628,17 @@ function EmptyDropZone({ importFile }: { importFile: (f: File) => void }) {
             }}>{fmt}</span>
           ))}
         </div>
-        <input ref={inputRef} type="file" accept="video/*" style={{ display: 'none' }}
-          onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); }} />
+        <input
+          ref={inputRef}
+          type="file"
+          accept="video/*"
+          multiple
+          style={{ display: 'none' }}
+          onChange={e => {
+            void importFiles(Array.from(e.target.files ?? []));
+            e.target.value = '';
+          }}
+        />
       </div>
     </div>
   );
