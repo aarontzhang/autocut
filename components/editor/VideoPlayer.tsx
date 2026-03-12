@@ -2,7 +2,7 @@
 
 import { forwardRef, useImperativeHandle, useCallback, useRef, useEffect, useMemo, useState } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { buildClipSchedule } from '@/lib/playbackEngine';
+import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
 
 export interface VideoPlayerHandle {
   seekTo: (timelineTime: number) => void;
@@ -28,6 +28,7 @@ const CSS_FILTERS: Record<string, string> = {
 };
 
 const SOURCE_SLOT_COUNT = 2;
+const AUTO_ADVANCE_EPSILON = 0.05;
 
 function getInstanceKey(sourceUrl: string, slot: number) {
   return `${sourceUrl}::${slot}`;
@@ -49,12 +50,6 @@ function fitVideoFrame(
   }
 
   return { width: container.height * videoRatio, height: container.height };
-}
-
-function findTimelineEntryAtTime(schedule: ReturnType<typeof buildClipSchedule>, timelineTime: number) {
-  let targetEntry = schedule.find(entry => timelineTime >= entry.timelineStart && timelineTime <= entry.timelineEnd);
-  if (!targetEntry && schedule.length > 0) targetEntry = schedule[schedule.length - 1];
-  return targetEntry ?? null;
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
@@ -218,7 +213,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const desiredSourceUrl = useMemo(() => {
     const currentSchedule = buildClipSchedule(clips);
-    const targetEntry = currentSchedule.find(entry => currentTime >= entry.timelineStart && currentTime <= entry.timelineEnd) ?? currentSchedule[0];
+    const targetEntry = findTimelineEntryAtTime(currentSchedule, currentTime) ?? currentSchedule[0];
     const targetClip = targetEntry ? clips.find(clip => clip.id === targetEntry.clipId) : null;
     return targetClip?.sourceUrl ?? videoUrl ?? uniqueSourceUrls[0] ?? '';
   }, [clips, currentTime, uniqueSourceUrls, videoUrl]);
@@ -340,25 +335,41 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       return;
     }
 
-    let lastSourceTimelineEnd = 0;
-    for (const entry of currentSchedule) {
-      const clip = currentClips.find(item => item.id === entry.clipId);
-      if (!clip || (clip.sourceUrl ?? videoUrl) !== currentSource) continue;
-      if (sourceTime >= entry.sourceStart + entry.sourceDuration - 0.05) {
-        lastSourceTimelineEnd = Math.max(lastSourceTimelineEnd, entry.timelineEnd);
-      }
-    }
-
-    const nextEntry = currentSchedule.find(entry => (
-      entry.timelineStart >= lastSourceTimelineEnd - 0.01
-      && entry.timelineEnd > lastSourceTimelineEnd
-    ));
+    const boundaryTime = Math.min(
+      currentTimeRef.current + AUTO_ADVANCE_EPSILON,
+      totalTimelineDuration,
+    );
+    const currentTimelineEntry = findTimelineEntryAtTime(
+      currentSchedule,
+      Math.max(0, currentTimeRef.current - AUTO_ADVANCE_EPSILON),
+    );
+    const timelineTarget = findTimelineEntryAtTime(currentSchedule, boundaryTime);
+    const timelineTargetClip = timelineTarget
+      ? currentClips.find(item => item.id === timelineTarget.clipId)
+      : null;
+    const timelineTargetSource = timelineTargetClip?.sourceUrl ?? videoUrl;
+    const nextEntry = timelineTarget && (
+      timelineTargetSource !== currentSource
+      || timelineTarget.clipId !== currentTimelineEntry?.clipId
+    )
+      ? timelineTarget
+      : (
+        timelineTarget
+          && sourceTime >= timelineTarget.sourceStart + timelineTarget.sourceDuration - AUTO_ADVANCE_EPSILON
+          ? currentSchedule[currentSchedule.findIndex(entry => entry.clipId === timelineTarget.clipId) + 1] ?? null
+          : null
+      );
 
     if (nextEntry) {
       const nextClip = currentClips.find(item => item.id === nextEntry.clipId);
       const nextSource = nextClip?.sourceUrl ?? videoUrl;
       const wasPlaying = !videoRef.current.paused;
-      const { ready: nextReady, slot: nextSlot } = primeSourceAtTime(nextSource, nextEntry.sourceStart, {
+      const nextTimelineTime = Math.max(currentTimeRef.current, nextEntry.timelineStart);
+      const nextSourceTime = Math.min(
+        nextEntry.sourceStart + Math.max(0, nextTimelineTime - nextEntry.timelineStart) * nextEntry.speed,
+        nextEntry.sourceStart + nextEntry.sourceDuration,
+      );
+      const { ready: nextReady, slot: nextSlot } = primeSourceAtTime(nextSource, nextSourceTime, {
         preferredSlot: nextSource === currentSource
           ? (currentSlot + 1) % SOURCE_SLOT_COUNT
           : 0,
@@ -370,8 +381,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       if (nextEl && (nextSource !== currentSource || resolvedNextSlot !== currentSlot)) {
         videoRef.current.pause();
         activateSource(nextSource, resolvedNextSlot);
-        if (Math.abs(nextEl.currentTime - nextEntry.sourceStart) > 1 / 120) {
-          nextEl.currentTime = nextEntry.sourceStart;
+        if (Math.abs(nextEl.currentTime - nextSourceTime) > 1 / 120) {
+          nextEl.currentTime = nextSourceTime;
         }
         if (wasPlaying) {
           if (nextReady) {
@@ -384,10 +395,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
           }
         }
       } else {
-        videoRef.current.currentTime = nextEntry.sourceStart;
+        videoRef.current.currentTime = nextSourceTime;
       }
-      currentTimeRef.current = nextEntry.timelineStart;
-      setCurrentTime(nextEntry.timelineStart);
+      currentTimeRef.current = nextTimelineTime;
+      setCurrentTime(nextTimelineTime);
       return;
     }
 

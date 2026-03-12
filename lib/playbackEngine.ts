@@ -22,6 +22,36 @@ export function buildClipSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
 }
 
 /**
+ * Resolve a timeline time to the clip that owns that moment.
+ * Clip ranges are treated as half-open intervals [start, end), so
+ * an exact cut point belongs to the following clip instead of the prior one.
+ * The final clip still owns its exact end so end-of-timeline seeks clamp cleanly.
+ */
+export function findTimelineEntryAtTime(
+  schedule: ClipScheduleEntry[],
+  timelineTime: number,
+): ClipScheduleEntry | null {
+  if (schedule.length === 0) return null;
+
+  for (let index = 0; index < schedule.length; index++) {
+    const entry = schedule[index];
+    const isLastEntry = index === schedule.length - 1;
+    if (
+      timelineTime >= entry.timelineStart
+      && (timelineTime < entry.timelineEnd || (isLastEntry && timelineTime <= entry.timelineEnd))
+    ) {
+      return entry;
+    }
+  }
+
+  if (timelineTime >= schedule[schedule.length - 1].timelineEnd) {
+    return schedule[schedule.length - 1];
+  }
+
+  return schedule[0];
+}
+
+/**
  * Given a timeline time (playhead position), return the source video time
  * and which clip schedule entry is active.
  * Returns null if timeline is empty or time is past the end.
@@ -30,22 +60,25 @@ export function timelineTimeToSource(
   schedule: ClipScheduleEntry[],
   timelineTime: number,
 ): { sourceTime: number; entry: ClipScheduleEntry } | null {
-  // clamp to last clip if past end
   if (schedule.length === 0) return null;
 
-  for (const entry of schedule) {
-    if (timelineTime >= entry.timelineStart && timelineTime < entry.timelineEnd) {
-      const offsetInTimeline = timelineTime - entry.timelineStart;
-      const sourceTime = entry.sourceStart + offsetInTimeline * entry.speed;
-      return { sourceTime, entry };
-    }
+  const entry = findTimelineEntryAtTime(schedule, timelineTime);
+  if (!entry) return null;
+
+  const clampedTimelineTime = Math.min(
+    Math.max(timelineTime, entry.timelineStart),
+    entry.timelineEnd,
+  );
+  const offsetInTimeline = clampedTimelineTime - entry.timelineStart;
+  const sourceTime = entry.sourceStart + offsetInTimeline * entry.speed;
+
+  if (clampedTimelineTime < entry.timelineEnd) {
+    return { sourceTime, entry };
   }
 
-  // Past the end — return last clip's end
-  const last = schedule[schedule.length - 1];
   return {
-    sourceTime: last.sourceStart + last.sourceDuration,
-    entry: last,
+    sourceTime: Math.min(sourceTime, entry.sourceStart + entry.sourceDuration),
+    entry,
   };
 }
 

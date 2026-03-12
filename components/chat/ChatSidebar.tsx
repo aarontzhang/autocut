@@ -17,6 +17,7 @@ const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 45000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
+const MAX_MARKER_DENSE_FRAME_WINDOW_SECONDS = 20;
 const AUTO_NARROWED_FRAME_WINDOW_SECONDS = 6;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const AGENT_MENU_ITEMS = [
@@ -473,6 +474,33 @@ function getMarkerActionSeekTime(
 
 function getDenseRequestTooBroadMessage(startTime: number, endTime: number): string {
   return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
+}
+
+function getApproximateMarkerTooBroadMessage(startTime: number, endTime: number): string {
+  return `I can make a best-guess marker, but ${formatTime(startTime)}–${formatTime(endTime)} is still too wide for a useful one-pass scan. Point me to a rougher spot inside that span and I'll tag it.`;
+}
+
+function isApproximateMarkerRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return /\bmarkers?|bookmarks?|tags?\b/.test(normalized)
+    && /\b(add|find|help|locate|mark|place|point|set|tag)\b/.test(normalized);
+}
+
+function getDenseRequestLimitForInput(latestUserInput: string): number {
+  return isApproximateMarkerRequest(latestUserInput)
+    ? MAX_MARKER_DENSE_FRAME_WINDOW_SECONDS
+    : MAX_DENSE_FRAME_WINDOW_SECONDS;
+}
+
+function getDenseRequestTooBroadFeedback(
+  startTime: number,
+  endTime: number,
+  latestUserInput: string,
+): string {
+  if (isApproximateMarkerRequest(latestUserInput)) {
+    return getApproximateMarkerTooBroadMessage(startTime, endTime);
+  }
+  return getDenseRequestTooBroadMessage(startTime, endTime);
 }
 
 function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number | null {
@@ -1968,12 +1996,13 @@ export default function ChatSidebar() {
       if (action?.type === 'request_frames' && action.frameRequest) {
         let req = action.frameRequest as { startTime: number; endTime: number; count?: number };
         let spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
-        if (spanSeconds > MAX_DENSE_FRAME_WINDOW_SECONDS) {
+        const maxDenseWindowSeconds = getDenseRequestLimitForInput(latestUserInput);
+        if (spanSeconds > maxDenseWindowSeconds) {
           const narrowedReq = narrowDenseFrameRequestAroundMention(req, latestUserInput, freshState.videoDuration);
           if (!narrowedReq) {
             addMessage({
               role: 'assistant',
-              content: getDenseRequestTooBroadMessage(req.startTime, req.endTime),
+              content: getDenseRequestTooBroadFeedback(req.startTime, req.endTime, latestUserInput),
             });
             producedVisibleResponse = true;
             return;

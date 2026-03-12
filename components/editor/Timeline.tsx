@@ -4,7 +4,7 @@ import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
 import type { EditSnapshot } from '@/lib/useEditorStore';
-import { buildClipSchedule } from '@/lib/playbackEngine';
+import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
 import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 import { useAuth } from '@/components/auth/AuthProvider';
@@ -194,8 +194,8 @@ export default function Timeline({
       const store = useEditorStore.getState();
       const currentSchedule = buildClipSchedule(store.clips);
       if (currentSchedule.length > 0) {
-        let targetEntry = currentSchedule.find(entry => nextTime >= entry.timelineStart && nextTime <= entry.timelineEnd);
-        if (!targetEntry) targetEntry = currentSchedule[currentSchedule.length - 1];
+        const targetEntry = findTimelineEntryAtTime(currentSchedule, nextTime);
+        if (!targetEntry) return;
         const offsetInTimeline = nextTime - targetEntry.timelineStart;
         const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
         if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);
@@ -227,8 +227,8 @@ export default function Timeline({
       const store = useEditorStore.getState();
       const currentSchedule = buildClipSchedule(store.clips);
       if (currentSchedule.length > 0) {
-        let targetEntry = currentSchedule.find(entry => nextTime >= entry.timelineStart && nextTime <= entry.timelineEnd);
-        if (!targetEntry) targetEntry = currentSchedule[currentSchedule.length - 1];
+        const targetEntry = findTimelineEntryAtTime(currentSchedule, nextTime);
+        if (!targetEntry) return;
         const offsetInTimeline = nextTime - targetEntry.timelineStart;
         const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
         if (videoRef.current) videoRef.current.currentTime = Math.max(0, sourceTime);

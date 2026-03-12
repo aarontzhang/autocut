@@ -6,13 +6,16 @@ import { VideoClip, CaptionEntry, EditAction, SilenceCandidate } from './types';
  */
 export function timelineToSourceTime(clips: VideoClip[], timelineTime: number): number {
   let cursor = 0;
-  for (const clip of clips) {
+  for (let index = 0; index < clips.length; index++) {
+    const clip = clips[index];
     const clipDuration = clip.sourceDuration / clip.speed;
-    if (timelineTime <= cursor + clipDuration) {
+    const clipEnd = cursor + clipDuration;
+    const isLastClip = index === clips.length - 1;
+    if (timelineTime >= cursor && (timelineTime < clipEnd || (isLastClip && timelineTime <= clipEnd))) {
       const offset = Math.max(0, timelineTime - cursor);
       return clip.sourceStart + offset * clip.speed;
     }
-    cursor += clipDuration;
+    cursor = clipEnd;
   }
   // Past end — clamp to end of last clip
   if (clips.length > 0) {
