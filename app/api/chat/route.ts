@@ -57,6 +57,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 ### 2b. Delete Range (delete_range)
 - Remove everything between two timeline times, automatically trimming or removing any clips in that region
 - Use when user says: "delete between X and Y", "remove from 0:20 to 0:30", "cut out the section from X to Y", etc.
+- If the user asks to remove the entire block before/after/between markers or timestamps, use delete_range for that contiguous span even if earlier turns discussed silence removal
 - After any structural edit, earlier chat messages may refer to pre-edit timeline times. Use the clip source ranges and applied-action history in context to translate those old references onto the current timeline instead of reusing stale timestamps.
 
 ### 2d. Delete Multiple Ranges (delete_ranges) — USE THIS for silence removal
@@ -67,6 +68,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - IMPORTANT: delete_ranges is a complete, one-shot operation. After issuing it, immediately return type:none. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
 - IMPORTANT: when removing silence, use the transcript's sub-second timing and cut as tightly as possible without clipping spoken words. Leaving a tiny bit of extra room is better than cutting into speech.
 - IMPORTANT: if the latest message is a short refinement like "before @1", "only the short ones", or "not the whole section", treat it as modifying the active unfinished silence-removal task instead of starting over.
+- IMPORTANT: if the latest message says "entire block", "whole section", "delete everything before/after/between", or otherwise rejects "silent sections", that is no longer a silence-removal request. Switch to one contiguous delete_range scoped by the requested markers/timestamps.
 - IMPORTANT: keep large delete_ranges payloads compact. Do not add commentary inside the JSON. Return a single valid <action> block only.
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
@@ -748,11 +750,32 @@ type ResolvedBoundary = {
   label: string;
 };
 
+const BOUNDARY_REFERENCE_PATTERN = String.raw`(?:@\d+|(?:marker|bookmark)\s+\d+|(?:(?:around|about|roughly|near|approximately|at)\s+)?(?:the\s+)?(?:\d+:\d{2}|\d+(?:\.\d+)?(?:\s*-\s*second|\s+seconds?)?(?:\s+mark)?))`;
+
+function formatActionTime(seconds: number): string {
+  const clamped = Math.max(0, seconds);
+  const minutes = Math.floor(clamped / 60);
+  const remainingSeconds = Math.floor(clamped % 60);
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+function normalizeBoundaryReference(rawReference: string): string {
+  return rawReference
+    .trim()
+    .replace(/^(?:around|about|roughly|near|approximately|at)\s+/i, '')
+    .replace(/^the\s+/i, '')
+    .replace(/(\d+(?:\.\d+)?)\s*-\s*second\s+mark$/i, '$1 seconds')
+    .replace(/(\d+(?:\.\d+)?)\s*-\s*second$/i, '$1 seconds')
+    .replace(/(\d+(?:\.\d+)?)\s+second\s+mark$/i, '$1 seconds')
+    .replace(/(\d+(?:\.\d+)?)\s+seconds?\s+mark$/i, '$1 seconds')
+    .replace(/(\d+:\d{2})\s+mark$/i, '$1');
+}
+
 function resolveBoundaryReference(
   rawReference: string,
   markers: Array<{ number?: number; timelineTime?: number }>,
 ): ResolvedBoundary | null {
-  const trimmed = rawReference.trim();
+  const trimmed = normalizeBoundaryReference(rawReference);
   const markerMatch = trimmed.match(/^@(\d+)$/) ?? trimmed.match(/^(?:marker|bookmark)\s+(\d+)$/i);
   if (markerMatch) {
     const markerNumber = Number(markerMatch[1]);
@@ -787,6 +810,13 @@ type SilenceTaskConstraints = {
   referencedLabels: string[];
 };
 
+type RangeDeleteConstraints = {
+  startTime: number;
+  endTime: number;
+  referencedLabels: string[];
+  hasExplicitBounds: boolean;
+};
+
 function resolveSelectedMarkerBoundary(
   selectedMarker: { number?: number; timelineTime?: number } | null,
 ): ResolvedBoundary | null {
@@ -797,18 +827,141 @@ function resolveSelectedMarkerBoundary(
   };
 }
 
+function resolveTaggedMarkerBoundary(
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
+): ResolvedBoundary | null {
+  const viableMarkers = taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number');
+  if (viableMarkers.length !== 1) return null;
+  const marker = viableMarkers[0];
+  return {
+    time: marker.timelineTime as number,
+    label: typeof marker.number === 'number' ? `@${marker.number}` : 'tagged marker',
+  };
+}
+
+function resolveTaggedMarkerRange(
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
+): { start: ResolvedBoundary; end: ResolvedBoundary } | null {
+  const viableMarkers = taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number');
+  if (viableMarkers.length !== 2) return null;
+  const [first, second] = [...viableMarkers]
+    .sort((a, b) => (a.timelineTime as number) - (b.timelineTime as number));
+  return {
+    start: {
+      time: first.timelineTime as number,
+      label: typeof first.number === 'number' ? `@${first.number}` : 'first tagged marker',
+    },
+    end: {
+      time: second.timelineTime as number,
+      label: typeof second.number === 'number' ? `@${second.number}` : 'second tagged marker',
+    },
+  };
+}
+
 function resolveImplicitMarkerBoundary(
   message: string,
   markers: Array<{ number?: number; timelineTime?: number }>,
   selectedMarker: { number?: number; timelineTime?: number } | null,
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
 ): ResolvedBoundary | null {
   const selectedBoundary = resolveSelectedMarkerBoundary(selectedMarker);
   if (selectedBoundary) return selectedBoundary;
 
-  const explicitMarkerReference = message.match(/(?:@(\d+)|(?:marker|bookmark)\s+(\d+))/i);
-  if (!explicitMarkerReference) return null;
+  const taggedBoundary = resolveTaggedMarkerBoundary(taggedMarkers);
+  if (taggedBoundary) return taggedBoundary;
 
-  return resolveBoundaryReference(explicitMarkerReference[0], markers);
+  const explicitMarkerReferences = [...message.matchAll(/(?:@(\d+)|(?:marker|bookmark)\s+(\d+))/gi)];
+  if (explicitMarkerReferences.length === 0) return null;
+
+  const lastReference = explicitMarkerReferences[explicitMarkerReferences.length - 1]?.[0];
+  if (!lastReference) return null;
+  return resolveBoundaryReference(lastReference, markers);
+}
+
+function applyRangeDeleteConstraintMessage(
+  message: string,
+  constraints: RangeDeleteConstraints,
+  markers: Array<{ number?: number; timelineTime?: number }>,
+  selectedMarker: { number?: number; timelineTime?: number } | null,
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
+) {
+  const betweenPattern = new RegExp(`\\b(?:between|from)\\s+(${BOUNDARY_REFERENCE_PATTERN})\\s+(?:and|to)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i');
+  const betweenMatch = message.match(betweenPattern);
+  if (betweenMatch) {
+    const start = resolveBoundaryReference(betweenMatch[1], markers);
+    const end = resolveBoundaryReference(betweenMatch[2], markers);
+    if (start && end) {
+      constraints.startTime = Math.min(start.time, end.time);
+      constraints.endTime = Math.max(start.time, end.time);
+      constraints.referencedLabels = [start.label, end.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  } else if (/\b(?:between|from)\s+(?:these|those|them|the markers|the tagged markers)\b/i.test(message)) {
+    const taggedRange = resolveTaggedMarkerRange(taggedMarkers);
+    if (taggedRange) {
+      constraints.startTime = taggedRange.start.time;
+      constraints.endTime = taggedRange.end.time;
+      constraints.referencedLabels = [taggedRange.start.label, taggedRange.end.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  }
+
+  const beforeMatch = message.match(new RegExp(`\\b(?:before|until|up to)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i'));
+  if (beforeMatch) {
+    const boundary = resolveBoundaryReference(beforeMatch[1], markers);
+    if (boundary) {
+      constraints.startTime = 0;
+      constraints.endTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  } else if (/\b(?:before|until|up to)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
+    if (boundary) {
+      constraints.startTime = 0;
+      constraints.endTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  }
+
+  const afterMatch = message.match(new RegExp(`\\b(?:after|since)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i'));
+  if (afterMatch) {
+    const boundary = resolveBoundaryReference(afterMatch[1], markers);
+    if (boundary) {
+      constraints.startTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  } else if (/\b(?:after|since)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
+    if (boundary) {
+      constraints.startTime = boundary.time;
+      constraints.endTime = constraints.endTime;
+      constraints.referencedLabels = [boundary.label];
+      constraints.hasExplicitBounds = true;
+      return;
+    }
+  }
+
+  if (
+    !constraints.hasExplicitBounds
+    && /\b(?:between|from)\b/i.test(message)
+    && taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number').length === 2
+  ) {
+    const taggedRange = resolveTaggedMarkerRange(taggedMarkers);
+    if (taggedRange) {
+      constraints.startTime = taggedRange.start.time;
+      constraints.endTime = taggedRange.end.time;
+      constraints.referencedLabels = [taggedRange.start.label, taggedRange.end.label];
+      constraints.hasExplicitBounds = true;
+    }
+  }
 }
 
 function applySilenceConstraintMessage(
@@ -816,6 +969,7 @@ function applySilenceConstraintMessage(
   constraints: SilenceTaskConstraints,
   markers: Array<{ number?: number; timelineTime?: number }>,
   selectedMarker: { number?: number; timelineTime?: number } | null,
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
 ) {
   const normalized = message.toLowerCase();
   const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
@@ -836,8 +990,8 @@ function applySilenceConstraintMessage(
       constraints.endTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
-  } else if (/\b(?:before|until|up to)\s+(?:the\s+|this\s+|selected\s+)?(?:marker|bookmark)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker);
+  } else if (/\b(?:before|until|up to)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
     if (boundary) {
       constraints.endTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
@@ -851,8 +1005,8 @@ function applySilenceConstraintMessage(
       constraints.startTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
-  } else if (/\b(?:after|since)\s+(?:the\s+|this\s+|selected\s+)?(?:marker|bookmark)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker);
+  } else if (/\b(?:after|since)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
     if (boundary) {
       constraints.startTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
@@ -869,11 +1023,76 @@ function applySilenceConstraintMessage(
   }
 }
 
+function messageRejectsSilenceOnlyScope(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return /\b(?:don'?t|do not)\s+mean\s+(?:just\s+)?(?:the\s+)?silent/.test(normalized)
+    || /\bi\s+mean\s+the\s+(?:entire|whole|full)\s+(?:block|section|range|part|segment)\b/.test(normalized)
+    || /\bnot\s+(?:just\s+)?(?:the\s+)?silent\s+(?:sections?|parts?|gaps?)\b/.test(normalized);
+}
+
+function isDirectRangeDeleteRequest(message: string): boolean {
+  const normalized = message.toLowerCase();
+  const hasDeleteVerb = /\b(delete|remove|cut)\b/.test(normalized);
+  const hasBoundaryLanguage = /\b(before|after|between|from|until|up to|since)\b/.test(normalized);
+  const hasWholeScopeLanguage = /\b(entire|whole|full)\s+(?:block|section|range|part|segment)\b/.test(normalized)
+    || /\b(?:delete|remove|cut)\s+everything\b/.test(normalized)
+    || /\b(?:all of it|the whole thing)\b/.test(normalized);
+  return messageRejectsSilenceOnlyScope(message)
+    || (hasDeleteVerb && hasBoundaryLanguage && !isLikelySilenceRequest(message))
+    || (hasDeleteVerb && hasWholeScopeLanguage);
+}
+
+function buildDirectRangeDeleteFromTaskState(
+  taskState: ConversationTaskState | null,
+  markers: Array<{ number?: number; timelineTime?: number }>,
+  selectedMarker: { number?: number; timelineTime?: number } | null,
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
+  videoDuration: number,
+): EditAction | null {
+  if (!taskState) return null;
+  if (!taskState.activeUserMessages.some((message) => isDirectRangeDeleteRequest(message))) {
+    return null;
+  }
+
+  const constraints: RangeDeleteConstraints = {
+    startTime: 0,
+    endTime: videoDuration,
+    referencedLabels: [],
+    hasExplicitBounds: false,
+  };
+
+  for (const message of taskState.activeUserMessages) {
+    applyRangeDeleteConstraintMessage(message, constraints, markers, selectedMarker, taggedMarkers);
+  }
+
+  if (!constraints.hasExplicitBounds) return null;
+  if (constraints.endTime <= constraints.startTime) {
+    return {
+      type: 'none',
+      message: 'That delete range collapsed to an empty section after the latest refinement.',
+    };
+  }
+
+  const direction = constraints.referencedLabels.length === 1
+    ? constraints.startTime > 0 ? `after ${constraints.referencedLabels[0]}` : `before ${constraints.referencedLabels[0]}`
+    : constraints.referencedLabels.length === 2
+      ? `between ${constraints.referencedLabels[0]} and ${constraints.referencedLabels[1]}`
+      : `from ${formatActionTime(constraints.startTime)} to ${formatActionTime(constraints.endTime)}`;
+
+  return {
+    type: 'delete_range',
+    deleteStartTime: constraints.startTime,
+    deleteEndTime: constraints.endTime,
+    message: `Removed the entire section ${direction}.`,
+  };
+}
+
 function buildSilenceActionFromTaskState(
   taskState: ConversationTaskState | null,
   silenceCandidates: SilenceCandidate[],
   markers: Array<{ number?: number; timelineTime?: number }>,
   selectedMarker: { number?: number; timelineTime?: number } | null,
+  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
   videoDuration: number,
 ): EditAction | null {
   if (!taskState) return null;
@@ -895,7 +1114,7 @@ function buildSilenceActionFromTaskState(
   };
 
   for (const message of taskState.activeUserMessages) {
-    applySilenceConstraintMessage(message, constraints, markers, selectedMarker);
+    applySilenceConstraintMessage(message, constraints, markers, selectedMarker, taggedMarkers);
   }
 
   if (constraints.endTime <= constraints.startTime) {
@@ -1388,6 +1607,22 @@ Honor these defaults unless the user explicitly asks for something different in 
       if (markerSummary.length > 0) {
         contextLines.push(`Timeline markers: ${markerSummary.join(' | ')}`);
       }
+      const taggedMarkers = Array.isArray(context?.taggedMarkers)
+        ? (context.taggedMarkers as Array<{ number?: number; timelineTime?: number; label?: string | null }>)
+            .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
+        : [];
+      if (taggedMarkers.length > 0) {
+        contextLines.push(
+          'Tagged markers attached to the latest user request: ' +
+          taggedMarkers.map((marker) => {
+            const markerNumber = marker.number as number;
+            const markerTimelineTime = marker.timelineTime as number;
+            const safeLabel = sanitizeInlineUntrustedText(marker.label, 80);
+            return `@${markerNumber} ${fmtSec(markerTimelineTime)}${safeLabel ? ` "${safeLabel}"` : ''}`;
+          }).join(' | ') +
+          '. If the user says "this", "that", or "here", prefer these tagged markers as the likely reference.'
+        );
+      }
       const explicitlyMentionedMarkers = extractMentionedMarkers(latestUserMessage, availableMarkers);
       if (explicitlyMentionedMarkers.length > 0) {
         contextLines.push(
@@ -1410,11 +1645,28 @@ Honor these defaults unless the user explicitly asks for something different in 
     const selectedMarker = context?.selectedMarker && typeof context.selectedMarker === 'object'
       ? (context.selectedMarker as { number?: number; timelineTime?: number })
       : null;
+    const taggedMarkers = Array.isArray(context?.taggedMarkers)
+      ? (context.taggedMarkers as Array<{ number?: number; timelineTime?: number }>)
+      : [];
+    const deterministicRangeDeleteAction = buildDirectRangeDeleteFromTaskState(
+      taskState,
+      availableMarkers,
+      selectedMarker,
+      taggedMarkers,
+      Number(context?.videoDuration ?? 0),
+    );
+    if (deterministicRangeDeleteAction) {
+      return NextResponse.json({
+        message: deterministicRangeDeleteAction.message,
+        action: deterministicRangeDeleteAction,
+      });
+    }
     const deterministicSilenceAction = buildSilenceActionFromTaskState(
       taskState,
       silenceCandidates,
       availableMarkers,
       selectedMarker,
+      taggedMarkers,
       Number(context?.videoDuration ?? 0),
     );
     if (deterministicSilenceAction) {

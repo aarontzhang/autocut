@@ -1701,12 +1701,15 @@ export default function ChatSidebar() {
     if (idx === -1) return null;
     return { index: idx, duration: clips[idx].sourceDuration };
   })();
+  const taggedMarkers = useMemo(() => resolveMarkersById(taggedMarkerIds, markers), [markers, taggedMarkerIds]);
   const selectedMarkerContext = (() => {
-    if (!selectedItem || selectedItem.type !== 'marker') return null;
-    return markers.find((marker) => marker.id === selectedItem.id) ?? null;
+    const selectedMarker = selectedItem && selectedItem.type === 'marker'
+      ? markers.find((marker) => marker.id === selectedItem.id) ?? null
+      : null;
+    if (selectedMarker) return selectedMarker;
+    return taggedMarkers.length === 1 ? taggedMarkers[0] : null;
   })();
   const inputTaggedMarkers = useMemo(() => extractTaggedMarkers(input, markers), [input, markers]);
-  const taggedMarkers = useMemo(() => resolveMarkersById(taggedMarkerIds, markers), [markers, taggedMarkerIds]);
   const markerSuggestions = useMemo(() => {
     if (!activeMarkerMention) return [];
     const query = activeMarkerMention.query.trim().toLowerCase();
@@ -1978,6 +1981,12 @@ export default function ChatSidebar() {
             linkedRange: marker.linkedRange ?? null,
             note: marker.note ?? null,
           })),
+          taggedMarkers: taggedMarkers.map((marker) => ({
+            id: marker.id,
+            number: marker.number,
+            timelineTime: marker.timelineTime,
+            label: marker.label ?? null,
+          })),
           textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
           silenceCandidates,
@@ -2070,7 +2079,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
