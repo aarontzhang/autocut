@@ -128,75 +128,40 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     cachedMediaUrlsRef.current.clear();
   }, []);
 
-  const applyCachedMediaUrl = useCallback((targetProjectId: string, sourcePath: string, objectUrl: string) => {
-    useEditorStore.setState((currentState) => {
-      if (currentState.currentProjectId !== targetProjectId) return currentState;
+  const preloadProjectMediaAssets = useCallback(async (signedUrls: Record<string, string>) => {
+    const hydratedUrls: Record<string, string> = {};
 
-      const nextVideoUrl = currentState.storagePath === sourcePath ? objectUrl : currentState.videoUrl;
-      let mediaLibraryChanged = false;
-      const nextMediaLibrary = currentState.mediaLibrary.map((item) => {
-        if (item.sourcePath !== sourcePath || item.url === objectUrl) return item;
-        mediaLibraryChanged = true;
-        return { ...item, url: objectUrl };
-      });
-      let clipsChanged = false;
-      const nextClips = currentState.clips.map((clip) => {
-        if (clip.sourcePath !== sourcePath || clip.sourceUrl === objectUrl) return clip;
-        clipsChanged = true;
-        return { ...clip, sourceUrl: objectUrl };
-      });
-
-      if (nextVideoUrl === currentState.videoUrl && !mediaLibraryChanged && !clipsChanged) {
-        return currentState;
+    for (const [sourcePath, sourceUrl] of Object.entries(signedUrls)) {
+      if (!sourcePath || !sourceUrl) continue;
+      if (isBlobUrl(sourceUrl)) {
+        hydratedUrls[sourcePath] = sourceUrl;
+        continue;
       }
 
-      return {
-        videoUrl: nextVideoUrl,
-        mediaLibrary: nextMediaLibrary,
-        clips: nextClips,
-      };
-    });
-  }, []);
-
-  const cacheProjectMediaLocally = useCallback(async (targetProjectId: string) => {
-    const state = useEditorStore.getState();
-    if (state.currentProjectId !== targetProjectId) return;
-
-    const entriesByPath = new Map<string, string>();
-    if (state.storagePath && state.videoUrl && !isBlobUrl(state.videoUrl)) {
-      entriesByPath.set(state.storagePath, state.videoUrl);
-    }
-    state.mediaLibrary.forEach((item) => {
-      if (item.sourcePath && item.url && !isBlobUrl(item.url) && !entriesByPath.has(item.sourcePath)) {
-        entriesByPath.set(item.sourcePath, item.url);
-      }
-    });
-    state.clips.forEach((clip) => {
-      if (clip.sourcePath && clip.sourceUrl && !isBlobUrl(clip.sourceUrl) && !entriesByPath.has(clip.sourcePath)) {
-        entriesByPath.set(clip.sourcePath, clip.sourceUrl);
-      }
-    });
-
-    for (const [sourcePath, sourceUrl] of entriesByPath) {
-      if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
-      if (cachedMediaUrlsRef.current.has(sourcePath)) {
-        applyCachedMediaUrl(targetProjectId, sourcePath, cachedMediaUrlsRef.current.get(sourcePath)!);
+      const cachedUrl = cachedMediaUrlsRef.current.get(sourcePath);
+      if (cachedUrl) {
+        hydratedUrls[sourcePath] = cachedUrl;
         continue;
       }
 
       try {
         const response = await fetch(sourceUrl);
-        if (!response.ok) continue;
+        if (!response.ok) {
+          hydratedUrls[sourcePath] = sourceUrl;
+          continue;
+        }
         const blob = await response.blob();
-        if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
         const objectUrl = URL.createObjectURL(blob);
         cachedMediaUrlsRef.current.set(sourcePath, objectUrl);
-        applyCachedMediaUrl(targetProjectId, sourcePath, objectUrl);
+        hydratedUrls[sourcePath] = objectUrl;
       } catch (error) {
-        console.warn('Failed to cache media locally:', error);
+        console.warn('Failed to preload project media asset:', error);
+        hydratedUrls[sourcePath] = sourceUrl;
       }
     }
-  }, [applyCachedMediaUrl]);
+
+    return hydratedUrls;
+  }, []);
 
   const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
     const state = useEditorStore.getState();
@@ -319,15 +284,20 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         if (!res.ok) return;
         const data = await res.json();
         const editState = structuredClone(data.edit_state ?? {});
+        const storagePath = data.video_path ?? null;
+        const signedUrls = await preloadProjectMediaAssets(data.signedUrls ?? {});
+        if (projectLoadSequenceRef.current !== loadSequence) return;
+        const primaryVideoUrl = storagePath
+          ? (signedUrls[storagePath] ?? data.signedUrl ?? '')
+          : (data.signedUrl ?? '');
         loadProject(editState, {
           projectId,
-          videoUrl: data.signedUrl ?? '',
-          storagePath: data.video_path ?? null,
+          videoUrl: primaryVideoUrl,
+          storagePath,
           videoFilename: data.video_filename ?? null,
-          signedUrls: data.signedUrls ?? {},
+          duration: typeof data.duration === 'number' ? data.duration : undefined,
+          signedUrls,
         });
-        await cacheProjectMediaLocally(projectId);
-        if (projectLoadSequenceRef.current !== loadSequence) return;
         lastSignedMediaRefreshAtRef.current = Date.now();
       } catch (e) {
         console.error('Failed to load project', e);
@@ -337,7 +307,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         }
       }
     })();
-  }, [cacheProjectMediaLocally, loadProject, projectId, refreshSignedMediaUrls, releaseCachedMediaUrls, resetEditor]);
+  }, [loadProject, preloadProjectMediaAssets, projectId, releaseCachedMediaUrls, resetEditor]);
 
   useEffect(() => (
     () => {

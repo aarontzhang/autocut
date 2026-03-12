@@ -194,7 +194,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     ? activeSourceUrl
     : '';
   const displaySourceUrl = resolvedActiveSourceUrl || desiredSourceUrl;
-  const isDisplaySourceReady = Boolean(sourceReadyState[displaySourceUrl]);
+  const areAllSourcesReady = uniqueSourceUrls.every((srcUrl) => Boolean(sourceReadyState[srcUrl]));
   const activeDimensions = sourceDimensions[displaySourceUrl || uniqueSourceUrls[0] || videoUrl] ?? null;
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, activeDimensions),
@@ -224,27 +224,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       activeEl.play().catch(() => {});
     }
   }, [displaySourceUrl, uniqueSourceUrls, videoUrl]);
-
-  useEffect(() => {
-    if (schedule.length === 0) return;
-
-    const targetEntry = findTimelineEntryAtTime(schedule, currentTime);
-    if (!targetEntry) return;
-
-    const targetIndex = schedule.findIndex((entry) => entry.clipId === targetEntry.clipId);
-    const entriesToPrime = [
-      schedule[targetIndex - 1],
-      schedule[targetIndex],
-      schedule[targetIndex + 1],
-    ].filter((entry): entry is typeof schedule[number] => Boolean(entry));
-
-    for (const entry of entriesToPrime) {
-      const clip = clips.find((item) => item.id === entry.clipId);
-      const sourceUrl = clip?.sourceUrl ?? videoUrl;
-      if (!sourceUrl) continue;
-      primeSourceAtTime(sourceUrl, entry.sourceStart);
-    }
-  }, [clips, currentTime, primeSourceAtTime, schedule, videoUrl]);
 
   const activateSource = useCallback((sourceUrl: string) => {
     if (activeSourceUrlRef.current === sourceUrl) return;
@@ -453,6 +432,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   useImperativeHandle(ref, () => ({
     seekTo: seekToTimelineTime,
     togglePlay: () => {
+      if (!areAllSourcesReady) return;
       const video = videoRef.current;
       if (!video) return;
       if (video.paused) {
@@ -463,9 +443,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         for (const el of sourceVideoMapRef.current.values()) el.pause();
       }
     },
-  }), [seekToTimelineTime, setupAudio, videoRef]);
+  }), [areAllSourcesReady, seekToTimelineTime, setupAudio, videoRef]);
 
   const togglePlay = useCallback(() => {
+    if (!areAllSourcesReady) return;
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
@@ -475,7 +456,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     } else {
       for (const el of sourceVideoMapRef.current.values()) el.pause();
     }
-  }, [setupAudio, videoRef]);
+  }, [areAllSourcesReady, setupAudio, videoRef]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -560,7 +541,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             />
           ))}
 
-          {!isDisplaySourceReady && (
+          {!areAllSourcesReady && (
             <div
               style={{
                 position: 'absolute',
@@ -569,7 +550,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 alignItems: 'center',
                 justifyContent: 'center',
                 background: 'rgba(0,0,0,0.22)',
-                pointerEvents: 'none',
+                pointerEvents: 'auto',
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: 'rgba(255,255,255,0.72)' }}>
