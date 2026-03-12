@@ -135,6 +135,7 @@ Example:
 - Prefer adding markers first when you found plausible events but the user still needs to review them
 - Marker placement does not need millisecond precision unless the user explicitly asks for it
 - When evidence is suggestive but not exact, place the best-guess marker anyway, keep status open, and include linkedRange/confidence so the user can review it quickly
+- If the user asked for a marker/bookmark/tag and you have any plausible evidence window, return add_marker/add_markers now instead of type:none
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
 - When a user references "marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
 - If the latest user message explicitly references one or more markers, prioritize those markers over unmentioned markers when deciding where to inspect, cut, or add emphasis
@@ -222,6 +223,7 @@ No action:
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
 - You are a single-action editor per request. Complete ONE operation unless the user explicitly asked for multiple distinct edits in one message. After executing any edit, return type:none immediately unless more work is clearly required by the original request.
+- For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
 
 ## Visual and audio context
 You may be provided with sampled frames from the user's video as text summaries, dense sampled frames as images, and/or a full audio transcript.
@@ -1257,6 +1259,162 @@ function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (second
   return lines;
 }
 
+function isMarkerPlacementRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /\bmarkers?|bookmarks?|tags?\b/.test(normalized)
+    && /\b(add|create|drop|find|help|locate|mark|place|point|set|tag|put)\b/.test(normalized);
+}
+
+function extractExplicitTimelineReferences(message: string): number[] {
+  const matches: number[] = [];
+  const seen = new Set<number>();
+  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = timePattern.exec(message)) !== null) {
+    const seconds = match[1] !== undefined
+      ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
+      : parseFloat(match[3] ?? '0');
+    if (!Number.isFinite(seconds) || seen.has(seconds)) continue;
+    seen.add(seconds);
+    matches.push(seconds);
+  }
+
+  return matches;
+}
+
+function formatMinutesSeconds(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60);
+  return `${minutes}:${remainder.toString().padStart(2, '0')}`;
+}
+
+function buildMarkerLabelFromQuery(query: string): string {
+  const cleaned = query
+    .replace(/\b(?:please|could you|can you|would you|for me)\b/gi, ' ')
+    .replace(/\b(?:add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/gi, ' ')
+    .replace(/\b(?:a|an|the)\s+(?:marker|bookmark|tag)\b/gi, ' ')
+    .replace(/\b(?:marker|bookmark|tag)\b/gi, ' ')
+    .replace(/\b(?:where|when|that|this|there|here)\b/gi, ' ')
+    .replace(/["']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return 'Likely match';
+  if (cleaned.length <= 48) return cleaned;
+  return `${cleaned.slice(0, 45).trimEnd()}...`;
+}
+
+function queriesLikelyReferToSameMoment(a: string, b: string): boolean {
+  const normalize = (value: string) => value.trim().toLowerCase();
+  const left = normalize(a);
+  const right = normalize(b);
+  if (!left || !right) return false;
+  if (left === right || left.includes(right) || right.includes(left)) return true;
+
+  const leftTokens = new Set(left.split(/[^a-z0-9]+/g).filter((token) => token.length >= 3));
+  const rightTokens = new Set(right.split(/[^a-z0-9]+/g).filter((token) => token.length >= 3));
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) overlap += 1;
+  }
+  return overlap >= Math.min(2, Math.max(1, Math.min(leftTokens.size, rightTokens.size)));
+}
+
+function buildMarkerActionFromTimelineRanges(
+  query: string,
+  ranges: Array<{ timelineStart: number; timelineEnd: number; markerTime?: number }>,
+  confidence: number,
+  message: string,
+): EditAction | null {
+  const validRanges = ranges.filter((range) => range.timelineEnd > range.timelineStart);
+  if (validRanges.length === 0) return null;
+
+  const label = buildMarkerLabelFromQuery(query);
+  const markers = validRanges.map((range, index) => ({
+    timelineTime: range.markerTime ?? range.timelineStart,
+    label: validRanges.length === 1 ? label : `${label} ${index + 1}`,
+    createdBy: 'ai' as const,
+    status: 'open' as const,
+    linkedRange: {
+      startTime: range.timelineStart,
+      endTime: range.timelineEnd,
+    },
+    confidence,
+    note: query,
+  }));
+
+  if (markers.length === 1) {
+    return {
+      type: 'add_marker',
+      marker: markers[0],
+      message,
+    };
+  }
+
+  return {
+    type: 'add_markers',
+    markers,
+    message,
+  };
+}
+
+function buildBestEffortMarkerFallback(
+  latestUserMessage: string,
+  currentAction: EditAction | null,
+  denseFrames: IndexedVideoFrame[],
+  priorVisualSearch: VisualSearchSession | null,
+): EditAction | null {
+  if (currentAction && currentAction.type !== 'none') return null;
+  if (!isMarkerPlacementRequest(latestUserMessage)) return null;
+
+  const proposalRanges = queriesLikelyReferToSameMoment(latestUserMessage, priorVisualSearch?.query ?? '')
+    ? (priorVisualSearch?.proposal?.timelineRanges ?? [])
+    : [];
+  if (proposalRanges.length > 0) {
+    return buildMarkerActionFromTimelineRanges(
+      latestUserMessage,
+      proposalRanges,
+      priorVisualSearch?.confidenceBand === 'high' ? 0.9 : priorVisualSearch?.confidenceBand === 'medium' ? 0.72 : 0.55,
+      proposalRanges.length === 1
+        ? 'Tagged the strongest likely moment for review.'
+        : `Tagged ${proposalRanges.length} likely moments for review.`,
+    );
+  }
+
+  const denseTimelineTimes = denseFrames
+    .map((frame) => frame.timelineTime)
+    .filter((time): time is number => Number.isFinite(time));
+  if (denseTimelineTimes.length === 0) return null;
+
+  const rangeStarts = denseFrames
+    .map((frame) => typeof frame.rangeStart === 'number' ? frame.rangeStart : frame.timelineTime)
+    .filter((time): time is number => Number.isFinite(time));
+  const rangeEnds = denseFrames
+    .map((frame) => typeof frame.rangeEnd === 'number' ? frame.rangeEnd : frame.timelineTime)
+    .filter((time): time is number => Number.isFinite(time));
+  if (rangeStarts.length === 0 || rangeEnds.length === 0) return null;
+
+  const rangeStart = Math.min(...rangeStarts);
+  const rangeEnd = Math.max(...rangeEnds);
+  if (!(rangeEnd > rangeStart)) return null;
+
+  const midpoint = rangeStart + (rangeEnd - rangeStart) / 2;
+  const explicitAnchor = extractExplicitTimelineReferences(latestUserMessage)
+    .find((time) => time >= rangeStart - 0.5 && time <= rangeEnd + 0.5);
+  const anchor = explicitAnchor ?? denseTimelineTimes.reduce((closest, candidate) => (
+    Math.abs(candidate - midpoint) < Math.abs(closest - midpoint) ? candidate : closest
+  ), denseTimelineTimes[0]);
+
+  return buildMarkerActionFromTimelineRanges(
+    latestUserMessage,
+    [{ timelineStart: rangeStart, timelineEnd: rangeEnd, markerTime: anchor }],
+    rangeEnd - rangeStart <= 8 ? 0.48 : 0.36,
+    `Placed a best-guess review marker around ${formatMinutesSeconds(anchor)}.`,
+  );
+}
+
 function extractRemovedSourceRanges(
   appliedActions: unknown,
   assetId?: string | null,
@@ -1770,7 +1928,7 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
     const { message, parsedAction } = extractTrailingAction(rawText);
-    const action = validateEditAction(parsedAction, {
+    const validationContext = {
       clipCount: clipSummaries.length,
       videoDuration: Number(context?.videoDuration ?? 0),
       markerIds: new Set(
@@ -1781,8 +1939,16 @@ Honor these defaults unless the user explicitly asks for something different in 
           : [],
       ),
       overlayCount: typeof context?.textOverlayCount === 'number' ? context.textOverlayCount : undefined,
+    };
+    const action = validateEditAction(parsedAction, validationContext);
+    const fallbackMarkerAction = validateEditAction(
+      buildBestEffortMarkerFallback(latestUserMessage, action, denseFrames, priorVisualSearch),
+      validationContext,
+    );
+    return NextResponse.json({
+      message: fallbackMarkerAction?.message ?? message,
+      action: fallbackMarkerAction ?? action,
     });
-    return NextResponse.json({ message, action });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }

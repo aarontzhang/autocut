@@ -486,6 +486,39 @@ function isApproximateMarkerRequest(text: string): boolean {
     && /\b(add|find|help|locate|mark|place|point|set|tag)\b/.test(normalized);
 }
 
+function buildMarkerLabelFromRequest(text: string): string {
+  const cleaned = text
+    .replace(/\b(?:please|could you|can you|would you|for me)\b/gi, ' ')
+    .replace(/\b(?:add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/gi, ' ')
+    .replace(/\b(?:a|an|the)\s+(?:marker|bookmark|tag)\b/gi, ' ')
+    .replace(/\b(?:marker|bookmark|tag)\b/gi, ' ')
+    .replace(/\b(?:where|when|that|this|there|here)\b/gi, ' ')
+    .replace(/["']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return 'Likely match';
+  if (cleaned.length <= 48) return cleaned;
+  return `${cleaned.slice(0, 45).trimEnd()}...`;
+}
+
+function buildBestGuessMarkerAction(query: string, startTime: number, endTime: number): EditAction {
+  const midpoint = startTime + (endTime - startTime) / 2;
+  return {
+    type: 'add_marker',
+    marker: {
+      timelineTime: midpoint,
+      label: buildMarkerLabelFromRequest(query),
+      createdBy: 'ai',
+      status: 'open',
+      linkedRange: { startTime, endTime },
+      confidence: endTime - startTime <= 8 ? 0.48 : 0.34,
+      note: query,
+    },
+    message: `Placed a best-guess marker around ${formatChatTime(midpoint)} for review.`,
+  };
+}
+
 function getDenseRequestLimitForInput(latestUserInput: string): number {
   return isApproximateMarkerRequest(latestUserInput)
     ? MAX_MARKER_DENSE_FRAME_WINDOW_SECONDS
@@ -2009,10 +2042,26 @@ export default function ChatSidebar() {
         if (spanSeconds > maxDenseWindowSeconds) {
           const narrowedReq = narrowDenseFrameRequestAroundMention(req, latestUserInput, freshState.videoDuration);
           if (!narrowedReq) {
-            addMessage({
-              role: 'assistant',
-              content: getDenseRequestTooBroadFeedback(req.startTime, req.endTime, latestUserInput),
-            });
+            if (isApproximateMarkerRequest(latestUserInput)) {
+              const fallbackMarkerAction = buildBestGuessMarkerAction(latestUserInput, req.startTime, req.endTime);
+              applyStoredAction(fallbackMarkerAction);
+              recordAppliedAction(fallbackMarkerAction, fallbackMarkerAction.message);
+              const markerSeekTime = getMarkerActionSeekTime(fallbackMarkerAction, freshState.markers);
+              if (markerSeekTime !== null) requestSeek(markerSeekTime);
+              addMessage({
+                role: 'assistant',
+                content: fallbackMarkerAction.message,
+                action: fallbackMarkerAction,
+                autoApplied: true,
+                actionStatus: 'completed',
+                actionResult: getMarkerActionResult(fallbackMarkerAction),
+              });
+            } else {
+              addMessage({
+                role: 'assistant',
+                content: getDenseRequestTooBroadFeedback(req.startTime, req.endTime, latestUserInput),
+              });
+            }
             producedVisibleResponse = true;
             return;
           }
@@ -2201,7 +2250,9 @@ export default function ChatSidebar() {
     : null;
   const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
   const canSendDespiteIndexing = pendingVisualQuery;
-  const composerDisabled = isChatLoading || reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing);
+  const mediaPreparationBlockingSend = hasVideoSource && !agentContextReady && !canSendDespiteIndexing;
+  const composerInputDisabled = isChatLoading || reviewLocked;
+  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
 
   const resizeComposer = useCallback(() => {
     const ta = textareaRef.current;
@@ -2479,11 +2530,11 @@ export default function ChatSidebar() {
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 6,
           background: 'var(--bg-elevated)',
-          border: `1px solid ${composerDisabled ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
+          border: `1px solid ${composerMuted ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
           borderRadius: 8,
           padding: '9px 11px 7px',
           transition: 'border-color 0.2s ease, opacity 0.2s ease',
-          opacity: composerDisabled ? 0.82 : 1,
+          opacity: composerMuted ? 0.82 : 1,
         }}>
           {selectedClipContext && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -2605,17 +2656,17 @@ export default function ChatSidebar() {
                 ? 'Complete the active review…'
                 : isChatLoading
                   ? 'Autocut is working…'
-                  : hasVideoSource && !agentContextReady && !canSendDespiteIndexing
-                    ? 'Autocut is preparing the media…'
+                  : mediaPreparationBlockingSend
+                    ? 'Autocut is preparing the media. You can keep typing…'
                   : 'Find events, reference markers, and review cuts…'
             }
             rows={1}
-            disabled={composerDisabled}
+            disabled={composerInputDisabled}
             style={{
               resize: 'none',
               background: 'transparent',
               border: 'none',
-              color: composerDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
+              color: composerInputDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
@@ -2646,19 +2697,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || composerDisabled}
+                disabled={!input.trim() || composerInputDisabled || mediaPreparationBlockingSend}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !composerDisabled ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !composerDisabled ? 'pointer' : 'default',
+                  cursor: input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !composerDisabled ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !composerDisabled ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>
