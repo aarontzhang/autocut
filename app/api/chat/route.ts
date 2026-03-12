@@ -574,6 +574,44 @@ function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
   return priorUserMessage?.content?.trim() || null;
 }
 
+function isSyntheticContinuationUserMessage(message: string): boolean {
+  const normalized = message.trim();
+  if (!normalized) return false;
+  return /^\[\d+\s+dense frames extracted from .*now answer with these frames\.\]$/i.test(normalized)
+    || /^continue my previous request now that the requested transcript is available\./i.test(normalized);
+}
+
+function extractOriginalRequestFromContinuation(message: string): string | null {
+  const transcriptContinuationMatch = message.match(/original request:\s*"([\s\S]+?)"\.?\s*do not ask to transcribe/i);
+  if (transcriptContinuationMatch?.[1]) {
+    return transcriptContinuationMatch[1].trim();
+  }
+  return null;
+}
+
+function findEffectiveLatestUserMessage(messages: ChatTurn[]): string {
+  const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex === -1) return '';
+
+  const latestUserMessage = messages[latestUserIndex]?.content?.trim() ?? '';
+  if (!isSyntheticContinuationUserMessage(latestUserMessage)) {
+    return latestUserMessage;
+  }
+
+  const parsedOriginalRequest = extractOriginalRequestFromContinuation(latestUserMessage);
+  if (parsedOriginalRequest) return parsedOriginalRequest;
+
+  for (let index = latestUserIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user') continue;
+    const candidate = message.content.trim();
+    if (!candidate || isSyntheticContinuationUserMessage(candidate)) continue;
+    return candidate;
+  }
+
+  return latestUserMessage;
+}
+
 function normalizeRichChatTurns(value: unknown): RichChatTurn[] {
   if (!Array.isArray(value)) return [];
 
@@ -1481,9 +1519,9 @@ export async function POST(req: NextRequest) {
 
     const normalizedMessages = normalizeChatTurns(messages);
     const richMessages = normalizeRichChatTurns(messages);
-    const latestUserMessage = [...normalizedMessages]
-      .reverse()
-      .find((message) => message.role === 'user')?.content ?? '';
+    const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages);
+    const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
+    const hasDenseFrames = requestFrames.some((frame) => frame.kind === 'dense');
     const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}
@@ -1521,7 +1559,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       priorVisualSearch
       && context?.projectId
       && priorVisualSearch.projectId === context.projectId
-      && isAffirmativeVisualFollowUp(latestUserMessage)
+      && isAffirmativeVisualFollowUp(effectiveLatestUserMessage)
       && priorVisualSearch.proposal?.intent.actionType === 'delete'
       && priorVisualSearch.proposal.timelineRanges.length > 0
     ) {
@@ -1540,14 +1578,19 @@ Honor these defaults unless the user explicitly asks for something different in 
       });
     }
 
-    if (isCaptionRequest(latestUserMessage)) {
+    if (isCaptionRequest(effectiveLatestUserMessage)) {
       return NextResponse.json({
         message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
         action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
       });
     }
 
-    if (context?.projectId && typeof context.projectId === 'string' && isLikelyVisualQuery(latestUserMessage)) {
+    if (
+      context?.projectId
+      && typeof context.projectId === 'string'
+      && isLikelyVisualQuery(effectiveLatestUserMessage)
+      && !hasDenseFrames
+    ) {
       const { data: project, error: projectError } = await supabase
         .from('projects')
         .select('id')
@@ -1564,7 +1607,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       }
 
       let asset = null;
-      const intent = parseVisualQuery(latestUserMessage);
+      const intent = parseVisualQuery(effectiveLatestUserMessage);
       try {
         asset = await getPrimaryMediaAsset(supabase, context.projectId);
       } catch (error) {
@@ -1597,7 +1640,7 @@ Honor these defaults unless the user explicitly asks for something different in 
 
         if (candidates.length > 0) {
           try {
-            verifiedRanges = await verifyCandidatesAgainstQuery(supabase, asset, latestUserMessage, candidates);
+            verifiedRanges = await verifyCandidatesAgainstQuery(supabase, asset, effectiveLatestUserMessage, candidates);
           } catch (error) {
             console.error('[chat.visual] candidate verification failed', error);
           }
@@ -1642,7 +1685,7 @@ Honor these defaults unless the user explicitly asks for something different in 
                 endTime: range.timelineEnd,
               },
               confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
-              note: latestUserMessage,
+              note: effectiveLatestUserMessage,
             })),
             marker: proposal.timelineRanges[0]
               ? {
@@ -1655,7 +1698,7 @@ Honor these defaults unless the user explicitly asks for something different in 
                     endTime: proposal.timelineRanges[0].timelineEnd,
                   },
                   confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
-                  note: latestUserMessage,
+                  note: effectiveLatestUserMessage,
                 }
               : undefined,
             message: proposal.timelineRanges.length === 1
@@ -1672,7 +1715,7 @@ Honor these defaults unless the user explicitly asks for something different in 
         const visualSearch: VisualSearchSession = {
           projectId: context.projectId,
           assetId: asset.id,
-          query: latestUserMessage,
+          query: effectiveLatestUserMessage,
           confidenceBand,
           intent,
           candidates,
@@ -1781,7 +1824,7 @@ Honor these defaults unless the user explicitly asks for something different in 
           '. If the user says "this", "that", or "here", prefer these tagged markers as the likely reference.'
         );
       }
-      const explicitlyMentionedMarkers = extractMentionedMarkers(latestUserMessage, availableMarkers);
+      const explicitlyMentionedMarkers = extractMentionedMarkers(effectiveLatestUserMessage, availableMarkers);
       if (explicitlyMentionedMarkers.length > 0) {
         contextLines.push(
           'Explicit marker references in the latest user request: ' +
@@ -1874,7 +1917,7 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const contextContent: Anthropic.ContentBlockParam[] = [];
 
-    const frames = (context?.frames as IndexedVideoFrame[] | undefined) ?? [];
+    const frames = requestFrames;
     const denseFrames = frames.filter((frame) => frame.kind === 'dense');
     if (denseFrames.length > 0) {
       for (const frame of denseFrames) {
@@ -1942,7 +1985,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     };
     const action = validateEditAction(parsedAction, validationContext);
     const fallbackMarkerAction = validateEditAction(
-      buildBestEffortMarkerFallback(latestUserMessage, action, denseFrames, priorVisualSearch),
+      buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, denseFrames, priorVisualSearch),
       validationContext,
     );
     return NextResponse.json({
