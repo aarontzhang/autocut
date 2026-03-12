@@ -603,10 +603,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                     height: '100%',
                     objectFit: 'contain',
                     opacity: isDisplayedInstance ? 1 : 0,
-                    visibility: isDisplayedInstance ? 'visible' : 'hidden',
                     pointerEvents: isDisplayedInstance ? 'auto' : 'none',
                     cursor: 'pointer',
-                    transition: 'opacity 0.12s ease',
+                    transition: 'opacity 0.12s linear',
+                    willChange: 'opacity',
                   }}
                   onLoadedMetadata={() => {
                     const el = getVideoInstance(srcUrl, slot);
