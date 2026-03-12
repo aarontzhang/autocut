@@ -782,10 +782,21 @@ type SilenceTaskConstraints = {
   referencedLabels: string[];
 };
 
+function resolveSelectedMarkerBoundary(
+  selectedMarker: { number?: number; timelineTime?: number } | null,
+): ResolvedBoundary | null {
+  if (!selectedMarker || typeof selectedMarker.timelineTime !== 'number') return null;
+  return {
+    time: selectedMarker.timelineTime,
+    label: typeof selectedMarker.number === 'number' ? `@${selectedMarker.number}` : 'selected marker',
+  };
+}
+
 function applySilenceConstraintMessage(
   message: string,
   constraints: SilenceTaskConstraints,
   markers: Array<{ number?: number; timelineTime?: number }>,
+  selectedMarker: { number?: number; timelineTime?: number } | null,
 ) {
   const normalized = message.toLowerCase();
   const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
@@ -806,11 +817,23 @@ function applySilenceConstraintMessage(
       constraints.endTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
+  } else if (/\b(?:before|until|up to)\s+(?:the\s+|this\s+|selected\s+)?marker\b/i.test(message)) {
+    const boundary = resolveSelectedMarkerBoundary(selectedMarker);
+    if (boundary) {
+      constraints.endTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+    }
   }
 
   const afterMatch = message.match(/\b(?:after|since)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
   if (afterMatch) {
     const boundary = resolveBoundaryReference(afterMatch[1], markers);
+    if (boundary) {
+      constraints.startTime = boundary.time;
+      constraints.referencedLabels = [boundary.label];
+    }
+  } else if (/\b(?:after|since)\s+(?:the\s+|this\s+|selected\s+)?marker\b/i.test(message)) {
+    const boundary = resolveSelectedMarkerBoundary(selectedMarker);
     if (boundary) {
       constraints.startTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
@@ -831,6 +854,7 @@ function buildSilenceActionFromTaskState(
   taskState: ConversationTaskState | null,
   silenceCandidates: SilenceCandidate[],
   markers: Array<{ number?: number; timelineTime?: number }>,
+  selectedMarker: { number?: number; timelineTime?: number } | null,
   videoDuration: number,
 ): EditAction | null {
   if (!taskState) return null;
@@ -852,7 +876,7 @@ function buildSilenceActionFromTaskState(
   };
 
   for (const message of taskState.activeUserMessages) {
-    applySilenceConstraintMessage(message, constraints, markers);
+    applySilenceConstraintMessage(message, constraints, markers, selectedMarker);
   }
 
   if (constraints.endTime <= constraints.startTime) {
@@ -1364,10 +1388,14 @@ Honor these defaults unless the user explicitly asks for something different in 
     const availableMarkers = Array.isArray(context?.markers)
       ? (context.markers as Array<{ number?: number; timelineTime?: number }>)
       : [];
+    const selectedMarker = context?.selectedMarker && typeof context.selectedMarker === 'object'
+      ? (context.selectedMarker as { number?: number; timelineTime?: number })
+      : null;
     const deterministicSilenceAction = buildSilenceActionFromTaskState(
       taskState,
       silenceCandidates,
       availableMarkers,
+      selectedMarker,
       Number(context?.videoDuration ?? 0),
     );
     if (deterministicSilenceAction) {
