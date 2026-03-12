@@ -16,9 +16,6 @@ const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 45000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
-const MAX_DENSE_FRAME_WINDOW_SECONDS = 8;
-const MAX_MARKER_DENSE_FRAME_WINDOW_SECONDS = 20;
-const AUTO_NARROWED_FRAME_WINDOW_SECONDS = 6;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const AGENT_MENU_ITEMS = [
   { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
@@ -472,70 +469,6 @@ function getMarkerActionSeekTime(
   return null;
 }
 
-function getDenseRequestTooBroadMessage(startTime: number, endTime: number): string {
-  return `I need an approximate timestamp or a much narrower range. Inspecting ${formatTime(startTime)}–${formatTime(endTime)} densely is too broad to reliably find a visual event that may last under a second.`;
-}
-
-function getApproximateMarkerTooBroadMessage(startTime: number, endTime: number): string {
-  return `I can make a best-guess marker, but ${formatTime(startTime)}–${formatTime(endTime)} is still too wide for a useful one-pass scan. Point me to a rougher spot inside that span and I'll tag it.`;
-}
-
-function isApproximateMarkerRequest(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return /\bmarkers?|bookmarks?|tags?\b/.test(normalized)
-    && /\b(add|find|help|locate|mark|place|point|set|tag)\b/.test(normalized);
-}
-
-function buildMarkerLabelFromRequest(text: string): string {
-  const cleaned = text
-    .replace(/\b(?:please|could you|can you|would you|for me)\b/gi, ' ')
-    .replace(/\b(?:add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/gi, ' ')
-    .replace(/\b(?:a|an|the)\s+(?:marker|bookmark|tag)\b/gi, ' ')
-    .replace(/\b(?:marker|bookmark|tag)\b/gi, ' ')
-    .replace(/\b(?:where|when|that|this|there|here)\b/gi, ' ')
-    .replace(/["']/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!cleaned) return 'Likely match';
-  if (cleaned.length <= 48) return cleaned;
-  return `${cleaned.slice(0, 45).trimEnd()}...`;
-}
-
-function buildBestGuessMarkerAction(query: string, startTime: number, endTime: number): EditAction {
-  const midpoint = startTime + (endTime - startTime) / 2;
-  return {
-    type: 'add_marker',
-    marker: {
-      timelineTime: midpoint,
-      label: buildMarkerLabelFromRequest(query),
-      createdBy: 'ai',
-      status: 'open',
-      linkedRange: { startTime, endTime },
-      confidence: endTime - startTime <= 8 ? 0.48 : 0.34,
-      note: query,
-    },
-    message: `Placed a best-guess marker around ${formatChatTime(midpoint)} for review.`,
-  };
-}
-
-function getDenseRequestLimitForInput(latestUserInput: string): number {
-  return isApproximateMarkerRequest(latestUserInput)
-    ? MAX_MARKER_DENSE_FRAME_WINDOW_SECONDS
-    : MAX_DENSE_FRAME_WINDOW_SECONDS;
-}
-
-function getDenseRequestTooBroadFeedback(
-  startTime: number,
-  endTime: number,
-  latestUserInput: string,
-): string {
-  if (isApproximateMarkerRequest(latestUserInput)) {
-    return getApproximateMarkerTooBroadMessage(startTime, endTime);
-  }
-  return getDenseRequestTooBroadMessage(startTime, endTime);
-}
-
 function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number | null {
   if (action.type === 'split_clip') {
     return action.splitTime ?? null;
@@ -637,53 +570,6 @@ function formatChatTime(seconds: number): string {
 
 function looksLikeVisualSearchQuery(text: string): boolean {
   return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
-}
-
-function extractExplicitTimeReferences(text: string): number[] {
-  const matches: number[] = [];
-  const seen = new Set<number>();
-  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = timePattern.exec(text)) !== null) {
-    const seconds = match[1] !== undefined
-      ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
-      : parseFloat(match[3] ?? '0');
-    if (!Number.isFinite(seconds) || seen.has(seconds)) continue;
-    seen.add(seconds);
-    matches.push(seconds);
-  }
-
-  return matches;
-}
-
-function narrowDenseFrameRequestAroundMention(
-  req: { startTime: number; endTime: number; count?: number },
-  latestUserInput: string,
-  videoDuration: number,
-): { startTime: number; endTime: number; count?: number } | null {
-  const mentionedTimes = extractExplicitTimeReferences(latestUserInput);
-  const anchor = mentionedTimes.find((time) => time >= req.startTime - 1 && time <= req.endTime + 1);
-  if (anchor === undefined) return null;
-
-  const targetWindow = Math.min(MAX_DENSE_FRAME_WINDOW_SECONDS, AUTO_NARROWED_FRAME_WINDOW_SECONDS);
-  const halfWindow = targetWindow / 2;
-  let startTime = Math.max(0, anchor - halfWindow);
-  let endTime = Math.min(videoDuration, anchor + halfWindow);
-
-  if (endTime - startTime < targetWindow) {
-    if (startTime <= 0) {
-      endTime = Math.min(videoDuration, startTime + targetWindow);
-    } else if (endTime >= videoDuration) {
-      startTime = Math.max(0, endTime - targetWindow);
-    }
-  }
-
-  startTime = Math.max(req.startTime, startTime);
-  endTime = Math.min(req.endTime, endTime);
-
-  if (endTime - startTime <= 0.5) return null;
-  return { ...req, startTime, endTime };
 }
 
 function upsertMarkersFromVisualSearch(
@@ -2036,38 +1922,8 @@ export default function ChatSidebar() {
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
-        let req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-        let spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
-        const maxDenseWindowSeconds = getDenseRequestLimitForInput(latestUserInput);
-        if (spanSeconds > maxDenseWindowSeconds) {
-          const narrowedReq = narrowDenseFrameRequestAroundMention(req, latestUserInput, freshState.videoDuration);
-          if (!narrowedReq) {
-            if (isApproximateMarkerRequest(latestUserInput)) {
-              const fallbackMarkerAction = buildBestGuessMarkerAction(latestUserInput, req.startTime, req.endTime);
-              applyStoredAction(fallbackMarkerAction);
-              recordAppliedAction(fallbackMarkerAction, fallbackMarkerAction.message);
-              const markerSeekTime = getMarkerActionSeekTime(fallbackMarkerAction, freshState.markers);
-              if (markerSeekTime !== null) requestSeek(markerSeekTime);
-              addMessage({
-                role: 'assistant',
-                content: fallbackMarkerAction.message,
-                action: fallbackMarkerAction,
-                autoApplied: true,
-                actionStatus: 'completed',
-                actionResult: getMarkerActionResult(fallbackMarkerAction),
-              });
-            } else {
-              addMessage({
-                role: 'assistant',
-                content: getDenseRequestTooBroadFeedback(req.startTime, req.endTime, latestUserInput),
-              });
-            }
-            producedVisibleResponse = true;
-            return;
-          }
-          req = narrowedReq;
-          spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
-        }
+        const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
+        const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
         const count = Math.min(
           req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
           60,

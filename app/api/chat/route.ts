@@ -97,11 +97,11 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Request a higher-density set of actual video frames for a specific time range to pinpoint a precise visual moment
 - Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
 - startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 60)
-- Prefer narrow requests around the likely boundary instead of one broad 10–20s span when the user needs an exact cut
-- Never request dense frames across most or all of the video to search for a brief visual event.
+- Prefer narrow requests around the likely boundary when possible, but if you already have a plausible range to inspect, request frames for that range now instead of asking the user to narrow it further.
+- Avoid requesting dense frames across essentially the entire video when you have no plausible target area at all.
 - If the user only wants markers/bookmarks for review, an approximate placement is acceptable. Use the best supported estimate you have and add an open marker with a linkedRange/confidence instead of insisting on frame-perfect confirmation.
 - Reserve frame-perfect dense inspection for actual edits like cuts, split points, or transition boundaries.
-- Dense sampled frames are discrete evidence, not proof that an entire multi-second range matches. If you see a possible match, request a narrower follow-up window before issuing a delete_range.
+- Dense sampled frames are discrete evidence, not proof that an entire multi-second range matches. Use them to make the best supported action you can from the requested window.
 - Use this when the text-only frame summaries are not specific enough. After extraction, the frames will be attached as images — use them to identify the exact timestamp, then make your edit
 
 Example:
@@ -230,6 +230,8 @@ You may be provided with sampled frames from the user's video as text summaries,
 - Overview frames are usually provided as text summaries for retrieval. Treat them as approximate visual metadata.
 - Dense frames may be attached as images for a narrower time range. Use those images when you need precise visual confirmation.
 - For visually triggered edits, prioritize the visual evidence over the transcript when they disagree. Spoken words can lead or lag what appears on screen.
+- For visual events like gestures, objects, or on-screen actions, transcript mentions are only hints about where to look. Do not conclude the visual moment was already cut just because the spoken mention maps to removed source time.
+- If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching or inspect the remaining visible footage instead of asking whether you should continue.
 - If the text summaries are not specific enough for the user's visual request, issue request_frames for the most relevant narrow range when the user needs an exact edit boundary.
 - If the user is scouting with markers only, you may place an approximate marker from the best available evidence and note the likely review window.
 - If dense frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
