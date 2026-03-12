@@ -356,19 +356,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setVideoFile: (file) => {
     const url = URL.createObjectURL(file);
-    set({
+    set((state) => ({
       videoFile: file, videoUrl: url, videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
       pendingAction: null, clips: [],
       captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
-      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
+      messages: state.messages, isChatLoading: false, ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
+      currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
-    });
+    }));
   },
 
   setVideoDuration: (duration) => {
@@ -739,12 +740,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setFFmpegJob: (job) => set({ ffmpegJob: job }),
 
   setVideoCloud: (file, blobUrl, storagePath, projectId) => {
-    set({
+    set((state) => ({
       videoFile: file, videoUrl: blobUrl, videoData: null, videoDuration: 0, currentTime: 0, requestedSeekTime: null,
       pendingAction: null, clips: [],
       captions: [], transitions: [], markers: [], textOverlays: [], extraTracks: [],
       previewSnapshot: null, previewOwnerId: null,
-      messages: [], ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
+      messages: state.messages, isChatLoading: false, ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
@@ -752,7 +753,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourcePath: storagePath }],
-    });
+    }));
   },
 
   loadProject: (editState, project) => {

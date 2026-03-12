@@ -110,17 +110,13 @@ Example:
 - Request real audio transcription for a region of the video using Whisper — stores the result internally as a transcript for future queries, does NOT add visible captions
 - Use when user asks about what is said/spoken in the video, or when you need the transcript to answer a question, or when user says "transcribe"
 - After transcription, the transcript will be available in your context for follow-up queries
-- Do NOT use this for adding visible captions/subtitles — that is a separate feature (add_captions)
+- Visible captions/subtitles are not available in this prototype. If the user asks for captions, say that clearly and offer transcription instead.
 
-### 8. Add Captions (add_captions)
-- Add subtitle/caption entries that appear as text at the bottom of the video
-- captions: array of { startTime, endTime, text } entries in seconds
-- Use when user says: "add captions", "subtitle this", "caption what I'm saying", "add subtitles", etc.
-- Do NOT use add_text_overlay for captions — use this tool instead
-- Use the caption defaults from context unless the user asks for something different.
-
-Example:
-<action>{"type":"add_captions","captions":[{"startTime":0,"endTime":3,"text":"Hello world"},{"startTime":3,"endTime":6,"text":"This is a caption"}],"message":"Added captions."}</action>
+### 8. Caption Limitation
+- Visible captions/subtitles are currently unavailable in this prototype.
+- If the user asks whether you can add captions or subtitles, answer no plainly instead of implying support.
+- If the user wants spoken content, offer transcription or answer questions from the transcript instead.
+- Never emit an add_captions action in this prototype.
 
 ### 9. Transitions (add_transition)
 - Add a transition effect at a specific timeline time
@@ -150,7 +146,7 @@ Example:
 ### 11. Update AI Defaults (update_ai_settings)
 - Update the project's AI editing defaults for future requests
 - settings: partial settings object containing only the values that should change
-- Use when the user asks to change default editing behavior, such as silence padding, silence cutoff, default caption chunking, default transition duration/type, frame inspection density, or text overlay defaults
+- Use when the user asks to change default editing behavior, such as silence padding, silence cutoff, default transition duration/type, frame inspection density, or text overlay defaults
 - If the user asks to change a default and also wants an edit right now, update the settings first
 
 ## Response format
@@ -224,7 +220,7 @@ No action:
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
 - If the latest user message contains a clear edit request that is answerable from current context, prefer returning an action instead of asking an unnecessary follow-up question.
-- When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges, add_markers, or add_captions.
+- When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
 - Use type:none only when you want to explicitly report that you checked something and there is no edit to make. Ordinary conversational replies can omit the action block entirely.
 
@@ -312,6 +308,13 @@ function isCaptionRequest(message: string): boolean {
     || /\b(captions?|subtitles?)\b[\w\s]{0,24}\b(add|create|generate|make|show)\b/.test(normalized)
     || /\bcaption this\b/.test(normalized)
     || /\bsubtitle this\b/.test(normalized);
+}
+
+function isCaptionCapabilityQuestion(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (!normalized.trim()) return false;
+  return /\b(can|could|do|does|are|is)\b[\w\s]{0,20}\b(add|create|generate|make|support|do)\b[\w\s]{0,16}\b(captions?|subtitles?|captioning)\b/.test(normalized)
+    || /\b(captions?|subtitles?|captioning)\b[\w\s]{0,20}\b(available|supported|possible)\b/.test(normalized);
 }
 
 function tokenizeForRetrieval(text: string): string[] {
@@ -1187,7 +1190,6 @@ export async function POST(req: NextRequest) {
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
 - Dense frame inspection default count: ${settings.frameInspection.defaultFrameCount}
 - Overview frame sampling: every ${settings.frameInspection.overviewIntervalSeconds}s, capped at ${settings.frameInspection.maxOverviewFrames} frames
-- Caption defaults: ${settings.captions.wordsPerCaption} words per caption
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
 
@@ -1215,7 +1217,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     );
     const latestPendingAssistantAction = getLatestPendingAssistantAction(richMessages, validationContext);
 
-    if (isCaptionRequest(effectiveLatestUserMessage)) {
+    if (isCaptionRequest(effectiveLatestUserMessage) || isCaptionCapabilityQuestion(effectiveLatestUserMessage)) {
       return NextResponse.json({
         message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
         action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
@@ -1522,7 +1524,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Default dense-frame count: ${settings.frameInspection.defaultFrameCount}\n` +
       `- Overview frame interval: ${settings.frameInspection.overviewIntervalSeconds}s\n` +
       `- Max overview frames: ${settings.frameInspection.maxOverviewFrames}\n` +
-      `- Caption defaults: ${settings.captions.wordsPerCaption} words per caption\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
     );

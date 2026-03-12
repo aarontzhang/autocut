@@ -15,6 +15,7 @@ const BASE_TRACK_HEIGHT = 50;
 const EFFECT_TRACK_H = 26;
 const HEADER_W = 76;
 const RULER_H = 24;
+const CLIP_REORDER_INTENT_PX = 18;
 
 type DragInfo = {
   type: 'clip-move' | 'clip-trim-left' | 'clip-trim-right' | 'caption' | 'text' | 'transition';
@@ -25,11 +26,20 @@ type DragInfo = {
   totalW: number;
   totalDuration: number;
   preDragSnap: EditSnapshot;
+  intentLocked?: boolean;
 };
 
 type PlayheadDragInfo = {
   totalW: number;
   totalDuration: number;
+};
+
+type ClipMovePreview = {
+  clipId: string;
+  ghostLeft: number;
+  ghostWidth: number;
+  insertionLeft: number;
+  targetIndex: number;
 };
 
 interface TimelineProps {
@@ -55,6 +65,7 @@ export default function Timeline({
 
   const [trackWidth, setTrackWidth] = useState(800);
   const [isMainDragOver, setIsMainDragOver] = useState(false);
+  const [clipMovePreview, setClipMovePreview] = useState<ClipMovePreview | null>(null);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
@@ -68,6 +79,7 @@ export default function Timeline({
   const appendVideoToTimeline = useEditorStore(s => s.appendVideoToTimeline);
   const insertVideoIntoTimeline = useEditorStore(s => s.insertVideoIntoTimeline);
   const updateClipSourcePath = useEditorStore(s => s.updateClipSourcePath);
+  const reorderClip = useEditorStore(s => s.reorderClip);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
@@ -345,10 +357,50 @@ export default function Timeline({
         markers: state.markers,
         textOverlays: state.textOverlays,
       },
+      intentLocked: false,
     };
+    setClipMovePreview(null);
     setSelectedItem({ type: 'clip', id: clipId });
     document.body.style.cursor = 'grabbing';
   }, [setSelectedItem, totalTimelineDuration, totalW]);
+
+  const buildClipMovePreview = useCallback((drag: DragInfo, currentClips: typeof clips, pxDelta: number): ClipMovePreview | null => {
+    if (drag.type !== 'clip-move') return null;
+
+    const currentSchedule = buildClipSchedule(currentClips);
+    const draggedEntry = currentSchedule.find((entry) => entry.clipId === drag.id);
+    if (!draggedEntry || currentClips.length === 0) return null;
+
+    const ghostLeftOrigin = tPx(draggedEntry.timelineStart);
+    const ghostWidth = Math.max(24, tPx(draggedEntry.timelineEnd) - ghostLeftOrigin);
+    const ghostLeft = Math.max(0, Math.min(totalW - ghostWidth, ghostLeftOrigin + pxDelta));
+    const ghostMidpoint = ghostLeft + ghostWidth / 2;
+
+    const otherEntries = currentSchedule.filter((entry) => entry.clipId !== drag.id);
+    let targetIndex = otherEntries.length;
+    for (let index = 0; index < otherEntries.length; index += 1) {
+      const entry = otherEntries[index];
+      const entryMidpoint = (tPx(entry.timelineStart) + tPx(entry.timelineEnd)) / 2;
+      if (ghostMidpoint < entryMidpoint) {
+        targetIndex = index;
+        break;
+      }
+    }
+
+    const insertionLeft = otherEntries.length === 0
+      ? 0
+      : targetIndex >= otherEntries.length
+        ? tPx(otherEntries[otherEntries.length - 1].timelineEnd)
+        : tPx(otherEntries[targetIndex].timelineStart);
+
+    return {
+      clipId: drag.id,
+      ghostLeft,
+      ghostWidth,
+      insertionLeft,
+      targetIndex: Math.max(0, Math.min(currentClips.length - 1, targetIndex)),
+    };
+  }, [tPx, totalW]);
 
   const handleMainFileDrop = async (e: React.DragEvent) => {
     e.preventDefault();
@@ -423,25 +475,24 @@ export default function Timeline({
       const store = useEditorStore.getState();
 
       if (drag.type === 'clip-move') {
-        const rawNewStart = drag.origStart + timeDelta;
-        const clipDuration = drag.origEnd - drag.origStart;
-        const midpoint = rawNewStart + clipDuration / 2;
-        const currentSchedule = buildClipSchedule(store.clips);
-        let newIndex = currentSchedule.length - 1;
-        for (let i = 0; i < currentSchedule.length; i += 1) {
-          if (currentSchedule[i].clipId === drag.id) continue;
-          const entryMid = (currentSchedule[i].timelineStart + currentSchedule[i].timelineEnd) / 2;
-          if (midpoint < entryMid) {
-            newIndex = i;
-            break;
-          }
+        if (!drag.intentLocked && Math.abs(pxDelta) < CLIP_REORDER_INTENT_PX) {
+          return;
         }
-        const currentIndex = store.clips.findIndex(clip => clip.id === drag.id);
-        if (currentIndex !== -1) {
-          const reordered = [...store.clips];
-          const [removed] = reordered.splice(currentIndex, 1);
-          reordered.splice(Math.max(0, Math.min(reordered.length, newIndex)), 0, removed);
-          useEditorStore.setState({ clips: reordered });
+        drag.intentLocked = true;
+        const preview = buildClipMovePreview(drag, store.clips, pxDelta);
+        if (preview) {
+          setClipMovePreview((currentPreview) => {
+            if (
+              currentPreview
+              && currentPreview.clipId === preview.clipId
+              && currentPreview.targetIndex === preview.targetIndex
+              && Math.abs(currentPreview.ghostLeft - preview.ghostLeft) < 0.5
+              && Math.abs(currentPreview.insertionLeft - preview.insertionLeft) < 0.5
+            ) {
+              return currentPreview;
+            }
+            return preview;
+          });
         }
         return;
       }
@@ -503,6 +554,21 @@ export default function Timeline({
 
       const drag = dragRef.current;
       if (!drag) return;
+
+      if (drag.type === 'clip-move') {
+        const currentIndex = useEditorStore.getState().clips.findIndex((clip) => clip.id === drag.id);
+        if (clipMovePreview && currentIndex !== -1 && clipMovePreview.targetIndex !== currentIndex) {
+          reorderClip(drag.id, clipMovePreview.targetIndex);
+          clipDragJustEnded.current = true;
+        } else {
+          clipDragJustEnded.current = Boolean(drag.intentLocked);
+        }
+        setClipMovePreview(null);
+        dragRef.current = null;
+        document.body.style.cursor = '';
+        return;
+      }
+
       clipDragJustEnded.current = true;
       useEditorStore.getState().pushHistory(drag.preDragSnap);
       dragRef.current = null;
@@ -515,9 +581,11 @@ export default function Timeline({
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     };
-  }, [scrubPlayhead]);
+  }, [buildClipMovePreview, clipMovePreview, reorderClip, scrubPlayhead]);
 
   const px = (time: number) => tPx(time);
+  const activeDragClip = clipMovePreview ? clips.find((clip) => clip.id === clipMovePreview.clipId) ?? null : null;
+  const activeDragLabel = activeDragClip?.sourceName || (activeDragClip ? `Clip ${clips.findIndex((clip) => clip.id === activeDragClip.id) + 1}` : null);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -570,7 +638,7 @@ export default function Timeline({
               whiteSpace: 'nowrap',
             }}
           >
-            C to cut at the playhead. M to add a marker.
+            C to cut. M to add a marker. Drag the dotted clip handle to reorder.
           </span>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -793,17 +861,91 @@ export default function Timeline({
                   width={clipWidth}
                   height={TRACK_HEIGHT}
                   isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
+                  isDragging={clipMovePreview?.clipId === clip.id}
                   index={index}
                   onSelect={e => {
                     e.stopPropagation();
                     setSelectedItem({ type: 'clip', id: clip.id });
                   }}
-                  onMouseDown={e => startClipMove(e, clip.id)}
+                  onReorderStart={e => startClipMove(e, clip.id)}
                   onTrimLeftStart={e => startClipTrimLeft(e, clip.id)}
                   onTrimRightStart={e => startClipTrimRight(e, clip.id)}
                 />
               );
             })}
+            {clipMovePreview && activeDragClip && (
+              <>
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: Math.max(0, Math.min(totalW - 3, clipMovePreview.insertionLeft - 1.5)),
+                    top: 4,
+                    bottom: 4,
+                    width: 3,
+                    borderRadius: 999,
+                    background: 'rgba(125,211,252,0.95)',
+                    boxShadow: '0 0 0 4px rgba(56,189,248,0.14)',
+                    pointerEvents: 'none',
+                    zIndex: 6,
+                  }}
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: clipMovePreview.ghostLeft,
+                    top: 6,
+                    width: clipMovePreview.ghostWidth,
+                    height: TRACK_HEIGHT - 12,
+                    borderRadius: 6,
+                    border: '1.5px solid rgba(125,211,252,0.95)',
+                    background: 'linear-gradient(180deg, rgba(96,165,250,0.4), rgba(37,99,235,0.26))',
+                    boxShadow: '0 14px 28px rgba(8,15,32,0.34), 0 0 0 1px rgba(255,255,255,0.08) inset',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '0 10px',
+                    pointerEvents: 'none',
+                    zIndex: 7,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 7,
+                      height: 10,
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(2, 1fr)',
+                      gap: 1.5,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {Array.from({ length: 6 }).map((_, dotIndex) => (
+                      <span
+                        key={dotIndex}
+                        style={{
+                          width: 2,
+                          height: 2,
+                          borderRadius: '50%',
+                          background: 'rgba(255,255,255,0.88)',
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      color: 'rgba(255,255,255,0.92)',
+                      fontFamily: 'var(--font-serif)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {activeDragLabel ?? 'Move clip'}
+                  </span>
+                </div>
+              </>
+            )}
           </TrackRow>
 
           <TrackRow height={TRACK_HEIGHT} onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}>
