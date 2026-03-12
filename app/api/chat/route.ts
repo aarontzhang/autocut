@@ -130,7 +130,7 @@ Example:
 - Use markers when the user asks you to find, tag, or point out likely moments before cutting
 - Prefer adding markers first when you found plausible events but the user still needs to review them
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
-- When a user references "marker 1" or "@1", treat that marker as a stable timeline reference from context
+- When a user references "marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
 - If the latest user message explicitly references one or more markers, prioritize those markers over unmentioned markers when deciding where to inspect, cut, or add emphasis
 
 ### 10. Text Overlays (add_text_overlay / replace_text_overlay)
@@ -748,7 +748,7 @@ function resolveBoundaryReference(
   markers: Array<{ number?: number; timelineTime?: number }>,
 ): ResolvedBoundary | null {
   const trimmed = rawReference.trim();
-  const markerMatch = trimmed.match(/^@(\d+)$/) ?? trimmed.match(/^marker\s+(\d+)$/i);
+  const markerMatch = trimmed.match(/^@(\d+)$/) ?? trimmed.match(/^(?:marker|bookmark)\s+(\d+)$/i);
   if (markerMatch) {
     const markerNumber = Number(markerMatch[1]);
     const marker = markers.find((entry) => entry.number === markerNumber && typeof entry.timelineTime === 'number');
@@ -792,6 +792,20 @@ function resolveSelectedMarkerBoundary(
   };
 }
 
+function resolveImplicitMarkerBoundary(
+  message: string,
+  markers: Array<{ number?: number; timelineTime?: number }>,
+  selectedMarker: { number?: number; timelineTime?: number } | null,
+): ResolvedBoundary | null {
+  const selectedBoundary = resolveSelectedMarkerBoundary(selectedMarker);
+  if (selectedBoundary) return selectedBoundary;
+
+  const explicitMarkerReference = message.match(/(?:@(\d+)|(?:marker|bookmark)\s+(\d+))/i);
+  if (!explicitMarkerReference) return null;
+
+  return resolveBoundaryReference(explicitMarkerReference[0], markers);
+}
+
 function applySilenceConstraintMessage(
   message: string,
   constraints: SilenceTaskConstraints,
@@ -799,7 +813,7 @@ function applySilenceConstraintMessage(
   selectedMarker: { number?: number; timelineTime?: number } | null,
 ) {
   const normalized = message.toLowerCase();
-  const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
   if (betweenMatch) {
     const start = resolveBoundaryReference(betweenMatch[1], markers);
     const end = resolveBoundaryReference(betweenMatch[2], markers);
@@ -810,30 +824,30 @@ function applySilenceConstraintMessage(
     }
   }
 
-  const beforeMatch = message.match(/\b(?:before|until|up to)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  const beforeMatch = message.match(/\b(?:before|until|up to)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
   if (beforeMatch) {
     const boundary = resolveBoundaryReference(beforeMatch[1], markers);
     if (boundary) {
       constraints.endTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
-  } else if (/\b(?:before|until|up to)\s+(?:the\s+|this\s+|selected\s+)?marker\b/i.test(message)) {
-    const boundary = resolveSelectedMarkerBoundary(selectedMarker);
+  } else if (/\b(?:before|until|up to)\s+(?:the\s+|this\s+|selected\s+)?(?:marker|bookmark)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker);
     if (boundary) {
       constraints.endTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
   }
 
-  const afterMatch = message.match(/\b(?:after|since)\s+(@\d+|marker\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
+  const afterMatch = message.match(/\b(?:after|since)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
   if (afterMatch) {
     const boundary = resolveBoundaryReference(afterMatch[1], markers);
     if (boundary) {
       constraints.startTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
     }
-  } else if (/\b(?:after|since)\s+(?:the\s+|this\s+|selected\s+)?marker\b/i.test(message)) {
-    const boundary = resolveSelectedMarkerBoundary(selectedMarker);
+  } else if (/\b(?:after|since)\s+(?:the\s+|this\s+|selected\s+)?(?:marker|bookmark)\b/i.test(message)) {
+    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker);
     if (boundary) {
       constraints.startTime = boundary.time;
       constraints.referencedLabels = [boundary.label];
@@ -937,7 +951,7 @@ function extractMentionedMarkers(
     linkedRange?: { startTime?: number; endTime?: number } | null;
   }> = [];
   let match: RegExpExecArray | null;
-  const pattern = /(?:marker\s+|@)(\d+)/gi;
+  const pattern = /(?:marker\s+|bookmark\s+|@)(\d+)/gi;
 
   while ((match = pattern.exec(message)) !== null) {
     const markerNumber = Number(match[1]);

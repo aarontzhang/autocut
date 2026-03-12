@@ -3,7 +3,7 @@
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, VisualSearchSession } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceRangeToTimelineRanges, sourceTimeToTimelineOccurrences, subtractSourceRanges } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -66,7 +66,7 @@ type IndexingProgress = {
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
-const MARKER_TAG_PATTERN = /@(\d+)/gi;
+const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
 
 type ActiveMarkerMention = {
   query: string;
@@ -484,6 +484,10 @@ function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number
     return action.deleteStartTime ?? null;
   }
 
+  if (action.type === 'delete_ranges') {
+    return action.ranges?.[0]?.start ?? null;
+  }
+
   if (action.type === 'add_captions') {
     return action.captions?.[0]?.startTime ?? null;
   }
@@ -519,6 +523,49 @@ function getReviewSeekTime(snapshot: EditSnapshot, action: EditAction): number |
   const anchor = getReviewAnchorTime(snapshot, action);
   if (anchor === null) return null;
   return Math.max(0, anchor - REVIEW_PREROLL_SECONDS);
+}
+
+function resolveReviewStep(
+  baseSnapshot: EditSnapshot,
+  currentSnapshot: EditSnapshot,
+  action: EditAction,
+  acceptedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
+): { action: EditAction; sourceRanges: Array<{ sourceStart: number; sourceEnd: number }> } | null {
+  if (action.type !== 'delete_range') {
+    return {
+      action,
+      sourceRanges: sourceRangesForAction(currentSnapshot.clips, action),
+    };
+  }
+
+  const originalSourceRanges = sourceRangesForAction(baseSnapshot.clips, action);
+  const remainingSourceRanges = originalSourceRanges.flatMap((range) => subtractSourceRanges(range, acceptedSourceRanges));
+  const timelineRanges = remainingSourceRanges
+    .flatMap((range) => sourceRangeToTimelineRanges(currentSnapshot.clips, range.sourceStart, range.sourceEnd))
+    .filter((range) => range.timelineEnd > range.timelineStart + 1e-3)
+    .sort((a, b) => a.timelineStart - b.timelineStart || a.timelineEnd - b.timelineEnd);
+
+  if (timelineRanges.length === 0) return null;
+
+  if (timelineRanges.length === 1) {
+    return {
+      action: {
+        ...action,
+        deleteStartTime: timelineRanges[0].timelineStart,
+        deleteEndTime: timelineRanges[0].timelineEnd,
+      },
+      sourceRanges: remainingSourceRanges,
+    };
+  }
+
+  return {
+    action: {
+      type: 'delete_ranges',
+      ranges: timelineRanges.map((range) => ({ start: range.timelineStart, end: range.timelineEnd })),
+      message: action.message,
+    },
+    sourceRanges: remainingSourceRanges,
+  };
 }
 
 function formatChatTime(seconds: number): string {
@@ -941,10 +988,10 @@ function MarkerAwareText({ text }: { text: string }) {
   const markers = useEditorStore(s => s.markers);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
-  const parts = text.split(/(marker\s+\d+|@\d+)/gi);
+  const parts = text.split(/((?:marker|bookmark)\s+\d+|@\d+)/gi);
 
   return parts.map((part, index) => {
-    const match = part.match(/(?:marker\s+|@)(\d+)/i);
+    const match = part.match(/(?:marker\s+|bookmark\s+|@)(\d+)/i);
     if (!match) return <span key={index}>{renderMarkdown(part)}</span>;
     const markerNumber = Number(match[1]);
     const marker = markers.find((entry) => entry.number === markerNumber);
@@ -1020,6 +1067,7 @@ function AssistantMessage({
   const appliedActions = useEditorStore(s => s.appliedActions);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const [reviewBaseSnapshot, setReviewBaseSnapshot] = useState<EditSnapshot | null>(null);
   const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [acceptedSteps, setAcceptedSteps] = useState(0);
@@ -1036,7 +1084,15 @@ function AssistantMessage({
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
   const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
-  const activeReviewAction = reviewInProgress ? reviewSteps[reviewIndex] : action ?? null;
+  const resolvedReviewStep = useMemo(() => {
+    if (!reviewInProgress || !reviewBaseSnapshot || !reviewDraft) return null;
+    const step = reviewSteps[reviewIndex];
+    if (!step) return null;
+    return resolveReviewStep(reviewBaseSnapshot, reviewDraft, step, acceptedSourceRanges);
+  }, [acceptedSourceRanges, reviewBaseSnapshot, reviewDraft, reviewInProgress, reviewIndex, reviewSteps]);
+  const activeReviewAction = reviewInProgress
+    ? (resolvedReviewStep?.action ?? reviewSteps[reviewIndex] ?? null)
+    : action ?? null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const actionPreviouslyApplied = useMemo(() => (
@@ -1065,6 +1121,7 @@ function AssistantMessage({
     }
     const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: result });
+    setReviewBaseSnapshot(null);
     setReviewDraft(null);
     setReviewIndex(reviewSteps.length);
     setAcceptedSteps(accepted);
@@ -1085,23 +1142,28 @@ function AssistantMessage({
     };
     const firstStep = reviewSteps[0];
     if (!firstStep) return;
+    const firstResolvedStep = resolveReviewStep(baseSnapshot, baseSnapshot, firstStep, []);
+    if (!firstResolvedStep) return;
+    setReviewBaseSnapshot(baseSnapshot);
     setReviewDraft(baseSnapshot);
     setReviewIndex(0);
     setAcceptedSteps(0);
     setSkippedSteps(0);
     setAcceptedSourceRanges([]);
     setReviewResult(null);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstStep));
-    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstStep);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstResolvedStep.action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
   }, [action, anotherReviewActive, msg.id, requestSeek, reviewSteps, setPreviewSnapshot]);
 
   const handleApplyStep = useCallback(() => {
-    if (!reviewDraft || !reviewSteps[reviewIndex]) return;
-    const stepAction = reviewSteps[reviewIndex];
+    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
+    const resolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, reviewSteps[reviewIndex], acceptedSourceRanges);
+    if (!resolvedStep) return;
+    const stepAction = resolvedStep.action;
     const nextCommittedSourceRanges = [
       ...acceptedSourceRanges,
-      ...sourceRangesForAction(reviewDraft.clips, stepAction),
+      ...resolvedStep.sourceRanges,
     ];
     const nextDraft = applyActionToSnapshot(reviewDraft, stepAction);
     const accepted = acceptedSteps + 1;
@@ -1111,17 +1173,22 @@ function AssistantMessage({
       return;
     }
     const nextStep = reviewSteps[nextIndex];
+    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, nextDraft, nextStep, nextCommittedSourceRanges);
+    if (!nextResolvedStep) {
+      finalizeReview(nextDraft, accepted, skippedSteps + 1, nextCommittedSourceRanges);
+      return;
+    }
     setReviewDraft(nextDraft);
     setReviewIndex(nextIndex);
     setAcceptedSteps(accepted);
     setAcceptedSourceRanges(nextCommittedSourceRanges);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextStep));
-    const reviewSeekTime = getReviewSeekTime(nextDraft, nextStep);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(nextDraft, nextResolvedStep.action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const handleSkipStep = useCallback(() => {
-    if (!reviewDraft || !reviewSteps[reviewIndex]) return;
+    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
     const skipped = skippedSteps + 1;
     const nextIndex = reviewIndex + 1;
     if (nextIndex >= reviewSteps.length) {
@@ -1129,15 +1196,21 @@ function AssistantMessage({
       return;
     }
     const nextStep = reviewSteps[nextIndex];
+    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, nextStep, acceptedSourceRanges);
+    if (!nextResolvedStep) {
+      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
+      return;
+    }
     setReviewIndex(nextIndex);
     setSkippedSteps(skipped);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextStep));
-    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextStep);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextResolvedStep.action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
   const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
+    setReviewBaseSnapshot(null);
     setReviewDraft(null);
     setReviewIndex(0);
     setAcceptedSteps(0);

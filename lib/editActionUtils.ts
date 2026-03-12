@@ -299,7 +299,7 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
 export function expandActionForReview(action: EditAction): EditAction[] {
   if (action.type === 'delete_ranges') {
     return [...(action.ranges ?? [])]
-      .sort((a, b) => b.start - a.start)
+      .sort((a, b) => a.start - b.start)
       .map(range => ({
         type: 'delete_range' as const,
         deleteStartTime: range.start,
