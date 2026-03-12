@@ -194,7 +194,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     ? activeSourceUrl
     : '';
   const displaySourceUrl = resolvedActiveSourceUrl || desiredSourceUrl;
-  const areAllSourcesReady = uniqueSourceUrls.every((srcUrl) => Boolean(sourceReadyState[srcUrl]));
+  const isDisplaySourceReady = Boolean(sourceReadyState[displaySourceUrl]);
   const activeDimensions = sourceDimensions[displaySourceUrl || uniqueSourceUrls[0] || videoUrl] ?? null;
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, activeDimensions),
@@ -432,7 +432,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   useImperativeHandle(ref, () => ({
     seekTo: seekToTimelineTime,
     togglePlay: () => {
-      if (!areAllSourcesReady) return;
       const video = videoRef.current;
       if (!video) return;
       if (video.paused) {
@@ -443,10 +442,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         for (const el of sourceVideoMapRef.current.values()) el.pause();
       }
     },
-  }), [areAllSourcesReady, seekToTimelineTime, setupAudio, videoRef]);
+  }), [seekToTimelineTime, setupAudio, videoRef]);
 
   const togglePlay = useCallback(() => {
-    if (!areAllSourcesReady) return;
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
@@ -456,7 +454,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     } else {
       for (const el of sourceVideoMapRef.current.values()) el.pause();
     }
-  }, [areAllSourcesReady, setupAudio, videoRef]);
+  }, [setupAudio, videoRef]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -541,7 +539,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             />
           ))}
 
-          {!areAllSourcesReady && (
+          {!isDisplaySourceReady && (
             <div
               style={{
                 position: 'absolute',
@@ -550,7 +548,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 alignItems: 'center',
                 justifyContent: 'center',
                 background: 'rgba(0,0,0,0.22)',
-                pointerEvents: 'auto',
+                pointerEvents: 'none',
               }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: 'rgba(255,255,255,0.72)' }}>
