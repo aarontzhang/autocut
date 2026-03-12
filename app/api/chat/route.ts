@@ -14,7 +14,6 @@ import {
 import {
   confidenceBandForCandidates,
   isLikelyVisualQuery,
-  makeDeleteRangesAction,
   parseVisualQuery,
   projectVerifiedRangesToProposal,
   retrieveVisualCandidates,
@@ -156,9 +155,11 @@ Example:
 
 ## Response format
 
-Always respond with:
-1. A brief, friendly explanation (1-2 sentences max)
-2. A JSON action block embedded at the end (always required)
+- Match the user's latest turn. If they are mainly providing context, brainstorming, or asking for advice, respond conversationally.
+- If the user's latest turn makes a clear actionable editing request and you can satisfy it from the current context, include exactly one JSON <action> block at the very end of the reply.
+- Ask a follow-up question only when the request is too vague, ambiguous, or under-specified to make a responsible edit.
+- Do not make the conversation artificially sequential. Some turns should be conversational, and some turns should immediately produce an action, depending on what the user asked right now.
+- Keep conversational replies concise but natural, not robotic.
 
 ## Action block examples
 
@@ -222,8 +223,10 @@ No action:
 - Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
-- You are a single-action editor per request. Complete ONE operation unless the user explicitly asked for multiple distinct edits in one message. After executing any edit, return type:none immediately unless more work is clearly required by the original request.
+- If the latest user message contains a clear edit request that is answerable from current context, prefer returning an action instead of asking an unnecessary follow-up question.
+- When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges, add_markers, or add_captions.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
+- Use type:none only when you want to explicitly report that you checked something and there is no edit to make. Ordinary conversational replies can omit the action block entirely.
 
 ## Visual and audio context
 You may be provided with sampled frames from the user's video as text summaries, dense sampled frames as images, and/or a full audio transcript.
@@ -284,6 +287,7 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
 type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
 type ChatTurn = { role: string; content: string };
 type RichChatTurn = ChatTurn & {
+  rawAction?: unknown;
   actionType?: EditAction['type'];
   actionMessage?: string;
   actionStatus?: 'pending' | 'completed';
@@ -299,50 +303,6 @@ function isVisualSearchSession(value: unknown): value is VisualSearchSession {
   return typeof session.projectId === 'string'
     && typeof session.query === 'string'
     && Array.isArray(session.candidates);
-}
-
-function isAffirmativeVisualFollowUp(message: string): boolean {
-  const normalized = message
-    .trim()
-    .toLowerCase()
-    .replace(/[^\w\s']/g, ' ')
-    .replace(/\s+/g, ' ');
-
-  if (!normalized) return false;
-
-  const exactMatches = new Set([
-    'yes',
-    'yep',
-    'yeah',
-    'correct',
-    'looks right',
-    'looks good',
-    'seems right',
-    'seems correct',
-    'thats right',
-    'that is right',
-    'thats correct',
-    'that is correct',
-    'apply it',
-    'do it',
-    'go ahead',
-    'cut it',
-    'remove it',
-  ]);
-
-  if (exactMatches.has(normalized)) return true;
-
-  return [
-    /\bapply\b/,
-    /\bgo ahead\b/,
-    /\blooks (right|good)\b/,
-    /\bseems (right|correct)\b/,
-    /\bthat's (right|correct)\b/,
-    /\bthat is (right|correct)\b/,
-    /\byes\b/,
-    /\bcut (it|that)\b/,
-    /\bremove (it|that)\b/,
-  ].some((pattern) => pattern.test(normalized));
 }
 
 function isCaptionRequest(message: string): boolean {
@@ -636,6 +596,7 @@ function normalizeRichChatTurns(value: unknown): RichChatTurn[] {
       return [{
         role,
         content,
+        rawAction: (entry as { action?: unknown }).action,
         actionType,
         actionMessage: sanitizeInlineUntrustedText((entry as { actionMessage?: unknown }).actionMessage, 160) || undefined,
         actionStatus,
@@ -757,6 +718,104 @@ function summarizeConversationTaskState(taskState: ConversationTaskState): strin
   return lines;
 }
 
+function formatCompactTime(seconds: number): string {
+  return Number.isInteger(seconds) ? `${seconds}` : seconds.toFixed(3).replace(/\.?0+$/, '');
+}
+
+function summarizeActionForContext(action: EditAction): string {
+  if (action.type === 'delete_range' && action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
+    return `delete_range ${formatActionTime(action.deleteStartTime)}-${formatActionTime(action.deleteEndTime)}`;
+  }
+  if (action.type === 'delete_ranges' && action.ranges) {
+    return `delete_ranges ${action.ranges.length} range(s)`;
+  }
+  if (action.type === 'request_frames' && action.frameRequest) {
+    return `request_frames ${formatActionTime(action.frameRequest.startTime)}-${formatActionTime(action.frameRequest.endTime)}`;
+  }
+  if (action.type === 'add_marker' && action.marker?.timelineTime !== undefined) {
+    return `add_marker at ${formatActionTime(action.marker.timelineTime)}`;
+  }
+  if (action.type === 'add_markers' && action.markers) {
+    return `add_markers ${action.markers.length} marker(s)`;
+  }
+  if (action.type === 'transcribe_request' && action.segments?.length) {
+    return `transcribe_request ${action.segments.length} segment(s)`;
+  }
+  return action.type;
+}
+
+function buildActionValidationContext(
+  context: Record<string, unknown> | null | undefined,
+  clipCount: number,
+): {
+  clipCount: number;
+  videoDuration: number;
+  markerIds: Set<string>;
+  overlayCount?: number;
+} {
+  return {
+    clipCount,
+    videoDuration: Number(context?.videoDuration ?? 0),
+    markerIds: new Set(
+      Array.isArray(context?.markers)
+        ? context.markers
+            .map((marker: { id?: unknown }) => (typeof marker?.id === 'string' ? marker.id : null))
+            .filter((markerId: string | null): markerId is string => markerId !== null)
+        : [],
+    ),
+    overlayCount: typeof context?.textOverlayCount === 'number' ? context.textOverlayCount : undefined,
+  };
+}
+
+function getLatestPendingAssistantAction(
+  messages: RichChatTurn[],
+  validationContext: {
+    clipCount: number;
+    videoDuration: number;
+    markerIds: Set<string>;
+    overlayCount?: number;
+  },
+): { action: EditAction; turn: RichChatTurn } | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const turn = messages[index];
+    if (turn.role !== 'assistant' || isActionCompleted(turn)) continue;
+    const action = validateEditAction(turn.rawAction, validationContext);
+    if (!action || action.type === 'none') continue;
+    return { action, turn };
+  }
+
+  return null;
+}
+
+function formatPendingActionContext(
+  pending: { action: EditAction; turn: RichChatTurn } | null,
+): string[] {
+  if (!pending) return [];
+
+  const json = JSON.stringify(pending.action);
+  return [
+    `Latest unresolved assistant proposal: ${summarizeActionForContext(pending.action)}.`,
+    `Pending proposal message: "${sanitizeInlineUntrustedText(pending.action.message, 200)}"`,
+    `PENDING_ACTION_JSON: ${json}`,
+    'If the user confirms, refines, narrows, or cancels that proposal, continue from this structured action instead of guessing from keywords alone.',
+  ];
+}
+
+function formatSilenceCandidatesContext(candidates: SilenceCandidate[]): string[] {
+  if (candidates.length === 0) return [];
+
+  return [
+    `Trusted silence analysis detected ${candidates.length} removable gap(s) on the current timeline.`,
+    `SILENCE_CANDIDATES_JSON: ${JSON.stringify(candidates.map((candidate) => ({
+      start: Number(formatCompactTime(candidate.deleteStart)),
+      end: Number(formatCompactTime(candidate.deleteEnd)),
+      duration: Number(formatCompactTime(candidate.deleteEnd - candidate.deleteStart)),
+      gapStart: Number(formatCompactTime(candidate.gapStart)),
+      gapEnd: Number(formatCompactTime(candidate.gapEnd)),
+    })))}`
+  ];
+}
+
 function sanitizeRouteTime(value: unknown, safeDuration: number): number | null {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.min(value, safeDuration))
@@ -787,417 +846,11 @@ function sanitizeSilenceCandidates(value: unknown, safeDuration: number): Silenc
   });
 }
 
-type ResolvedBoundary = {
-  time: number;
-  label: string;
-};
-
-const BOUNDARY_REFERENCE_PATTERN = String.raw`(?:@\d+|(?:marker|bookmark)\s+\d+|(?:(?:around|about|roughly|near|approximately|at)\s+)?(?:the\s+)?(?:\d+:\d{2}|\d+(?:\.\d+)?(?:\s*-\s*second|\s+seconds?)?(?:\s+mark)?))`;
-
 function formatActionTime(seconds: number): string {
   const clamped = Math.max(0, seconds);
   const minutes = Math.floor(clamped / 60);
   const remainingSeconds = Math.floor(clamped % 60);
   return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-}
-
-function normalizeBoundaryReference(rawReference: string): string {
-  return rawReference
-    .trim()
-    .replace(/^(?:around|about|roughly|near|approximately|at)\s+/i, '')
-    .replace(/^the\s+/i, '')
-    .replace(/(\d+(?:\.\d+)?)\s*-\s*second\s+mark$/i, '$1 seconds')
-    .replace(/(\d+(?:\.\d+)?)\s*-\s*second$/i, '$1 seconds')
-    .replace(/(\d+(?:\.\d+)?)\s+second\s+mark$/i, '$1 seconds')
-    .replace(/(\d+(?:\.\d+)?)\s+seconds?\s+mark$/i, '$1 seconds')
-    .replace(/(\d+:\d{2})\s+mark$/i, '$1');
-}
-
-function resolveBoundaryReference(
-  rawReference: string,
-  markers: Array<{ number?: number; timelineTime?: number }>,
-): ResolvedBoundary | null {
-  const trimmed = normalizeBoundaryReference(rawReference);
-  const markerMatch = trimmed.match(/^@(\d+)$/) ?? trimmed.match(/^(?:marker|bookmark)\s+(\d+)$/i);
-  if (markerMatch) {
-    const markerNumber = Number(markerMatch[1]);
-    const marker = markers.find((entry) => entry.number === markerNumber && typeof entry.timelineTime === 'number');
-    if (marker && typeof marker.timelineTime === 'number') {
-      return { time: marker.timelineTime, label: `@${markerNumber}` };
-    }
-  }
-
-  const timeMatch = trimmed.match(/^(\d+):([0-5]\d)$/) ?? trimmed.match(/^(\d+(?:\.\d+)?)\s*seconds?$/i);
-  if (timeMatch) {
-    if (trimmed.includes(':')) {
-      return {
-        time: parseInt(timeMatch[1] ?? '0', 10) * 60 + parseInt(timeMatch[2] ?? '0', 10),
-        label: trimmed,
-      };
-    }
-
-    return {
-      time: parseFloat(timeMatch[1] ?? '0'),
-      label: trimmed,
-    };
-  }
-
-  return null;
-}
-
-type SilenceTaskConstraints = {
-  startTime: number;
-  endTime: number;
-  maxDurationSeconds?: number;
-  referencedLabels: string[];
-};
-
-type RangeDeleteConstraints = {
-  startTime: number;
-  endTime: number;
-  referencedLabels: string[];
-  hasExplicitBounds: boolean;
-};
-
-function resolveSelectedMarkerBoundary(
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-): ResolvedBoundary | null {
-  if (!selectedMarker || typeof selectedMarker.timelineTime !== 'number') return null;
-  return {
-    time: selectedMarker.timelineTime,
-    label: typeof selectedMarker.number === 'number' ? `@${selectedMarker.number}` : 'selected marker',
-  };
-}
-
-function resolveTaggedMarkerBoundary(
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-): ResolvedBoundary | null {
-  const viableMarkers = taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number');
-  if (viableMarkers.length !== 1) return null;
-  const marker = viableMarkers[0];
-  return {
-    time: marker.timelineTime as number,
-    label: typeof marker.number === 'number' ? `@${marker.number}` : 'tagged marker',
-  };
-}
-
-function resolveTaggedMarkerRange(
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-): { start: ResolvedBoundary; end: ResolvedBoundary } | null {
-  const viableMarkers = taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number');
-  if (viableMarkers.length !== 2) return null;
-  const [first, second] = [...viableMarkers]
-    .sort((a, b) => (a.timelineTime as number) - (b.timelineTime as number));
-  return {
-    start: {
-      time: first.timelineTime as number,
-      label: typeof first.number === 'number' ? `@${first.number}` : 'first tagged marker',
-    },
-    end: {
-      time: second.timelineTime as number,
-      label: typeof second.number === 'number' ? `@${second.number}` : 'second tagged marker',
-    },
-  };
-}
-
-function resolveImplicitMarkerBoundary(
-  message: string,
-  markers: Array<{ number?: number; timelineTime?: number }>,
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-): ResolvedBoundary | null {
-  const selectedBoundary = resolveSelectedMarkerBoundary(selectedMarker);
-  if (selectedBoundary) return selectedBoundary;
-
-  const taggedBoundary = resolveTaggedMarkerBoundary(taggedMarkers);
-  if (taggedBoundary) return taggedBoundary;
-
-  const explicitMarkerReferences = [...message.matchAll(/(?:@(\d+)|(?:marker|bookmark)\s+(\d+))/gi)];
-  if (explicitMarkerReferences.length === 0) return null;
-
-  const lastReference = explicitMarkerReferences[explicitMarkerReferences.length - 1]?.[0];
-  if (!lastReference) return null;
-  return resolveBoundaryReference(lastReference, markers);
-}
-
-function applyRangeDeleteConstraintMessage(
-  message: string,
-  constraints: RangeDeleteConstraints,
-  markers: Array<{ number?: number; timelineTime?: number }>,
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-) {
-  const betweenPattern = new RegExp(`\\b(?:between|from)\\s+(${BOUNDARY_REFERENCE_PATTERN})\\s+(?:and|to)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i');
-  const betweenMatch = message.match(betweenPattern);
-  if (betweenMatch) {
-    const start = resolveBoundaryReference(betweenMatch[1], markers);
-    const end = resolveBoundaryReference(betweenMatch[2], markers);
-    if (start && end) {
-      constraints.startTime = Math.min(start.time, end.time);
-      constraints.endTime = Math.max(start.time, end.time);
-      constraints.referencedLabels = [start.label, end.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  } else if (/\b(?:between|from)\s+(?:these|those|them|the markers|the tagged markers)\b/i.test(message)) {
-    const taggedRange = resolveTaggedMarkerRange(taggedMarkers);
-    if (taggedRange) {
-      constraints.startTime = taggedRange.start.time;
-      constraints.endTime = taggedRange.end.time;
-      constraints.referencedLabels = [taggedRange.start.label, taggedRange.end.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  }
-
-  const beforeMatch = message.match(new RegExp(`\\b(?:before|until|up to)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i'));
-  if (beforeMatch) {
-    const boundary = resolveBoundaryReference(beforeMatch[1], markers);
-    if (boundary) {
-      constraints.startTime = 0;
-      constraints.endTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  } else if (/\b(?:before|until|up to)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
-    if (boundary) {
-      constraints.startTime = 0;
-      constraints.endTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  }
-
-  const afterMatch = message.match(new RegExp(`\\b(?:after|since)\\s+(${BOUNDARY_REFERENCE_PATTERN})`, 'i'));
-  if (afterMatch) {
-    const boundary = resolveBoundaryReference(afterMatch[1], markers);
-    if (boundary) {
-      constraints.startTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  } else if (/\b(?:after|since)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
-    if (boundary) {
-      constraints.startTime = boundary.time;
-      constraints.endTime = constraints.endTime;
-      constraints.referencedLabels = [boundary.label];
-      constraints.hasExplicitBounds = true;
-      return;
-    }
-  }
-
-  if (
-    !constraints.hasExplicitBounds
-    && /\b(?:between|from)\b/i.test(message)
-    && taggedMarkers.filter((marker) => typeof marker.timelineTime === 'number').length === 2
-  ) {
-    const taggedRange = resolveTaggedMarkerRange(taggedMarkers);
-    if (taggedRange) {
-      constraints.startTime = taggedRange.start.time;
-      constraints.endTime = taggedRange.end.time;
-      constraints.referencedLabels = [taggedRange.start.label, taggedRange.end.label];
-      constraints.hasExplicitBounds = true;
-    }
-  }
-}
-
-function applySilenceConstraintMessage(
-  message: string,
-  constraints: SilenceTaskConstraints,
-  markers: Array<{ number?: number; timelineTime?: number }>,
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-) {
-  const normalized = message.toLowerCase();
-  const betweenMatch = message.match(/\b(?:between|from)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)\s+(?:and|to)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
-  if (betweenMatch) {
-    const start = resolveBoundaryReference(betweenMatch[1], markers);
-    const end = resolveBoundaryReference(betweenMatch[2], markers);
-    if (start && end) {
-      constraints.startTime = Math.min(start.time, end.time);
-      constraints.endTime = Math.max(start.time, end.time);
-      constraints.referencedLabels = [start.label, end.label];
-    }
-  }
-
-  const beforeMatch = message.match(/\b(?:before|until|up to)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
-  if (beforeMatch) {
-    const boundary = resolveBoundaryReference(beforeMatch[1], markers);
-    if (boundary) {
-      constraints.endTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-    }
-  } else if (/\b(?:before|until|up to)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
-    if (boundary) {
-      constraints.endTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-    }
-  }
-
-  const afterMatch = message.match(/\b(?:after|since)\s+(@\d+|(?:marker|bookmark)\s+\d+|\d+:\d{2}|\d+(?:\.\d+)?\s*seconds?)/i);
-  if (afterMatch) {
-    const boundary = resolveBoundaryReference(afterMatch[1], markers);
-    if (boundary) {
-      constraints.startTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-    }
-  } else if (/\b(?:after|since)\s+(?:(?:the\s+|selected\s+)?(?:marker|bookmark)|this|that|here)\b/i.test(message)) {
-    const boundary = resolveImplicitMarkerBoundary(message, markers, selectedMarker, taggedMarkers);
-    if (boundary) {
-      constraints.startTime = boundary.time;
-      constraints.referencedLabels = [boundary.label];
-    }
-  }
-
-  const explicitShortMatch = message.match(/\b(?:under|shorter than|less than)\s+(\d+(?:\.\d+)?)\s*seconds?\b/i);
-  if (explicitShortMatch) {
-    constraints.maxDurationSeconds = parseFloat(explicitShortMatch[1] ?? '0');
-  } else if (/\b(?:only|just)\b[\w\s]{0,18}\b(very short|extremely short)\b/i.test(normalized)) {
-    constraints.maxDurationSeconds = 0.75;
-  } else if (/\b(?:only|just)\b[\w\s]{0,18}\b(short|brief|tiny)\b/i.test(normalized)) {
-    constraints.maxDurationSeconds = 1.25;
-  }
-}
-
-function messageRejectsSilenceOnlyScope(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return /\b(?:don'?t|do not)\s+mean\s+(?:just\s+)?(?:the\s+)?silent/.test(normalized)
-    || /\bi\s+mean\s+the\s+(?:entire|whole|full)\s+(?:block|section|range|part|segment)\b/.test(normalized)
-    || /\bnot\s+(?:just\s+)?(?:the\s+)?silent\s+(?:sections?|parts?|gaps?)\b/.test(normalized);
-}
-
-function isDirectRangeDeleteRequest(message: string): boolean {
-  const normalized = message.toLowerCase();
-  const hasDeleteVerb = /\b(delete|remove|cut)\b/.test(normalized);
-  const hasBoundaryLanguage = /\b(before|after|between|from|until|up to|since)\b/.test(normalized);
-  const hasWholeScopeLanguage = /\b(entire|whole|full)\s+(?:block|section|range|part|segment)\b/.test(normalized)
-    || /\b(?:delete|remove|cut)\s+everything\b/.test(normalized)
-    || /\b(?:all of it|the whole thing)\b/.test(normalized);
-  return messageRejectsSilenceOnlyScope(message)
-    || (hasDeleteVerb && hasBoundaryLanguage && !isLikelySilenceRequest(message))
-    || (hasDeleteVerb && hasWholeScopeLanguage);
-}
-
-function buildDirectRangeDeleteFromTaskState(
-  taskState: ConversationTaskState | null,
-  markers: Array<{ number?: number; timelineTime?: number }>,
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-  videoDuration: number,
-): EditAction | null {
-  if (!taskState) return null;
-  if (!taskState.activeUserMessages.some((message) => isDirectRangeDeleteRequest(message))) {
-    return null;
-  }
-
-  const constraints: RangeDeleteConstraints = {
-    startTime: 0,
-    endTime: videoDuration,
-    referencedLabels: [],
-    hasExplicitBounds: false,
-  };
-
-  for (const message of taskState.activeUserMessages) {
-    applyRangeDeleteConstraintMessage(message, constraints, markers, selectedMarker, taggedMarkers);
-  }
-
-  if (!constraints.hasExplicitBounds) return null;
-  if (constraints.endTime <= constraints.startTime) {
-    return {
-      type: 'none',
-      message: 'That delete range collapsed to an empty section after the latest refinement.',
-    };
-  }
-
-  const direction = constraints.referencedLabels.length === 1
-    ? constraints.startTime > 0 ? `after ${constraints.referencedLabels[0]}` : `before ${constraints.referencedLabels[0]}`
-    : constraints.referencedLabels.length === 2
-      ? `between ${constraints.referencedLabels[0]} and ${constraints.referencedLabels[1]}`
-      : `from ${formatActionTime(constraints.startTime)} to ${formatActionTime(constraints.endTime)}`;
-
-  return {
-    type: 'delete_range',
-    deleteStartTime: constraints.startTime,
-    deleteEndTime: constraints.endTime,
-    message: `Removed the entire section ${direction}.`,
-  };
-}
-
-function buildSilenceActionFromTaskState(
-  taskState: ConversationTaskState | null,
-  silenceCandidates: SilenceCandidate[],
-  markers: Array<{ number?: number; timelineTime?: number }>,
-  selectedMarker: { number?: number; timelineTime?: number } | null,
-  taggedMarkers: Array<{ number?: number; timelineTime?: number }>,
-  videoDuration: number,
-): EditAction | null {
-  if (!taskState) return null;
-  if (!taskState.activeUserMessages.some((message) => isLikelySilenceRequest(message))) {
-    return null;
-  }
-
-  if (silenceCandidates.length === 0) {
-    return {
-      type: 'none',
-      message: 'I checked the transcript timings but there were no removable silent gaps in that scope.',
-    };
-  }
-
-  const constraints: SilenceTaskConstraints = {
-    startTime: 0,
-    endTime: videoDuration,
-    referencedLabels: [],
-  };
-
-  for (const message of taskState.activeUserMessages) {
-    applySilenceConstraintMessage(message, constraints, markers, selectedMarker, taggedMarkers);
-  }
-
-  if (constraints.endTime <= constraints.startTime) {
-    return {
-      type: 'none',
-      message: 'That silence-removal scope collapsed to an empty range after the latest refinement.',
-    };
-  }
-
-  const ranges = silenceCandidates
-    .map((candidate) => ({
-      start: Math.max(candidate.deleteStart, constraints.startTime),
-      end: Math.min(candidate.deleteEnd, constraints.endTime),
-    }))
-    .filter((candidate) => candidate.end > candidate.start)
-    .filter((candidate) => (
-      constraints.maxDurationSeconds === undefined
-        ? true
-        : (candidate.end - candidate.start) <= constraints.maxDurationSeconds + 1e-6
-    ));
-
-  if (ranges.length === 0) {
-    const scopeSuffix = constraints.referencedLabels.length > 0
-      ? ` in the requested scope around ${constraints.referencedLabels.join(' and ')}`
-      : '';
-    return {
-      type: 'none',
-      message: `I checked the transcript timings but there were no silent gaps to cut${scopeSuffix}.`,
-    };
-  }
-
-  const scopeSuffix = constraints.referencedLabels.length > 0
-    ? ` ${constraints.startTime > 0 ? 'after' : 'before'} ${constraints.referencedLabels[0]}`
-    : '';
-  const shortSuffix = constraints.maxDurationSeconds !== undefined ? ' short' : '';
-
-  return {
-    type: 'delete_ranges',
-    ranges,
-    message: `Removed ${ranges.length}${shortSuffix} silent section${ranges.length === 1 ? '' : 's'}${scopeSuffix}.`,
-  };
 }
 
 function extractMentionedMarkers(
@@ -1556,29 +1209,11 @@ Honor these defaults unless the user explicitly asks for something different in 
     const priorVisualSearch = isVisualSearchSession(context?.visualSearchSession)
       ? context.visualSearchSession
       : null;
-
-    if (
-      priorVisualSearch
-      && context?.projectId
-      && priorVisualSearch.projectId === context.projectId
-      && isAffirmativeVisualFollowUp(effectiveLatestUserMessage)
-      && priorVisualSearch.proposal?.intent.actionType === 'delete'
-      && priorVisualSearch.proposal.timelineRanges.length > 0
-    ) {
-      const action = makeDeleteRangesAction(priorVisualSearch.proposal);
-      const visualSearch: VisualSearchSession = {
-        ...priorVisualSearch,
-        confidenceBand: 'high',
-        followUpPrompt: undefined,
-        updatedAt: Date.now(),
-      };
-
-      return NextResponse.json({
-        message: action?.message ?? 'Applied the confirmed visual cut.',
-        action: action ?? { type: 'none', message: 'I could not apply the confirmed visual cut.' },
-        visualSearch,
-      });
-    }
+    const validationContext = buildActionValidationContext(
+      (context && typeof context === 'object') ? context as Record<string, unknown> : null,
+      clipSummaries.length,
+    );
+    const latestPendingAssistantAction = getLatestPendingAssistantAction(richMessages, validationContext);
 
     if (isCaptionRequest(effectiveLatestUserMessage)) {
       return NextResponse.json({
@@ -1748,11 +1383,34 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     if (priorVisualSearch && (!context?.projectId || priorVisualSearch.projectId === context.projectId)) {
       contextLines.push(...formatVisualSearchContext(priorVisualSearch, fmtSec));
+      if (
+        priorVisualSearch.proposal?.intent.actionType === 'delete'
+        && priorVisualSearch.proposal.timelineRanges.length > 0
+      ) {
+        const visualDeleteAction = {
+          type: 'delete_ranges',
+          ranges: priorVisualSearch.proposal.timelineRanges.map((range: { timelineStart: number; timelineEnd: number }) => ({
+            start: range.timelineStart,
+            end: range.timelineEnd,
+          })),
+          message: priorVisualSearch.proposal.timelineRanges.length === 1
+            ? 'Removed the verified visual match.'
+            : `Removed ${priorVisualSearch.proposal.timelineRanges.length} verified visual matches.`,
+        };
+        contextLines.push(
+          `Latest visual delete proposal is still available as timeline ranges: ${priorVisualSearch.proposal.timelineRanges
+            .map((range: { timelineStart: number; timelineEnd: number }) => `${fmtSec(range.timelineStart)}-${fmtSec(range.timelineEnd)}`)
+            .join(' | ')}`
+        );
+        contextLines.push(`PENDING_VISUAL_DELETE_ACTION_JSON: ${JSON.stringify(visualDeleteAction)}`);
+      }
     }
 
     if (taskState) {
       contextLines.push(...summarizeConversationTaskState(taskState));
     }
+
+    contextLines.push(...formatPendingActionContext(latestPendingAssistantAction));
 
     const mentionedTimes = extractMentionedTimes(normalizedMessages, clipSummaries);
     if (mentionedTimes.length > 0) {
@@ -1842,43 +1500,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     }
 
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
-    const availableMarkers = Array.isArray(context?.markers)
-      ? (context.markers as Array<{ number?: number; timelineTime?: number }>)
-      : [];
-    const selectedMarker = context?.selectedMarker && typeof context.selectedMarker === 'object'
-      ? (context.selectedMarker as { number?: number; timelineTime?: number })
-      : null;
-    const taggedMarkers = Array.isArray(context?.taggedMarkers)
-      ? (context.taggedMarkers as Array<{ number?: number; timelineTime?: number }>)
-      : [];
-    const deterministicRangeDeleteAction = buildDirectRangeDeleteFromTaskState(
-      taskState,
-      availableMarkers,
-      selectedMarker,
-      taggedMarkers,
-      Number(context?.videoDuration ?? 0),
-    );
-    if (deterministicRangeDeleteAction) {
-      return NextResponse.json({
-        message: deterministicRangeDeleteAction.message,
-        action: deterministicRangeDeleteAction,
-      });
-    }
-    const deterministicSilenceAction = buildSilenceActionFromTaskState(
-      taskState,
-      silenceCandidates,
-      availableMarkers,
-      selectedMarker,
-      taggedMarkers,
-      Number(context?.videoDuration ?? 0),
-    );
-    if (deterministicSilenceAction) {
-      return NextResponse.json({
-        message: deterministicSilenceAction.message,
-        action: deterministicSilenceAction,
-      });
-    }
-
+    contextLines.push(...formatSilenceCandidatesContext(silenceCandidates));
     if (context?.transcript) {
       const transcriptExcerpt = selectRelevantTranscriptLines(context.transcript, normalizedMessages);
       const transcriptBlock = buildUntrustedDataBlock(
@@ -1973,18 +1595,6 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
     const { message, parsedAction } = extractTrailingAction(rawText);
-    const validationContext = {
-      clipCount: clipSummaries.length,
-      videoDuration: Number(context?.videoDuration ?? 0),
-      markerIds: new Set(
-        Array.isArray(context?.markers)
-          ? context.markers
-              .map((marker: { id?: unknown }) => (typeof marker?.id === 'string' ? marker.id : null))
-              .filter((markerId: string | null): markerId is string => markerId !== null)
-          : [],
-      ),
-      overlayCount: typeof context?.textOverlayCount === 'number' ? context.textOverlayCount : undefined,
-    };
     const action = validateEditAction(parsedAction, validationContext);
     const fallbackMarkerAction = validateEditAction(
       buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, denseFrames, priorVisualSearch),

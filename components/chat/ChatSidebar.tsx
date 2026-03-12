@@ -48,6 +48,7 @@ type ChatResponse = {
 type ChatRequestMessage = {
   role: 'user' | 'assistant';
   content: string;
+  action?: EditAction | null;
   actionType?: EditAction['type'];
   actionMessage?: string;
   actionStatus?: ChatMessageType['actionStatus'];
@@ -327,6 +328,7 @@ function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: s
   const history: ChatRequestMessage[] = messages.map((message) => ({
     role: message.role,
     content: message.content,
+    action: message.action ?? null,
     actionType: message.action?.type,
     actionMessage: message.action?.message,
     actionStatus: message.actionStatus,
