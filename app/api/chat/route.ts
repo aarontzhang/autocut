@@ -1754,7 +1754,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       }
     }
 
-    const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
     contextLines.push(...formatSilenceCandidatesContext(silenceCandidates));
     if (context?.transcript) {
