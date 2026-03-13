@@ -45,7 +45,7 @@ type ClipMovePreview = {
 interface TimelineProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   playerRef?: React.RefObject<VideoPlayerHandle | null>;
-  onImportFile?: (file: File) => void;
+  onImportFile?: (file: File) => void | Promise<void>;
   onStorageUploadError?: (error: unknown) => void;
   onStorageUploadSuccess?: () => void;
 }
@@ -99,14 +99,42 @@ export default function Timeline({
     })
   ), []);
 
+  const waitForMainTimelineReady = useCallback(() => (
+    new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + 5000;
+
+      const checkReady = () => {
+        const state = useEditorStore.getState();
+        if (state.videoUrl && state.videoDuration > 0 && state.clips.length > 0) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve(false);
+          return;
+        }
+        window.setTimeout(checkReady, 50);
+      };
+
+      checkReady();
+    })
+  ), []);
+
   const insertFilesIntoTimeline = useCallback(async (files: File[], initialDropTime?: number) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     if (videoFiles.length === 0) return;
+    let filesToInsert = videoFiles;
 
     if (!useEditorStore.getState().videoUrl) {
-      const [firstFile] = videoFiles;
-      if (firstFile) onImportFile?.(firstFile);
-      return;
+      const [firstFile, ...remainingFiles] = videoFiles;
+      if (!firstFile) return;
+
+      await onImportFile?.(firstFile);
+      if (remainingFiles.length === 0) return;
+
+      const mainTimelineReady = await waitForMainTimelineReady();
+      if (!mainTimelineReady) return;
+      filesToInsert = remainingFiles;
     }
 
     const initialSchedule = buildClipSchedule(useEditorStore.getState().clips);
@@ -115,7 +143,7 @@ export default function Timeline({
         ? initialSchedule[initialSchedule.length - 1].timelineEnd
         : useEditorStore.getState().videoDuration
     );
-    for (const file of videoFiles) {
+    for (const file of filesToInsert) {
       const sourceUrl = URL.createObjectURL(file);
       const duration = await readVideoDuration(sourceUrl);
       const currentSchedule = buildClipSchedule(useEditorStore.getState().clips);
@@ -147,6 +175,7 @@ export default function Timeline({
     onStorageUploadSuccess,
     readVideoDuration,
     updateClipSourcePath,
+    waitForMainTimelineReady,
     user,
   ]);
 

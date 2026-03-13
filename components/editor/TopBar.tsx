@@ -1,33 +1,23 @@
 'use client';
 
-import { useRef, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { exportClips } from '@/lib/ffmpegClient';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
 
-export default function TopBar({
-  onImportFile,
-  onImportFiles,
-}: {
-  onImportFile?: (file: File) => void;
-  onImportFiles?: (files: File[]) => void | Promise<void>;
-}) {
+export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
   const clips = useEditorStore(s => s.clips);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
-  const setVideoFile = useEditorStore(s => s.setVideoFile);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
   const canUndo = useEditorStore(s => s.history.length > 0);
   const canRedo = useEditorStore(s => s.future.length > 0);
-  const inputRef = useRef<HTMLInputElement>(null);
   const { user } = useAuth();
-  const router = useRouter();
 
   const outputReady = ffmpegJob.status === 'done';
   const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && !!videoFile;
@@ -145,108 +135,6 @@ export default function TopBar({
           <path d="M20.49 15a9 9 0 1 1-.49-3.96" />
         </svg>
       </button>
-
-      <div style={{ width: 1, height: 16, background: 'var(--border-mid)' }} />
-
-      <button
-        onClick={() => router.push('/projects')}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 5,
-          fontSize: 12,
-          color: 'var(--fg-secondary)',
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          padding: '4px 8px',
-          borderRadius: 4,
-          fontFamily: 'var(--font-serif)',
-          transition: 'background 0.15s, color 0.15s',
-        }}
-        onMouseEnter={event => {
-          event.currentTarget.style.background = 'var(--bg-elevated)';
-          event.currentTarget.style.color = 'var(--fg-primary)';
-        }}
-        onMouseLeave={event => {
-          event.currentTarget.style.background = 'none';
-          event.currentTarget.style.color = 'var(--fg-secondary)';
-        }}
-      >
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        </svg>
-        Projects
-      </button>
-
-      <button
-        onClick={() => inputRef.current?.click()}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 5,
-          fontSize: 12,
-          color: 'var(--fg-secondary)',
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          padding: '4px 8px',
-          borderRadius: 4,
-          fontFamily: 'var(--font-serif)',
-          transition: 'background 0.15s, color 0.15s',
-        }}
-        onMouseEnter={event => {
-          event.currentTarget.style.background = 'var(--bg-elevated)';
-          event.currentTarget.style.color = 'var(--fg-primary)';
-        }}
-        onMouseLeave={event => {
-          event.currentTarget.style.background = 'none';
-          event.currentTarget.style.color = 'var(--fg-secondary)';
-        }}
-      >
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-        </svg>
-        Import
-      </button>
-      <input
-        ref={inputRef}
-        type="file"
-        accept="video/*"
-        multiple
-        style={{ display: 'none' }}
-        onChange={event => {
-          const files = Array.from(event.target.files ?? []);
-          if (files.length > 0) {
-            if (onImportFiles) {
-              void onImportFiles(files);
-            } else {
-              const [file] = files;
-              if (file) {
-                if (onImportFile) onImportFile(file);
-                else setVideoFile(file);
-              }
-            }
-          }
-          event.target.value = '';
-        }}
-      />
-
-      {videoFile && (
-        <span
-          style={{
-            fontSize: 12,
-            color: 'var(--fg-muted)',
-            maxWidth: 220,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {videoFile.name}
-        </span>
-      )}
 
       <div style={{ flex: 1 }} />
 

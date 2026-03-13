@@ -460,7 +460,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       onDragOver={handleDragOver}
     >
       {/* ── Top bar ── */}
-      <TopBar onImportFile={importMainFile} onImportFiles={importFiles} />
+      <TopBar />
       {(storageNotice || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (
         <div style={{ padding: '10px 14px 0', flexShrink: 0 }}>
           <StorageQuotaBanner
