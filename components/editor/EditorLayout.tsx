@@ -98,6 +98,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const redo = useEditorStore(s => s.redo);
   const deleteSelectedItem = useEditorStore(s => s.deleteSelectedItem);
   const videoDuration = useEditorStore(s => s.videoDuration);
+  const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
@@ -246,6 +247,16 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     lastSignedMediaRefreshAtRef.current = Date.now();
   }, [cacheProjectMediaLocally]);
 
+  const readVideoDuration = useCallback((sourceUrl: string) => (
+    new Promise<number>((resolve) => {
+      const tmp = document.createElement('video');
+      tmp.preload = 'metadata';
+      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
+      tmp.onerror = () => { resolve(0); tmp.src = ''; };
+      tmp.src = sourceUrl;
+    })
+  ), []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Allow Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo) even when a text input is focused
@@ -378,11 +389,19 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     };
   }, [projectId, refreshSignedMediaUrls]);
 
-  const importMainFile = useCallback((file: File) => {
+  const importMainFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
     const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
     if (!targetProjectId) return;
+
+    const blobUrl = URL.createObjectURL(file);
+    const duration = await readVideoDuration(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+
     setProjectVideoFile(file, targetProjectId);
+    if (duration > 0) {
+      setVideoDuration(duration);
+    }
 
     // Background upload to storage so the project persists on reload
     const { currentProjectId, storagePath } = useEditorStore.getState();
@@ -394,19 +413,13 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       console.warn('Background upload failed:', error.message);
       handleStorageUploadError(error);
     });
-  }, [projectId, setProjectVideoFile, user, setStoragePath, handleStorageUploadError, handleStorageUploadSuccess]);
+  }, [projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setVideoDuration, user, handleStorageUploadError, handleStorageUploadSuccess]);
 
   const importLibraryFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
     const { currentProjectId } = useEditorStore.getState();
     const blobUrl = URL.createObjectURL(file);
-    const duration = await new Promise<number>((resolve) => {
-      const tmp = document.createElement('video');
-      tmp.preload = 'metadata';
-      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
-      tmp.onerror = () => resolve(0);
-      tmp.src = blobUrl;
-    });
+    const duration = await readVideoDuration(blobUrl);
 
     let sourcePath: string | undefined;
     if (user && currentProjectId) {
@@ -420,7 +433,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     }
 
     addMediaLibraryItem({ url: blobUrl, name: file.name, duration, sourcePath });
-  }, [addMediaLibraryItem, user, handleStorageUploadError, handleStorageUploadSuccess]);
+  }, [addMediaLibraryItem, readVideoDuration, user, handleStorageUploadError, handleStorageUploadSuccess]);
 
   const importFiles = useCallback(async (files: File[]) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));

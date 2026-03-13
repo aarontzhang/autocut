@@ -99,27 +99,6 @@ export default function Timeline({
     })
   ), []);
 
-  const waitForMainTimelineReady = useCallback(() => (
-    new Promise<boolean>((resolve) => {
-      const deadline = Date.now() + 5000;
-
-      const checkReady = () => {
-        const state = useEditorStore.getState();
-        if (state.videoUrl && state.videoDuration > 0 && state.clips.length > 0) {
-          resolve(true);
-          return;
-        }
-        if (Date.now() >= deadline) {
-          resolve(false);
-          return;
-        }
-        window.setTimeout(checkReady, 50);
-      };
-
-      checkReady();
-    })
-  ), []);
-
   const insertFilesIntoTimeline = useCallback(async (files: File[], initialDropTime?: number) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     if (videoFiles.length === 0) return;
@@ -129,11 +108,9 @@ export default function Timeline({
       const [firstFile, ...remainingFiles] = videoFiles;
       if (!firstFile) return;
 
-      await onImportFile?.(firstFile);
+      if (!onImportFile) return;
+      await onImportFile(firstFile);
       if (remainingFiles.length === 0) return;
-
-      const mainTimelineReady = await waitForMainTimelineReady();
-      if (!mainTimelineReady) return;
       filesToInsert = remainingFiles;
     }
 
@@ -175,7 +152,6 @@ export default function Timeline({
     onStorageUploadSuccess,
     readVideoDuration,
     updateClipSourcePath,
-    waitForMainTimelineReady,
     user,
   ]);
 
