@@ -42,6 +42,11 @@ type ClipMovePreview = {
   targetIndex: number;
 };
 
+type GestureZoomState = {
+  startZoom: number;
+  clientX: number;
+};
+
 interface TimelineProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   playerRef?: React.RefObject<VideoPlayerHandle | null>;
@@ -62,6 +67,7 @@ export default function Timeline({
   const panRef = useRef<{ startX: number; startScrollLeft: number; moved: boolean } | null>(null);
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
   const clipDragJustEnded = useRef(false);
+  const gestureZoomRef = useRef<GestureZoomState | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
   const [isMainDragOver, setIsMainDragOver] = useState(false);
@@ -214,6 +220,28 @@ export default function Timeline({
     return generateWaveform(videoDuration, bars);
   }, [videoDuration, totalW]);
 
+  const zoomAroundClientX = useCallback((nextZoom: number, clientX: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const currentZoom = useEditorStore.getState().zoom;
+    if (!Number.isFinite(currentZoom) || currentZoom <= 0) return;
+
+    const rect = el.getBoundingClientRect();
+    const viewportX = Math.max(0, clientX - rect.left - HEADER_W);
+    const anchorX = el.scrollLeft + viewportX;
+
+    useEditorStore.getState().setZoom(nextZoom);
+
+    requestAnimationFrame(() => {
+      const resolvedZoom = useEditorStore.getState().zoom;
+      const ratio = resolvedZoom / currentZoom;
+      const nextScrollLeft = anchorX * ratio - viewportX;
+      const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+      el.scrollLeft = Math.max(0, Math.min(nextScrollLeft, maxScrollLeft));
+    });
+  }, []);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -231,21 +259,21 @@ export default function Timeline({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
+      if (e.ctrlKey) {
         e.preventDefault();
-        const rect = el.getBoundingClientRect();
-        const cursorXInContent = (e.clientX - rect.left - HEADER_W) + el.scrollLeft;
         const cur = useEditorStore.getState().zoom;
-        const factor = e.deltaY > 0 ? 1 / 1.25 : 1.25;
-        const next = Math.round(cur * factor * 100) / 100;
-        useEditorStore.getState().setZoom(next);
+        const factor = Math.exp(-e.deltaY * 0.0025);
+        const next = Math.round(cur * factor * 1000) / 1000;
+        zoomAroundClientX(next, e.clientX);
+        return;
+      }
 
-        requestAnimationFrame(() => {
-          const newZoom = useEditorStore.getState().zoom;
-          const ratio = newZoom / cur;
-          const newCursorX = cursorXInContent * ratio;
-          el.scrollLeft = Math.max(0, newCursorX - (e.clientX - rect.left - HEADER_W));
-        });
+      if (e.metaKey) {
+        e.preventDefault();
+        const cur = useEditorStore.getState().zoom;
+        const factor = e.deltaY > 0 ? 1 / 1.08 : 1.08;
+        const next = Math.round(cur * factor * 1000) / 1000;
+        zoomAroundClientX(next, e.clientX);
         return;
       }
 
@@ -255,9 +283,39 @@ export default function Timeline({
       }
     };
 
+    const onGestureStart = (event: Event) => {
+      const gesture = event as Event & { clientX?: number };
+      event.preventDefault();
+      gestureZoomRef.current = {
+        startZoom: useEditorStore.getState().zoom,
+        clientX: gesture.clientX ?? (el.getBoundingClientRect().left + HEADER_W),
+      };
+    };
+
+    const onGestureChange = (event: Event) => {
+      const gesture = event as Event & { scale?: number; clientX?: number };
+      const activeGesture = gestureZoomRef.current;
+      if (!activeGesture || typeof gesture.scale !== 'number' || !Number.isFinite(gesture.scale)) return;
+      event.preventDefault();
+      const next = Math.round(activeGesture.startZoom * gesture.scale * 1000) / 1000;
+      zoomAroundClientX(next, gesture.clientX ?? activeGesture.clientX);
+    };
+
+    const onGestureEnd = () => {
+      gestureZoomRef.current = null;
+    };
+
     el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+    el.addEventListener('gesturestart', onGestureStart, { passive: false });
+    el.addEventListener('gesturechange', onGestureChange, { passive: false });
+    el.addEventListener('gestureend', onGestureEnd);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('gesturestart', onGestureStart);
+      el.removeEventListener('gesturechange', onGestureChange);
+      el.removeEventListener('gestureend', onGestureEnd);
+    };
+  }, [zoomAroundClientX]);
 
   const tPx = useCallback((time: number) => {
     if (totalTimelineDuration <= 0) return 0;

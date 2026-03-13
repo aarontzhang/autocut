@@ -53,6 +53,62 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
   return new Uint8Array(await fetch(fileOrUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
 }
 
+async function probeMediaInput(fileOrUrl: Uint8Array | File | string): Promise<{
+  width: number;
+  height: number;
+}> {
+  let objectUrl: string | null = null;
+  const src = (() => {
+    if (typeof fileOrUrl === 'string') return fileOrUrl;
+    if (fileOrUrl instanceof File) {
+      objectUrl = URL.createObjectURL(fileOrUrl);
+      return objectUrl;
+    }
+    const buffer = new ArrayBuffer(fileOrUrl.byteLength);
+    new Uint8Array(buffer).set(fileOrUrl);
+    objectUrl = URL.createObjectURL(new Blob([buffer], { type: 'video/mp4' }));
+    return objectUrl;
+  })();
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      const cleanup = () => {
+        video.removeAttribute('src');
+        video.load();
+      };
+      video.preload = 'metadata';
+      video.muted = true;
+      video.playsInline = true;
+      video.onloadedmetadata = () => {
+        const width = video.videoWidth || 0;
+        const height = video.videoHeight || 0;
+        cleanup();
+        if (width > 0 && height > 0) {
+          resolve({ width, height });
+        } else {
+          reject(new Error('Video dimensions unavailable'));
+        }
+      };
+      video.onerror = () => {
+        cleanup();
+        reject(new Error('Failed to probe media dimensions'));
+      };
+      video.src = src;
+      video.load();
+    });
+  } finally {
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+}
+
+function toEvenDimension(value: number, fallback: number): number {
+  const safe = Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
+  return safe % 2 === 0 ? safe : safe + 1;
+}
+
 export async function extractAudioSegment(
   fileOrUrl: Uint8Array | File | string,
   startTime: number,
@@ -188,13 +244,24 @@ export async function exportClips({
 
   onStage?.('Reading source media…');
   const sourceFileNames = new Map<string, string>();
+  const sourceDimensions = new Map<string, { width: number; height: number }>();
   for (let index = 0; index < sources.length; index += 1) {
     const source = sources[index];
     const inputName = `input_export_${index}.mp4`;
-    const inputData = await readMediaInput(source.fileUrl);
+    const [inputData, dimensions] = await Promise.all([
+      readMediaInput(source.fileUrl),
+      probeMediaInput(source.fileUrl).catch(() => ({ width: 0, height: 0 })),
+    ]);
     await ffmpeg.writeFile(inputName, inputData);
     sourceFileNames.set(source.sourceId, inputName);
+    sourceDimensions.set(source.sourceId, dimensions);
   }
+
+  const firstClipSourceId = getClipSourceId(clips[0]);
+  const firstClipDimensions = sourceDimensions.get(firstClipSourceId);
+  const fallbackDimensions = [...sourceDimensions.values()].find((dims) => dims.width > 0 && dims.height > 0);
+  const targetWidth = toEvenDimension(firstClipDimensions?.width ?? fallbackDimensions?.width ?? 1280, 1280);
+  const targetHeight = toEvenDimension(firstClipDimensions?.height ?? fallbackDimensions?.height ?? 720, 720);
 
   onStage?.('Processing clips…');
   const segFiles: string[] = [];
@@ -213,7 +280,7 @@ export async function exportClips({
     const aFilters: string[] = [];
 
     if (clip.speed !== 1.0) {
-      vFilters.push(`setpts=${1/clip.speed}*PTS`);
+      vFilters.push(`setpts=(PTS-STARTPTS)/${clip.speed}`);
       // atempo must be in range 0.5–2.0; chain for values outside that range
       let remainingSpeed = clip.speed;
       const atempoChain: string[] = [];
@@ -227,6 +294,8 @@ export async function exportClips({
       }
       atempoChain.push(`atempo=${remainingSpeed.toFixed(4)}`);
       aFilters.push(...atempoChain);
+    } else {
+      vFilters.push('setpts=PTS-STARTPTS');
     }
 
     if (clip.volume !== 1.0) {
@@ -245,25 +314,42 @@ export async function exportClips({
       if (f) vFilters.push(f);
     }
 
+    // Normalize all exported segments so mixed-source concatenation stays decodable.
+    vFilters.push(
+      `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease`,
+      `pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2`,
+      'setsar=1',
+      'fps=30',
+      'format=yuv420p',
+    );
+
+    if (aFilters.length > 0) {
+      aFilters.unshift('asetpts=PTS-STARTPTS');
+    }
+
     const args: string[] = [
+      '-i', inputName,
       '-ss', String(clip.sourceStart),
       '-t', String(clip.sourceDuration),
-      '-i', inputName,
     ];
 
-    if (vFilters.length > 0 || aFilters.length > 0) {
-      // Need re-encode
-      if (vFilters.length > 0) {
-        args.push('-vf', vFilters.join(','));
-      }
-      if (aFilters.length > 0) {
-        args.push('-af', aFilters.join(','));
-      }
-      args.push('-c:v', 'libx264', '-c:a', 'aac', '-preset', 'fast');
-    } else {
-      // Stream copy — fast
-      args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
+    if (vFilters.length > 0) {
+      args.push('-vf', vFilters.join(','));
     }
+    if (aFilters.length > 0) {
+      args.push('-af', aFilters.join(','));
+    }
+    args.push(
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-pix_fmt', 'yuv420p',
+      '-r', '30',
+      '-c:a', 'aac',
+      '-ar', '48000',
+      '-ac', '2',
+      '-avoid_negative_ts', 'make_zero',
+      '-movflags', '+faststart',
+    );
 
     args.push(segName);
     await ffmpeg.exec(args);
