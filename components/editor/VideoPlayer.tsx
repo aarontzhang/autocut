@@ -180,18 +180,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const video = videoRef.current;
     if (!video) return;
 
-    let activeClip = null;
-    for (const clip of currentClips) {
-      const clipSource = clip.sourceUrl ?? videoUrl;
-      if (clipSource !== (activePlaybackRef.current?.sourceUrl || videoUrl)) continue;
-      if (sourceTime >= clip.sourceStart && sourceTime < clip.sourceStart + clip.sourceDuration) {
-        activeClip = clip;
-        break;
-      }
-    }
-    if (!activeClip && currentClips.length > 0) {
-      activeClip = currentClips[currentClips.length - 1];
-    }
+    const currentSchedule = buildClipSchedule(currentClips);
+    const currentTimelineEntry = findTimelineEntryAtTime(currentSchedule, currentTimeRef.current);
+    const activeClip = currentTimelineEntry
+      ? currentClips.find((clip) => clip.id === currentTimelineEntry.clipId) ?? null
+      : currentClips[currentClips.length - 1] ?? null;
     if (!activeClip) return;
 
     if (video.playbackRate !== activeClip.speed) {
@@ -323,19 +316,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const currentSource = activePlaybackRef.current?.sourceUrl || videoUrl;
     const currentSlot = activePlaybackRef.current?.slot ?? 0;
     const currentSchedule = buildClipSchedule(currentClips);
+    const currentTimelineEntry = findTimelineEntryAtTime(
+      currentSchedule,
+      Math.min(currentTimeRef.current, totalTimelineDuration),
+    );
+    const currentTimelineClip = currentTimelineEntry
+      ? currentClips.find((clip) => clip.id === currentTimelineEntry.clipId) ?? null
+      : null;
+    const currentTimelineSource = currentTimelineClip?.sourceUrl ?? videoUrl;
 
-    let activeEntry: typeof currentSchedule[0] | null = null;
-    for (const entry of currentSchedule) {
-      const clip = currentClips.find(item => item.id === entry.clipId);
-      if (!clip || (clip.sourceUrl ?? videoUrl) !== currentSource) continue;
-      if (sourceTime >= entry.sourceStart && sourceTime < entry.sourceStart + entry.sourceDuration) {
-        activeEntry = entry;
-        break;
-      }
-    }
-
-    if (activeEntry) {
-      const timelineTime = activeEntry.timelineStart + (sourceTime - activeEntry.sourceStart) / activeEntry.speed;
+    if (
+      currentTimelineEntry
+      && currentTimelineSource === currentSource
+      && sourceTime >= currentTimelineEntry.sourceStart - AUTO_ADVANCE_EPSILON
+      && sourceTime < currentTimelineEntry.sourceStart + currentTimelineEntry.sourceDuration - AUTO_ADVANCE_EPSILON / 2
+    ) {
+      const timelineTime = currentTimelineEntry.timelineStart + (sourceTime - currentTimelineEntry.sourceStart) / currentTimelineEntry.speed;
       if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
         currentTimeRef.current = timelineTime;
         setCurrentTime(timelineTime);
@@ -347,7 +343,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current + AUTO_ADVANCE_EPSILON,
       totalTimelineDuration,
     );
-    const currentTimelineEntry = findTimelineEntryAtTime(
+    const anchoredTimelineEntry = currentTimelineEntry ?? findTimelineEntryAtTime(
       currentSchedule,
       Math.max(0, currentTimeRef.current - AUTO_ADVANCE_EPSILON),
     );
@@ -358,7 +354,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const timelineTargetSource = timelineTargetClip?.sourceUrl ?? videoUrl;
     const nextEntry = timelineTarget && (
       timelineTargetSource !== currentSource
-      || timelineTarget.clipId !== currentTimelineEntry?.clipId
+      || timelineTarget.clipId !== anchoredTimelineEntry?.clipId
     )
       ? timelineTarget
       : (

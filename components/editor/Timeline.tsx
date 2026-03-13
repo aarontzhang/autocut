@@ -912,7 +912,7 @@ export default function Timeline({
                     position: 'absolute',
                     left: clipLeft,
                     top: 6,
-                    width: Math.max(2, clipWidth),
+                    width: Math.max(24, clipWidth),
                     height: TRACK_HEIGHT - 12,
                     borderRadius: 4,
                     overflow: 'hidden',
