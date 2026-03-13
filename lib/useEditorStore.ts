@@ -25,6 +25,7 @@ import {
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
 import { buildTranscriptContext } from './timelineUtils';
+import { createImportedSourceId, MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 
 export type { EditSnapshot } from './editActionUtils';
 
@@ -39,6 +40,7 @@ export interface MediaLibraryItem {
   url: string;
   name: string;
   duration: number;
+  sourceId?: string;
   sourcePath?: string;
 }
 
@@ -53,9 +55,10 @@ export type SelectedItem = {
   id: string;
 } | null;
 
-function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
+function makeClip(sourceStart: number, sourceDuration: number, sourceId = MAIN_SOURCE_ID): VideoClip {
   return {
     id: uuidv4(),
+    sourceId,
     sourceStart,
     sourceDuration,
     speed: 1.0,
@@ -63,6 +66,20 @@ function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
     filter: null,
     fadeIn: 0,
     fadeOut: 0,
+  };
+}
+
+function normalizeClipSourceId(
+  clip: Partial<Pick<VideoClip, 'sourceId' | 'sourcePath'>>,
+  fallback = MAIN_SOURCE_ID,
+): string {
+  return normalizeSourceId(clip.sourceId) ?? normalizeSourceId(clip.sourcePath) ?? fallback;
+}
+
+function normalizeCaptionSourceId(caption: CaptionEntry): CaptionEntry {
+  return {
+    ...caption,
+    sourceId: normalizeSourceId(caption.sourceId) ?? MAIN_SOURCE_ID,
   };
 }
 
@@ -218,7 +235,7 @@ interface EditorState {
   recordAppliedAction: (
     action: EditAction,
     summary: string,
-    metadata?: { sourceRanges?: Array<{ assetId?: string | null; sourceStart: number; sourceEnd: number }> },
+    metadata?: { sourceRanges?: AppliedActionRecord['sourceRanges'] },
   ) => void;
 
   // FFmpeg
@@ -272,8 +289,8 @@ interface EditorState {
   mediaLibrary: MediaLibraryItem[];
   addToMediaLibrary: (file: File) => Promise<string>;
   addMediaLibraryItem: (item: Omit<MediaLibraryItem, 'id'>) => string;
-  appendVideoToTimeline: (sourceUrl: string, sourceName: string, duration: number, sourcePath?: string) => string;
-  insertVideoIntoTimeline: (sourceUrl: string, sourceName: string, duration: number, insertAtTime: number, sourcePath?: string) => string;
+  appendVideoToTimeline: (sourceUrl: string, sourceName: string, duration: number, sourcePath?: string, sourceId?: string) => string;
+  insertVideoIntoTimeline: (sourceUrl: string, sourceName: string, duration: number, insertAtTime: number, sourcePath?: string, sourceId?: string) => string;
   updateClipSourcePath: (clipId: string, sourcePath: string) => void;
 
   // Reset
@@ -369,7 +386,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
-      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0 }],
+      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID }],
     }));
   },
 
@@ -380,7 +397,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     );
     // Initialize a single clip spanning full video on first load
     if (clips.length === 0 && duration > 0) {
-      set({ videoDuration: duration, clips: [makeClip(0, duration)], mediaLibrary: updatedLibrary });
+      set({ videoDuration: duration, clips: [makeClip(0, duration, MAIN_SOURCE_ID)], mediaLibrary: updatedLibrary });
     } else {
       set({ videoDuration: duration, mediaLibrary: updatedLibrary });
     }
@@ -713,7 +730,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     appliedActions: [],
     visualSearchSession: null,
     pendingAction: null,
-    clips: s.videoDuration > 0 ? [makeClip(0, s.videoDuration)] : [],
+    clips: s.videoDuration > 0 ? [makeClip(0, s.videoDuration, MAIN_SOURCE_ID)] : [],
     captions: [],
     transitions: [],
     markers: [],
@@ -753,7 +770,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
-      mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourcePath: storagePath }],
+      mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID, sourcePath: storagePath }],
     }));
   },
 
@@ -771,14 +788,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
-      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, ...(storagePath ? { sourcePath: storagePath } : {}) }],
+      mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID, ...(storagePath ? { sourcePath: storagePath } : {}) }],
     }));
   },
 
   loadProject: (editState, project) => {
     const { videoUrl, storagePath, projectId, videoFilename, duration, signedUrls = {} } = project;
-    const clips = (editState.clips as VideoClip[] | undefined) ?? [];
-    const rawTranscriptCaptions = (editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null;
+    const clips = ((editState.clips as VideoClip[] | undefined) ?? []).map((clip) => ({
+      ...clip,
+      sourceId: normalizeClipSourceId(clip),
+    }));
+    const rawTranscriptCaptions = ((editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null)
+      ?.map(normalizeCaptionSourceId) ?? null;
     const persistedMediaLibrary = Array.isArray(editState.mediaLibrary)
       ? (editState.mediaLibrary as Array<Partial<MediaLibraryItem>>)
           .filter((item) => (
@@ -790,6 +811,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             url: typeof item.sourcePath === 'string' ? (signedUrls[item.sourcePath] ?? '') : '',
             name: item.name as string,
             duration: item.duration as number,
+            sourceId: normalizeSourceId(item.sourceId) ?? normalizeSourceId(item.sourcePath) ?? createImportedSourceId(),
             sourcePath: typeof item.sourcePath === 'string' ? item.sourcePath : undefined,
           }))
       : [];
@@ -804,6 +826,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           .map((frame) => ({
             timelineTime: frame.timelineTime as number,
             sourceTime: frame.sourceTime as number,
+            sourceId: normalizeSourceId(frame.sourceId) ?? MAIN_SOURCE_ID,
             kind: 'overview' as const,
             description: frame.description as string,
           }))
@@ -822,9 +845,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         .filter((item) => item.sourcePath)
         .map((item) => [item.sourcePath as string, item]),
     );
+    const mediaLibraryBySourceId = new Map(
+      persistedMediaLibrary
+        .filter((item) => item.sourceId)
+        .map((item) => [item.sourceId as string, item]),
+    );
     const hydratedClips = clips.map((clip) => {
-      const sourceItem = clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null;
-      return sourceItem?.url ? { ...clip, sourceUrl: sourceItem.url } : clip;
+      const sourceItem = (clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null)
+        ?? mediaLibraryBySourceId.get(clip.sourceId);
+      const sourceUrl = sourceItem?.url || (!clip.sourcePath && clip.sourceId === MAIN_SOURCE_ID ? videoUrl : clip.sourceUrl);
+      return sourceUrl ? { ...clip, sourceUrl } : clip;
     });
     const mainLibraryItem = videoUrl
       ? [{
@@ -832,6 +862,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           url: storagePath ? (signedUrls[storagePath] ?? videoUrl) : videoUrl,
           name: videoFilename?.trim() || 'Main video',
           duration: duration ?? 0,
+          sourceId: MAIN_SOURCE_ID,
           ...(storagePath ? { sourcePath: storagePath } : {}),
         }]
       : [];
@@ -851,7 +882,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       previewSnapshot: null, previewOwnerId: null,
       extraTracks: [],
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
-      appliedActions: (editState.appliedActions as AppliedActionRecord[] | undefined) ?? [],
+      appliedActions: ((editState.appliedActions as AppliedActionRecord[] | undefined) ?? []).map((entry) => ({
+        ...entry,
+        sourceRanges: entry.sourceRanges?.map((range) => ({
+          ...range,
+          sourceId: normalizeSourceId(range.sourceId)
+            ?? normalizeSourceId(range.assetId)
+            ?? MAIN_SOURCE_ID,
+        })),
+      })),
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
@@ -1086,7 +1125,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       tmp.onerror = () => resolve(0);
       tmp.src = url;
     });
-    const item: MediaLibraryItem = { id: uuidv4(), url, name: file.name, duration };
+    const item: MediaLibraryItem = { id: uuidv4(), url, name: file.name, duration, sourceId: createImportedSourceId() };
     set(s => ({ mediaLibrary: [...s.mediaLibrary, item] }));
     return url;
   },
@@ -1095,20 +1134,45 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const id = uuidv4();
     set(s => {
       const existing = s.mediaLibrary.find(entry =>
-        (item.sourcePath && entry.sourcePath === item.sourcePath) || entry.url === item.url
+        (item.sourceId && entry.sourceId === item.sourceId)
+        || (item.sourcePath && entry.sourcePath === item.sourcePath)
+        || entry.url === item.url
       );
-      if (existing) return s;
-      return { mediaLibrary: [...s.mediaLibrary, { ...item, id }] };
+      if (existing) {
+        return {
+          mediaLibrary: s.mediaLibrary.map((entry) => (
+            entry.id !== existing.id
+              ? entry
+              : {
+                  ...entry,
+                  sourceId: normalizeSourceId(entry.sourceId) ?? normalizeSourceId(item.sourceId) ?? normalizeSourceId(item.sourcePath) ?? createImportedSourceId(),
+                  sourcePath: entry.sourcePath ?? item.sourcePath,
+                }
+          )),
+        };
+      }
+      return {
+        mediaLibrary: [
+          ...s.mediaLibrary,
+          {
+            ...item,
+            id,
+            sourceId: normalizeSourceId(item.sourceId) ?? normalizeSourceId(item.sourcePath) ?? createImportedSourceId(),
+          },
+        ],
+      };
     });
     return id;
   },
 
-  appendVideoToTimeline: (sourceUrl, sourceName, duration, sourcePath) => {
+  appendVideoToTimeline: (sourceUrl, sourceName, duration, sourcePath, sourceId) => {
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const { clips, mediaLibrary } = get();
     const clipId = uuidv4();
+    const resolvedSourceId = normalizeSourceId(sourceId) ?? createImportedSourceId();
     const newClip: VideoClip = {
       id: clipId,
+      sourceId: resolvedSourceId,
       sourceStart: 0,
       sourceDuration: duration,
       speed: 1.0,
@@ -1122,19 +1186,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     };
     // Register in media library if not already present
     const alreadyInLibrary = mediaLibrary.some(item =>
-      (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
+      item.sourceId === resolvedSourceId
+      || (sourcePath && item.sourcePath === sourcePath)
+      || item.url === sourceUrl
     );
-    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
+    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, {
+      id: uuidv4(),
+      url: sourceUrl,
+      name: sourceName,
+      duration,
+      sourceId: resolvedSourceId,
+      sourcePath,
+    }];
     set({ history: [...get().history, snap], future: [], clips: [...clips, newClip], mediaLibrary: newLibrary, videoFramesFresh: false });
     return clipId;
   },
 
-  insertVideoIntoTimeline: (sourceUrl, sourceName, duration, insertAtTime, sourcePath) => {
+  insertVideoIntoTimeline: (sourceUrl, sourceName, duration, insertAtTime, sourcePath, sourceId) => {
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const { clips, mediaLibrary } = get();
     const clipId = uuidv4();
+    const resolvedSourceId = normalizeSourceId(sourceId) ?? createImportedSourceId();
     const newClip: VideoClip = {
       id: clipId,
+      sourceId: resolvedSourceId,
       sourceStart: 0,
       sourceDuration: duration,
       speed: 1.0,
@@ -1183,9 +1258,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
 
     const alreadyInLibrary = mediaLibrary.some(item =>
-      (sourcePath && item.sourcePath === sourcePath) || item.url === sourceUrl
+      item.sourceId === resolvedSourceId
+      || (sourcePath && item.sourcePath === sourcePath)
+      || item.url === sourceUrl
     );
-    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, { id: uuidv4(), url: sourceUrl, name: sourceName, duration, sourcePath }];
+    const newLibrary = alreadyInLibrary ? mediaLibrary : [...mediaLibrary, {
+      id: uuidv4(),
+      url: sourceUrl,
+      name: sourceName,
+      duration,
+      sourceId: resolvedSourceId,
+      sourcePath,
+    }];
     set({ history: [...get().history, snap], future: [], clips: newClips, mediaLibrary: newLibrary, videoFramesFresh: false });
     return clipId;
   },
@@ -1193,7 +1277,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateClipSourcePath: (clipId, sourcePath) => set(s => ({
     clips: s.clips.map(clip => clip.id === clipId ? { ...clip, sourcePath } : clip),
     mediaLibrary: s.mediaLibrary.map(item =>
-      item.url === s.clips.find(clip => clip.id === clipId)?.sourceUrl && !item.sourcePath
+      item.sourceId === s.clips.find(clip => clip.id === clipId)?.sourceId && !item.sourcePath
         ? { ...item, sourcePath }
         : item
     ),

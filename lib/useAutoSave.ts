@@ -6,12 +6,14 @@ import { useEditorStore } from '@/lib/useEditorStore';
 function persistOverviewFrame(frame: {
   timelineTime: number;
   sourceTime: number;
+  sourceId?: string;
   kind: string;
   description?: string;
 }) {
   return {
     timelineTime: frame.timelineTime,
     sourceTime: frame.sourceTime,
+    ...(frame.sourceId ? { sourceId: frame.sourceId } : {}),
     kind: frame.kind,
     description: frame.description ?? '',
   };
@@ -26,11 +28,13 @@ function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sou
 function persistMediaLibraryItem(item: {
   name: string;
   duration: number;
+  sourceId?: string;
   sourcePath?: string;
 }) {
   return {
     name: item.name,
     duration: item.duration,
+    ...(item.sourceId ? { sourceId: item.sourceId } : {}),
     ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}),
   };
 }

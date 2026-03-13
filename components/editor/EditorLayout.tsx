@@ -2,8 +2,10 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
+import type { CaptionEntry } from '@/lib/types';
 import { buildTranscriptContext } from '@/lib/timelineUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
+import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
 import MediaPanel from './MediaPanel';
@@ -93,6 +95,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const currentTime = useEditorStore(s => s.currentTime);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const videoFile = useEditorStore(s => s.videoFile);
+  const videoData = useEditorStore(s => s.videoData);
   const setProjectVideoFile = useEditorStore(s => s.setProjectVideoFile);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
@@ -110,6 +113,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const mediaLibrary = useEditorStore(s => s.mediaLibrary);
+  const clips = useEditorStore(s => s.clips);
   const storagePath = useEditorStore(s => s.storagePath);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
@@ -299,16 +303,31 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   // Background auto-transcription on video load
   useEffect(() => {
-    const source = videoFile ?? videoUrl;
-    if (!source || videoDuration <= 0 || transcriptStatus !== 'idle') return;
+    const sources = resolveMainTrackSources({
+      clips,
+      mediaLibrary,
+      videoData,
+      videoFile,
+      videoUrl,
+      videoDuration,
+    }).filter((entry) => entry.source && entry.duration > 0);
+    if (sources.length === 0 || transcriptStatus !== 'idle') return;
     setBackgroundTranscript(null, 'loading');
-    setTranscriptProgress({ completed: 0, total: 1 });
+    setTranscriptProgress({ completed: 0, total: sources.length });
     (async () => {
       try {
-        const ranges = buildOverlappingRanges(0, videoDuration);
-        const rawWords = await transcribeSourceRanges(source, ranges, aiSettings.captions.wordsPerCaption, {
-          onProgress: setTranscriptProgress,
-        });
+        const rawWords: CaptionEntry[] = [];
+        for (let index = 0; index < sources.length; index += 1) {
+          const entry = sources[index];
+          const nextWords = await transcribeSourceRanges(
+            entry.source!,
+            buildOverlappingRanges(0, entry.duration),
+            aiSettings.captions.wordsPerCaption,
+            { sourceId: entry.sourceId },
+          );
+          rawWords.push(...nextWords);
+          setTranscriptProgress({ completed: index + 1, total: sources.length });
+        }
         const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
         setBackgroundTranscript(text, 'done', rawWords);
       } catch (error) {
@@ -316,7 +335,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         setBackgroundTranscript(null, 'error');
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, videoDuration, transcriptStatus, setBackgroundTranscript, setTranscriptProgress, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, clips, mediaLibrary, transcriptStatus, setBackgroundTranscript, setTranscriptProgress, videoData, videoDuration, videoFile, videoUrl]);
 
   // Load project from URL param
   useEffect(() => {

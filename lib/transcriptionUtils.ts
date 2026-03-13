@@ -2,10 +2,12 @@
 
 import { extractAudioSegment } from './ffmpegClient';
 import { CaptionEntry } from './types';
+import { getCaptionSourceId } from './sourceUtils';
 
 type TimeRange = { startTime: number; endTime: number };
 type TranscriptionProgressOptions = {
   onProgress?: (progress: { completed: number; total: number }) => void;
+  sourceId?: string;
 };
 
 export function buildOverlappingRanges(
@@ -30,6 +32,7 @@ export function buildOverlappingRanges(
 
 export function dedupeCaptionEntries(entries: CaptionEntry[], toleranceSeconds = 0.08): CaptionEntry[] {
   const sorted = [...entries].sort((a, b) => (
+    getCaptionSourceId(a).localeCompare(getCaptionSourceId(b)) ||
     a.startTime - b.startTime ||
     a.endTime - b.endTime ||
     a.text.localeCompare(b.text)
@@ -48,6 +51,7 @@ export function dedupeCaptionEntries(entries: CaptionEntry[], toleranceSeconds =
     const last = deduped[deduped.length - 1];
     if (
       last &&
+      getCaptionSourceId(last) === getCaptionSourceId(normalized) &&
       last.text === normalized.text &&
       Math.abs(last.startTime - normalized.startTime) <= toleranceSeconds &&
       Math.abs(last.endTime - normalized.endTime) <= toleranceSeconds
@@ -85,7 +89,12 @@ export async function transcribeSourceRanges(
     const res = await fetch('/api/transcribe', { method: 'POST', body: form });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
-    rawEntries.push(...((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? []));
+    const entries = ((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? [])
+      .map((entry) => ({
+        ...entry,
+        ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+      }));
+    rawEntries.push(...entries);
     options.onProgress?.({ completed: index + 1, total });
   }
 

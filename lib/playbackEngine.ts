@@ -10,6 +10,7 @@ export function buildClipSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
     const timelineDuration = clip.sourceDuration / clip.speed;
     const entry: ClipScheduleEntry = {
       clipId: clip.id,
+      sourceId: clip.sourceId,
       timelineStart: timelineCursor,
       timelineEnd: timelineCursor + timelineDuration,
       sourceStart: clip.sourceStart,

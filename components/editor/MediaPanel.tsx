@@ -90,7 +90,7 @@ export default function MediaPanel({
               </div>
               {idx > 0 && (
                 <button
-                  onClick={() => appendVideoToTimeline(item.url, item.name, item.duration, item.sourcePath)}
+                  onClick={() => appendVideoToTimeline(item.url, item.name, item.duration, item.sourcePath, item.sourceId)}
                   title="Append to timeline"
                   style={{
                     display: 'flex', alignItems: 'center', gap: 4,

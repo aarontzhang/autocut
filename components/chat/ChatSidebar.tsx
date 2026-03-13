@@ -2,12 +2,14 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, VisualSearchSession } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, timelineToSourceTime, getSourceSegmentsForTimelineRange, buildTranscriptContext, sourceRangesForAction, sourceRangeToTimelineRanges, sourceTimeToTimelineOccurrences, subtractSourceRanges } from '@/lib/timelineUtils';
+import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceRangeRef, VisualSearchSession } from '@/lib/types';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceRangeToTimelineRanges, sourceTimeToTimelineOccurrences, subtractSourceRanges } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
-import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
+import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule } from '@/lib/playbackEngine';
+import { resolveMainTrackSources } from '@/lib/sourceMedia';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
 import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
@@ -428,7 +430,7 @@ function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType
       };
     }
 
-    const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime);
+    const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId);
     return {
       ...frame,
       image: undefined,
@@ -450,6 +452,17 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
     default:
       return 'I checked that section, but I need a clearer target before making an edit.';
   }
+}
+
+function getReviewMessage(message: string, action?: EditAction | null): string {
+  if (action?.type === 'delete_ranges' && action.ranges) {
+    const count = action.ranges.length;
+    return `Prepared ${count} cut ${count === 1 ? 'range' : 'ranges'} for review.`;
+  }
+  if (action?.type === 'delete_range') {
+    return 'Prepared 1 cut range for review.';
+  }
+  return message.trim() || getAssistantFallbackMessage(action);
 }
 
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
@@ -547,8 +560,8 @@ function resolveReviewStep(
   baseSnapshot: EditSnapshot,
   currentSnapshot: EditSnapshot,
   action: EditAction,
-  acceptedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
-): { action: EditAction; sourceRanges: Array<{ sourceStart: number; sourceEnd: number }> } | null {
+  acceptedSourceRanges: SourceRangeRef[],
+): { action: EditAction; sourceRanges: SourceRangeRef[] } | null {
   if (action.type !== 'delete_range') {
     return {
       action,
@@ -559,7 +572,7 @@ function resolveReviewStep(
   const originalSourceRanges = sourceRangesForAction(baseSnapshot.clips, action);
   const remainingSourceRanges = originalSourceRanges.flatMap((range) => subtractSourceRanges(range, acceptedSourceRanges));
   const timelineRanges = remainingSourceRanges
-    .flatMap((range) => sourceRangeToTimelineRanges(currentSnapshot.clips, range.sourceStart, range.sourceEnd))
+    .flatMap((range) => sourceRangeToTimelineRanges(currentSnapshot.clips, range.sourceId, range.sourceStart, range.sourceEnd))
     .filter((range) => range.timelineEnd > range.timelineStart + 1e-3)
     .sort((a, b) => a.timelineStart - b.timelineStart || a.timelineEnd - b.timelineEnd);
 
@@ -592,11 +605,11 @@ function buildReviewSelectionPreview(
   selectedSteps: boolean[],
 ): {
   snapshot: EditSnapshot;
-  sourceRanges: Array<{ sourceStart: number; sourceEnd: number }>;
+  sourceRanges: SourceRangeRef[];
   resolvedActions: EditAction[];
 } {
   let draft = baseSnapshot;
-  let committedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }> = [];
+  let committedSourceRanges: SourceRangeRef[] = [];
   const resolvedActions: EditAction[] = [];
 
   reviewSteps.forEach((step, index) => {
@@ -858,22 +871,17 @@ function ActionDetails({ action }: { action: EditAction }) {
   if (action.type === 'delete_ranges') {
     const ranges = action.ranges ?? [];
     return (
-      <div style={{ padding: '6px 12px 8px' }}>
-        {ranges.slice(0, 5).map((r, i) => (
+      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+        {ranges.map((r, i) => (
           <div key={i} style={{
-            padding: '2px 0',
-            borderBottom: i < Math.min(ranges.length - 1, 4) ? '1px solid rgba(255,255,255,0.04)' : 'none',
+            padding: '4px 0',
+            borderBottom: i < ranges.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
           }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)' }}>
               {formatChatTime(r.start)} – {formatChatTime(r.end)}
             </span>
           </div>
         ))}
-        {ranges.length > 5 && (
-          <p style={{ fontSize: 10, color: 'var(--fg-muted)', padding: '2px 0', margin: 0 }}>
-            +{ranges.length - 5} more…
-          </p>
-        )}
       </div>
     );
   }
@@ -1136,6 +1144,7 @@ function AssistantMessage({
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
   const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
@@ -1153,6 +1162,7 @@ function AssistantMessage({
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
+  const existingRawTranscriptCaptions = useEditorStore(s => s.rawTranscriptCaptions);
   const addMessage = useEditorStore(s => s.addMessage);
 
   const action = msg.action;
@@ -1163,6 +1173,14 @@ function AssistantMessage({
       ? buildReviewSelectionPreview(reviewBaseSnapshot, reviewSteps, selectedReviewSteps)
       : null
   ), [action, reviewBaseSnapshot, reviewSteps, selectedReviewSteps]);
+  const reviewItems = useMemo(() => (
+    reviewSteps.map((step, index) => ({
+      id: `${msg.id}-review-step-${index}`,
+      index,
+      selected: selectedReviewSteps[index] ?? false,
+      meta: getActionMeta(step),
+    }))
+  ), [msg.id, reviewSteps, selectedReviewSteps]);
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const actionPreviouslyApplied = useMemo(() => (
     !!action && appliedActions.some(record => actionsMatch(record.action, action))
@@ -1177,8 +1195,9 @@ function AssistantMessage({
     return combineResolvedReviewActions(action, reviewSelection.resolvedActions) ?? action;
   }, [action, reviewSelection]);
   const meta = displayAction ? getActionMeta(displayAction) : null;
-  const selectedReviewCount = reviewSelection?.resolvedActions.length ?? 0;
-  const multipleReviewOptions = reviewSteps.length > 1;
+  const selectedReviewCount = reviewItems.filter((item) => item.selected).length;
+  const resolvedReviewCount = reviewSelection?.resolvedActions.length ?? 0;
+  const multipleReviewOptions = reviewItems.length > 1;
   const actionResultText = msg.actionResult ?? (
     msg.actionStatus === 'rejected'
       ? 'No changes applied.'
@@ -1263,13 +1282,13 @@ function AssistantMessage({
     recordAppliedAction(committedAction, committedAction.message, { sourceRanges: reviewSelection.sourceRanges });
     updateMessage(msg.id, {
       actionStatus: 'completed',
-      actionResult: reviewSteps.length > 1
-        ? `Applied ${reviewSelection.resolvedActions.length} of ${reviewSteps.length} changes.`
+      actionResult: reviewItems.length > 1
+        ? `Applied ${reviewSelection.resolvedActions.length} of ${reviewItems.length} changes.`
         : 'Applied edit.',
     });
     setReviewBaseSnapshot(null);
     setSelectedReviewSteps([]);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSelection, reviewSteps.length, updateMessage]);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewItems.length, reviewSelection, updateMessage]);
 
   const handleRejectReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
@@ -1285,8 +1304,6 @@ function AssistantMessage({
     if (!action || action.type !== 'transcribe_request') return;
     const seg = action.segments?.[0];
     if (!seg) return;
-    const source = videoData ?? videoFile ?? videoUrl;
-    if (!source) return;
 
     setIsTranscribing(true);
     setTranscribeError(null);
@@ -1295,18 +1312,51 @@ function AssistantMessage({
       const sourceSegs = getSourceSegmentsForTimelineRange(clips, seg.startTime, seg.endTime);
       if (sourceSegs.length === 0) throw new Error('No source segments found for requested range');
 
-      const ranges = sourceSegs.flatMap((sourceSeg) => (
-        buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration)
-      ));
-      const rawCaptions = await transcribeSourceRanges(
-        source,
-        ranges,
-        useEditorStore.getState().aiSettings.captions.wordsPerCaption,
-        { onProgress: setTranscriptProgress },
-      );
+      const state = useEditorStore.getState();
+      const availableSources = resolveMainTrackSources({
+        clips,
+        mediaLibrary,
+        videoData,
+        videoFile,
+        videoUrl,
+        videoDuration: state.videoDuration,
+      });
+      const rangesBySource = new Map<string, Array<{ startTime: number; endTime: number }>>();
+      sourceSegs.forEach((sourceSeg) => {
+        const ranges = buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration);
+        const existing = rangesBySource.get(sourceSeg.sourceId) ?? [];
+        rangesBySource.set(sourceSeg.sourceId, [...existing, ...ranges]);
+      });
 
-      const transcriptText = buildTranscriptContext(clips, rawCaptions);
-      setBackgroundTranscript(transcriptText, 'done', rawCaptions);
+      const totalChunks = [...rangesBySource.values()].reduce((sum, ranges) => sum + ranges.length, 0);
+      if (totalChunks === 0) throw new Error('No source ranges found for requested transcript');
+      let completedChunks = 0;
+      const rawCaptions: CaptionEntry[] = [];
+      setTranscriptProgress({ completed: 0, total: totalChunks });
+
+      for (const [sourceId, ranges] of rangesBySource) {
+        const sourceEntry = availableSources.find((entry) => entry.sourceId === sourceId);
+        if (!sourceEntry?.source) {
+          throw new Error(`Missing media source for transcript request (${sourceId}).`);
+        }
+        const captionsForSource = await transcribeSourceRanges(
+          sourceEntry.source,
+          ranges,
+          state.aiSettings.captions.wordsPerCaption,
+          {
+            sourceId,
+            onProgress: ({ completed }) => {
+              setTranscriptProgress({ completed: completedChunks + completed, total: totalChunks });
+            },
+          },
+        );
+        completedChunks += ranges.length;
+        rawCaptions.push(...captionsForSource);
+      }
+
+      const mergedCaptions = dedupeCaptionEntries([...(existingRawTranscriptCaptions ?? []), ...rawCaptions]);
+      const transcriptText = buildTranscriptContext(clips, mergedCaptions);
+      setBackgroundTranscript(transcriptText, 'done', mergedCaptions);
       addMessage({
         role: 'assistant',
         content: `Transcript ready for ${formatTime(seg.startTime)} to ${formatTime(seg.endTime)}. Continuing with your request.`,
@@ -1319,7 +1369,7 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, existingRawTranscriptCaptions, mediaLibrary, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -1397,7 +1447,7 @@ function AssistantMessage({
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   {selectedReviewCount > 0
                     ? `Previewing ${selectedReviewCount} selected change${selectedReviewCount === 1 ? '' : 's'}.`
-                    : `Select which of the ${reviewSteps.length} proposed changes you want to apply.`}
+                    : `Select which of the ${reviewItems.length} proposed changes you want to apply.`}
                 </p>
               )}
               {anotherReviewActive && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
@@ -1415,12 +1465,13 @@ function AssistantMessage({
                   overflowY: 'auto',
                   paddingRight: 2,
                 }}>
-                  {reviewSteps.map((step, index) => {
-                    const stepMeta = getActionMeta(step);
-                    const checked = selectedReviewSteps[index] ?? false;
+                  {reviewItems.map((item) => {
                     return (
-                      <label
-                        key={`${msg.id}-review-step-${index}`}
+                      <button
+                        type="button"
+                        key={item.id}
+                        onClick={() => handleToggleReviewStep(item.index)}
+                        disabled={anotherReviewActive}
                         style={{
                           display: 'flex',
                           alignItems: 'flex-start',
@@ -1428,28 +1479,40 @@ function AssistantMessage({
                           padding: '7px 8px',
                           borderRadius: 6,
                           border: '1px solid rgba(255,255,255,0.06)',
-                          background: checked ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
+                          background: item.selected ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
                           cursor: anotherReviewActive ? 'default' : 'pointer',
+                          textAlign: 'left',
                         }}
                       >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          disabled={anotherReviewActive}
-                          onChange={() => handleToggleReviewStep(index)}
-                          style={{ marginTop: 2 }}
-                        />
+                        <span style={{
+                          width: 16,
+                          height: 16,
+                          marginTop: 1,
+                          borderRadius: 4,
+                          border: `1px solid ${item.selected ? 'var(--accent)' : 'rgba(255,255,255,0.16)'}`,
+                          background: item.selected ? 'var(--accent)' : 'rgba(255,255,255,0.02)',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        }}>
+                          {item.selected && (
+                            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#000" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M2.5 6.3 4.8 8.6 9.5 3.7" />
+                            </svg>
+                          )}
+                        </span>
                         <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                           <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-                            {stepMeta.label}
+                            {item.meta.label}
                           </span>
-                          {stepMeta.summary && (
+                          {item.meta.summary && (
                             <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-                              {stepMeta.summary}
+                              {item.meta.summary}
                             </span>
                           )}
                         </span>
-                      </label>
+                      </button>
                     );
                   })}
                 </div>
@@ -1498,17 +1561,17 @@ function AssistantMessage({
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button
                     onClick={handleApplyReviewedChanges}
-                    disabled={anotherReviewActive || selectedReviewCount === 0}
+                    disabled={anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0}
                     style={{
                       flex: 1,
                       padding: '5px 0',
                       fontSize: 12,
                       fontWeight: 500,
-                      background: anotherReviewActive || selectedReviewCount === 0 ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                      background: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
                       border: 'none',
-                      color: anotherReviewActive || selectedReviewCount === 0 ? 'var(--fg-muted)' : '#000',
+                      color: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'var(--fg-muted)' : '#000',
                       borderRadius: 4,
-                      cursor: anotherReviewActive || selectedReviewCount === 0 ? 'default' : 'pointer',
+                      cursor: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'default' : 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
@@ -1758,6 +1821,7 @@ export default function ChatSidebar() {
   const requestSeek = useEditorStore(s => s.requestSeek);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
+  const mainTimelineDuration = useMemo(() => getTimelineDuration(clips), [clips]);
 
   // Build selected clip context for the API
   const selectedClipContext = (() => {
@@ -1914,6 +1978,7 @@ export default function ChatSidebar() {
         image,
         timelineTime: sourceTimestamps[index],
         sourceTime: sourceTimestamps[index],
+        sourceId: MAIN_SOURCE_ID,
         kind: 'overview' as const,
       }));
       setVideoFrames(frames);
@@ -2059,9 +2124,15 @@ export default function ChatSidebar() {
         context: {
           projectId: freshState.currentProjectId,
           visualSearchSession: freshState.visualSearchSession,
-          videoDuration: freshState.videoDuration,
+          videoDuration: getTimelineDuration(currentClips),
           clipCount: currentClips.length,
-          clips: currentClips.map((c, i) => ({ index: i, sourceStart: c.sourceStart, sourceDuration: c.sourceDuration, speed: c.speed })),
+          clips: currentClips.map((c, i) => ({
+            index: i,
+            sourceId: c.sourceId,
+            sourceStart: c.sourceStart,
+            sourceDuration: c.sourceDuration,
+            speed: c.speed,
+          })),
           selectedClip: selectedClipContext,
           selectedMarker: selectedMarkerContext ? {
             number: selectedMarkerContext.number,
@@ -2096,7 +2167,7 @@ export default function ChatSidebar() {
       if (!markerAction) {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
-      const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
+      const assistantMessage = getReviewMessage(message, action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
         const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
@@ -2117,6 +2188,7 @@ export default function ChatSidebar() {
           image,
           timelineTime: timelineTimestamps[index],
           sourceTime: sourceTimestamps[index],
+          sourceId: MAIN_SOURCE_ID,
           kind: 'dense' as const,
           rangeStart: req.startTime,
           rangeEnd: req.endTime,
@@ -2263,7 +2335,7 @@ export default function ChatSidebar() {
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
-  const estimatedTranscriptEta = estimateTranscriptSeconds(videoDuration);
+  const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
     ? estimatedTranscriptEta * Math.max(0, transcriptProgress.total - transcriptProgress.completed) / transcriptProgress.total
     : estimatedTranscriptEta;

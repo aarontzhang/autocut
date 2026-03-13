@@ -9,6 +9,7 @@ import {
   VisualEditProposal,
   VisualQueryIntent,
 } from './types';
+import { MAIN_SOURCE_ID } from './sourceUtils';
 import { mergeSourceRanges, sourceRangeToTimelineRanges, subtractSourceRanges } from './timelineUtils';
 import { embedQueryText, scoreVisualSample } from './server/visionIndexing.mjs';
 
@@ -264,7 +265,7 @@ export function projectVerifiedRangesToProposal(
   const excluded = mergeSourceRanges(options?.excludedSourceRanges ?? []);
   const adjustedSourceRanges = sourceRanges.flatMap((range) => (
     subtractSourceRanges(
-      { sourceStart: range.sourceStart, sourceEnd: range.sourceEnd },
+      { assetId: range.assetId, sourceStart: range.sourceStart, sourceEnd: range.sourceEnd },
       excluded,
     ).map((remaining, index) => ({
       ...range,
@@ -274,7 +275,7 @@ export function projectVerifiedRangesToProposal(
     }))
   ));
   const timelineRanges = adjustedSourceRanges.flatMap((range) => (
-    sourceRangeToTimelineRanges(clips, range.sourceStart, range.sourceEnd)
+    sourceRangeToTimelineRanges(clips, MAIN_SOURCE_ID, range.sourceStart, range.sourceEnd)
   ));
   const bestConfidence = Math.max(
     0,

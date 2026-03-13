@@ -1,5 +1,6 @@
 export interface VideoClip {
   id: string;
+  sourceId: string;
   sourceStart: number;   // seconds into original video
   sourceDuration: number; // duration in source
   // Per-clip effects
@@ -16,6 +17,7 @@ export interface VideoClip {
 
 export interface ClipScheduleEntry {
   clipId: string;
+  sourceId: string;
   timelineStart: number;  // position in output timeline
   timelineEnd: number;
   sourceStart: number;
@@ -25,9 +27,17 @@ export interface ClipScheduleEntry {
 
 export interface CaptionEntry {
   id?: string;
+  sourceId?: string;
   startTime: number;
   endTime: number;
   text: string;
+}
+
+export interface SourceRangeRef {
+  sourceId?: string | null;
+  assetId?: string | null;
+  sourceStart: number;
+  sourceEnd: number;
 }
 
 export interface SilenceCandidate {
@@ -114,7 +124,7 @@ export interface AppliedActionRecord {
   timestamp: number;
   action: EditAction;
   summary: string;
-  sourceRanges?: Array<{ assetId?: string | null; sourceStart: number; sourceEnd: number }>;
+  sourceRanges?: SourceRangeRef[];
 }
 
 export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error';
@@ -210,6 +220,7 @@ export interface IndexedVideoFrame {
   image?: string;
   timelineTime: number;
   sourceTime: number;
+  sourceId?: string;
   kind: 'overview' | 'dense';
   rangeStart?: number;
   rangeEnd?: number;

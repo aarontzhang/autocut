@@ -1,4 +1,5 @@
-import { VideoClip, CaptionEntry, EditAction, SilenceCandidate } from './types';
+import { getCaptionSourceId, getClipSourceId, getSourceRangeId } from './sourceUtils';
+import { VideoClip, CaptionEntry, EditAction, SilenceCandidate, SourceRangeRef } from './types';
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
@@ -33,8 +34,8 @@ export function getSourceSegmentsForTimelineRange(
   clips: VideoClip[],
   startTime: number,
   endTime: number,
-): Array<{ sourceStart: number; sourceDuration: number; timelineOffset: number }> {
-  const segments: Array<{ sourceStart: number; sourceDuration: number; timelineOffset: number }> = [];
+): Array<{ sourceId: string; sourceStart: number; sourceDuration: number; timelineOffset: number }> {
+  const segments: Array<{ sourceId: string; sourceStart: number; sourceDuration: number; timelineOffset: number }> = [];
   let cursor = 0;
   for (const clip of clips) {
     const clipDuration = clip.sourceDuration / clip.speed;
@@ -45,6 +46,7 @@ export function getSourceSegmentsForTimelineRange(
     if (overlapEnd > overlapStart) {
       const sourceOffset = (overlapStart - clipStart) * clip.speed;
       segments.push({
+        sourceId: getClipSourceId(clip),
         sourceStart: clip.sourceStart + sourceOffset,
         sourceDuration: (overlapEnd - overlapStart) * clip.speed,
         timelineOffset: overlapStart,
@@ -138,10 +140,18 @@ export function invertSegments(
  * Convert a source video timestamp to the current-timeline timestamp,
  * accounting for deleted segments (returns null if the source time was cut out).
  */
-export function sourceTimeToTimeline(clips: VideoClip[], sourceTime: number): number | null {
+export function sourceTimeToTimeline(
+  clips: VideoClip[],
+  sourceTime: number,
+  sourceId?: string | null,
+): number | null {
   let cursor = 0;
   for (const clip of clips) {
     const clipDuration = clip.sourceDuration / clip.speed;
+    if (sourceId && getClipSourceId(clip) !== sourceId) {
+      cursor += clipDuration;
+      continue;
+    }
     if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
       return cursor + (sourceTime - clip.sourceStart) / clip.speed;
     }
@@ -154,11 +164,19 @@ export function sourceTimeToTimeline(clips: VideoClip[], sourceTime: number): nu
  * Return every current-timeline occurrence of a source timestamp.
  * A source moment can appear multiple times after duplication or reordering.
  */
-export function sourceTimeToTimelineOccurrences(clips: VideoClip[], sourceTime: number): number[] {
+export function sourceTimeToTimelineOccurrences(
+  clips: VideoClip[],
+  sourceTime: number,
+  sourceId?: string | null,
+): number[] {
   const matches: number[] = [];
   let cursor = 0;
   for (const clip of clips) {
     const clipDuration = clip.sourceDuration / clip.speed;
+    if (sourceId && getClipSourceId(clip) !== sourceId) {
+      cursor += clipDuration;
+      continue;
+    }
     if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
       matches.push(cursor + (sourceTime - clip.sourceStart) / clip.speed);
     }
@@ -173,6 +191,7 @@ export function sourceTimeToTimelineOccurrences(clips: VideoClip[], sourceTime: 
  */
 export function sourceRangeToTimelineRanges(
   clips: VideoClip[],
+  sourceId: string | null | undefined,
   sourceStart: number,
   sourceEnd: number,
 ): Array<{ timelineStart: number; timelineEnd: number }> {
@@ -181,6 +200,10 @@ export function sourceRangeToTimelineRanges(
   let cursor = 0;
   for (const clip of clips) {
     const clipDuration = clip.sourceDuration / clip.speed;
+    if (sourceId && getClipSourceId(clip) !== sourceId) {
+      cursor += clipDuration;
+      continue;
+    }
     const clipSourceStart = clip.sourceStart;
     const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
     const overlapStart = Math.max(sourceStart, clipSourceStart);
@@ -199,18 +222,25 @@ export function sourceRangeToTimelineRanges(
 }
 
 export function mergeSourceRanges(
-  ranges: Array<{ sourceStart: number; sourceEnd: number }>,
-): Array<{ sourceStart: number; sourceEnd: number }> {
+  ranges: SourceRangeRef[],
+): SourceRangeRef[] {
   if (ranges.length === 0) return [];
   const sorted = [...ranges]
     .filter((range) => range.sourceEnd > range.sourceStart)
-    .sort((a, b) => a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd);
+    .sort((a, b) => {
+      const aId = getSourceRangeId(a) ?? '';
+      const bId = getSourceRangeId(b) ?? '';
+      return aId.localeCompare(bId) || a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd;
+    });
   if (sorted.length === 0) return [];
 
-  const merged = [sorted[0]];
+  const merged: SourceRangeRef[] = [{ ...sorted[0] }];
   for (const range of sorted.slice(1)) {
     const current = merged[merged.length - 1];
-    if (range.sourceStart <= current.sourceEnd + 1e-6) {
+    if (
+      getSourceRangeId(range) === getSourceRangeId(current)
+      && range.sourceStart <= current.sourceEnd + 1e-6
+    ) {
       current.sourceEnd = Math.max(current.sourceEnd, range.sourceEnd);
     } else {
       merged.push({ ...range });
@@ -220,21 +250,31 @@ export function mergeSourceRanges(
 }
 
 export function subtractSourceRanges(
-  target: { sourceStart: number; sourceEnd: number },
-  removed: Array<{ sourceStart: number; sourceEnd: number }>,
-): Array<{ sourceStart: number; sourceEnd: number }> {
-  let remaining = [{ ...target }];
+  target: SourceRangeRef,
+  removed: SourceRangeRef[],
+): SourceRangeRef[] {
+  let remaining: SourceRangeRef[] = [{ ...target }];
+  const targetSourceId = getSourceRangeId(target);
   for (const cut of mergeSourceRanges(removed)) {
+    if (targetSourceId !== getSourceRangeId(cut)) continue;
     remaining = remaining.flatMap((range) => {
       if (cut.sourceEnd <= range.sourceStart || cut.sourceStart >= range.sourceEnd) {
         return [range];
       }
-      const next: Array<{ sourceStart: number; sourceEnd: number }> = [];
+      const next: SourceRangeRef[] = [];
       if (cut.sourceStart > range.sourceStart) {
-        next.push({ sourceStart: range.sourceStart, sourceEnd: Math.min(cut.sourceStart, range.sourceEnd) });
+        next.push({
+          ...range,
+          sourceStart: range.sourceStart,
+          sourceEnd: Math.min(cut.sourceStart, range.sourceEnd),
+        });
       }
       if (cut.sourceEnd < range.sourceEnd) {
-        next.push({ sourceStart: Math.max(cut.sourceEnd, range.sourceStart), sourceEnd: range.sourceEnd });
+        next.push({
+          ...range,
+          sourceStart: Math.max(cut.sourceEnd, range.sourceStart),
+          sourceEnd: range.sourceEnd,
+        });
       }
       return next;
     });
@@ -246,11 +286,12 @@ export function subtractSourceRanges(
 export function sourceRangesForAction(
   clips: VideoClip[],
   action: EditAction,
-): Array<{ sourceStart: number; sourceEnd: number }> {
+): SourceRangeRef[] {
   if (action.type === 'delete_range') {
     if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return [];
     return getSourceSegmentsForTimelineRange(clips, action.deleteStartTime, action.deleteEndTime)
       .map((segment) => ({
+        sourceId: segment.sourceId,
         sourceStart: segment.sourceStart,
         sourceEnd: segment.sourceStart + segment.sourceDuration,
       }));
@@ -259,6 +300,7 @@ export function sourceRangesForAction(
   if (action.type === 'delete_ranges') {
     return (action.ranges ?? []).flatMap((range) => (
       getSourceSegmentsForTimelineRange(clips, range.start, range.end).map((segment) => ({
+        sourceId: segment.sourceId,
         sourceStart: segment.sourceStart,
         sourceEnd: segment.sourceStart + segment.sourceDuration,
       }))
@@ -275,15 +317,17 @@ export function sourceRangesForAction(
 export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionEntry[]): string {
   const mapped = rawCaptions
     .map((cap) => {
-      const timelineStart = sourceTimeToTimeline(clips, cap.startTime);
-      const timelineEnd = sourceTimeToTimeline(clips, cap.endTime);
-      if (timelineStart === null || timelineEnd === null) return null;
-      return {
-        startTime: timelineStart,
-        endTime: timelineEnd,
+      const captionSourceId = getCaptionSourceId(cap);
+      const occurrences = sourceRangeToTimelineRanges(clips, captionSourceId, cap.startTime, cap.endTime)
+        .filter((range) => range.timelineEnd > range.timelineStart);
+      return occurrences.map((range) => ({
+        startTime: range.timelineStart,
+        endTime: range.timelineEnd,
         text: cap.text.trim(),
-      };
+      }));
     })
+    .flat()
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
     .filter((entry): entry is { startTime: number; endTime: number; text: string } => !!entry && !!entry.text);
 
   const lines: string[] = [];
@@ -329,7 +373,7 @@ type TimelineSpeechSegment = {
   endTime: number;
 };
 
-function getTimelineDuration(clips: VideoClip[]): number {
+export function getTimelineDuration(clips: VideoClip[]): number {
   return clips.reduce((total, clip) => total + clip.sourceDuration / clip.speed, 0);
 }
 
@@ -362,6 +406,7 @@ export function buildTimelineSpeechSegments(clips: VideoClip[], rawCaptions: Cap
   let timelineCursor = 0;
 
   for (const clip of clips) {
+    const clipSourceId = getClipSourceId(clip);
     const clipSourceStart = clip.sourceStart;
     const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
     const clipSpeed = clip.speed || 1;
@@ -369,6 +414,7 @@ export function buildTimelineSpeechSegments(clips: VideoClip[], rawCaptions: Cap
     const clipTimelineDuration = clip.sourceDuration / clipSpeed;
 
     for (const caption of rawCaptions) {
+      if (getCaptionSourceId(caption) !== clipSourceId) continue;
       const overlapStart = Math.max(caption.startTime, clipSourceStart);
       const overlapEnd = Math.min(caption.endTime, clipSourceEnd);
       if (overlapEnd <= overlapStart) continue;

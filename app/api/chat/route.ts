@@ -7,6 +7,7 @@ import {
   EditAction,
   IndexedVideoFrame,
   SilenceCandidate,
+  SourceRangeRef,
   VerifiedSourceRange,
   VideoClip,
   VisualSearchSession,
@@ -29,6 +30,7 @@ import {
   validateEditAction,
 } from '@/lib/server/llmGuardrails';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const client = new Anthropic();
 
@@ -282,7 +284,7 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
   };
 }
 
-type ClipSummary = { index: number; sourceStart: number; sourceDuration: number; speed?: number };
+type ClipSummary = { index: number; sourceId?: string; sourceStart: number; sourceDuration: number; speed?: number };
 type ChatTurn = { role: string; content: string };
 type RichChatTurn = ChatTurn & {
   rawAction?: unknown;
@@ -988,6 +990,7 @@ function extractMentionedMarkers(
 function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
   return clips.map((clip, index) => ({
     id: `clip-${clip.index ?? index}`,
+    sourceId: clip.sourceId ?? MAIN_SOURCE_ID,
     sourceStart: clip.sourceStart,
     sourceDuration: clip.sourceDuration,
     speed: clip.speed ?? 1,
@@ -1211,19 +1214,20 @@ function buildBestEffortMarkerFallback(
 function extractRemovedSourceRanges(
   appliedActions: unknown,
   assetId?: string | null,
-): Array<{ sourceStart: number; sourceEnd: number }> {
+): SourceRangeRef[] {
   if (!Array.isArray(appliedActions)) return [];
   const ranges = appliedActions.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') return [];
-    const sourceRanges = (entry as { sourceRanges?: Array<{ sourceStart?: unknown; sourceEnd?: unknown; assetId?: unknown }> }).sourceRanges;
+    const sourceRanges = (entry as { sourceRanges?: Array<{ sourceId?: unknown; sourceStart?: unknown; sourceEnd?: unknown; assetId?: unknown }> }).sourceRanges;
     if (!Array.isArray(sourceRanges)) return [];
     return sourceRanges.flatMap((range) => {
       const sourceStart = typeof range?.sourceStart === 'number' ? range.sourceStart : null;
       const sourceEnd = typeof range?.sourceEnd === 'number' ? range.sourceEnd : null;
+      const sourceId = typeof range?.sourceId === 'string' ? range.sourceId : null;
       const rangeAssetId = typeof range?.assetId === 'string' ? range.assetId : assetId ?? null;
       if (sourceStart == null || sourceEnd == null || sourceEnd <= sourceStart) return [];
       if (assetId && rangeAssetId && rangeAssetId !== assetId) return [];
-      return [{ sourceStart, sourceEnd }];
+      return [{ sourceId, assetId: rangeAssetId, sourceStart, sourceEnd }];
     });
   });
   return mergeSourceRanges(ranges);
@@ -1231,11 +1235,11 @@ function extractRemovedSourceRanges(
 
 function filterCandidatesAgainstRemovedSourceRanges(
   candidates: ReturnType<typeof retrieveVisualCandidates> extends Promise<infer T> ? T : never,
-  removedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
+  removedSourceRanges: SourceRangeRef[],
 ) {
   return candidates.flatMap((candidate) => {
     const remaining = subtractSourceRanges(
-      { sourceStart: candidate.sourceStart, sourceEnd: candidate.sourceEnd },
+      { assetId: candidate.assetId, sourceStart: candidate.sourceStart, sourceEnd: candidate.sourceEnd },
       removedSourceRanges,
     );
     if (remaining.length === 0) return [];
