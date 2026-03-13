@@ -1,16 +1,27 @@
 'use client';
 
+import { useCallback } from 'react';
+
+import { cancelActiveFFmpegJob } from '@/lib/ffmpegClient';
 import { useEditorStore } from '@/lib/useEditorStore';
 
 export default function ExportProgress() {
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
 
+  const handleCancel = useCallback(() => {
+    const currentJob = useEditorStore.getState().ffmpegJob;
+    if (currentJob.status !== 'running' || currentJob.isCancelling) return;
+    setFFmpegJob({ ...currentJob, status: 'running', stage: 'Cancelling…', isCancelling: true });
+    cancelActiveFFmpegJob();
+  }, [setFFmpegJob]);
+
   if (ffmpegJob.status === 'idle') return null;
 
   const isDone = ffmpegJob.status === 'done';
   const isError = ffmpegJob.status === 'error';
   const isRunning = ffmpegJob.status === 'running';
+  const isCancelled = ffmpegJob.status === 'cancelled';
 
   return (
     <div style={{
@@ -38,6 +49,8 @@ export default function ExportProgress() {
               ? 'rgba(58,170,110,0.15)'
               : isError
               ? 'rgba(229,58,58,0.15)'
+              : isCancelled
+              ? 'rgba(255,255,255,0.08)'
               : 'rgba(0,196,204,0.1)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
@@ -51,6 +64,11 @@ export default function ExportProgress() {
                 <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
               </svg>
             )}
+            {isCancelled && (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--fg-secondary)" strokeWidth="2.2">
+                <path d="M6 6l12 12M18 6L6 18"/>
+              </svg>
+            )}
             {isRunning && (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="2">
                 <path d="M21 2H3v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V2zM7 22v-4M17 22v-4"/>
@@ -58,7 +76,15 @@ export default function ExportProgress() {
             )}
           </div>
           <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg-primary)' }}>
-            {isDone ? 'Export complete' : isError ? 'Export failed' : 'Exporting…'}
+            {isDone
+              ? 'Export complete'
+              : isError
+              ? 'Export failed'
+              : isCancelled
+              ? 'Export canceled'
+              : ffmpegJob.isCancelling
+              ? 'Cancelling export…'
+              : 'Exporting…'}
           </span>
         </div>
 
@@ -109,6 +135,12 @@ export default function ExportProgress() {
             </p>
           )}
 
+          {isCancelled && (
+            <p style={{ fontSize: 13, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
+              {ffmpegJob.message}
+            </p>
+          )}
+
           {isDone && (
             <p style={{ fontSize: 13, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
               Your video is ready to download.
@@ -117,27 +149,45 @@ export default function ExportProgress() {
         </div>
 
         {/* Footer */}
-        {(isDone || isError) && (
+        {(isDone || isError || isCancelled || isRunning) && (
           <div style={{
             padding: '12px 20px',
             borderTop: '1px solid var(--border)',
             display: 'flex', gap: 8, justifyContent: 'flex-end',
           }}>
-            <button
-              onClick={() => setFFmpegJob({ status: 'idle' })}
-              style={{
-                padding: '7px 14px', fontSize: 13,
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                color: 'var(--fg-secondary)', borderRadius: 6, cursor: 'pointer',
-              }}
-            >
-              Close
-            </button>
+            {isRunning ? (
+              <button
+                onClick={handleCancel}
+                disabled={ffmpegJob.isCancelling}
+                style={{
+                  padding: '7px 14px',
+                  fontSize: 13,
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: ffmpegJob.isCancelling ? 'var(--fg-faint)' : 'var(--fg-secondary)',
+                  borderRadius: 6,
+                  cursor: ffmpegJob.isCancelling ? 'default' : 'pointer',
+                }}
+              >
+                {ffmpegJob.isCancelling ? 'Cancelling…' : 'Cancel export'}
+              </button>
+            ) : (
+              <button
+                onClick={() => setFFmpegJob({ status: 'idle' })}
+                style={{
+                  padding: '7px 14px', fontSize: 13,
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: 'var(--fg-secondary)', borderRadius: 6, cursor: 'pointer',
+                }}
+              >
+                Close
+              </button>
+            )}
             {isDone && (
               <a
                 href={(ffmpegJob as { status: 'done'; outputUrl: string }).outputUrl}
-                download="cut-output.mp4"
+                download="export-output.mp4"
                 style={{
                   padding: '7px 16px', fontSize: 13, fontWeight: 500,
                   background: 'rgba(255,255,255,0.08)',

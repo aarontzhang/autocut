@@ -8,13 +8,22 @@ import { VideoClip } from './types';
 
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<void> | null = null;
+let progressHandler: ((progress: number) => void) | null = null;
+let activeJobCancel: (() => void) | null = null;
+
+function createAbortError() {
+  return new DOMException('Export canceled.', 'AbortError');
+}
 
 export function resetFFmpeg() {
   ffmpegInstance = null;
   loadPromise = null;
+  progressHandler = null;
 }
 
 async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpeg> {
+  progressHandler = onProgress ?? null;
+
   if (ffmpegInstance && loadPromise) {
     await loadPromise;
     return ffmpegInstance;
@@ -22,11 +31,9 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
 
   ffmpegInstance = new FFmpeg();
 
-  if (onProgress) {
-    ffmpegInstance.on('progress', ({ progress }) => {
-      onProgress(Math.round(progress * 100));
-    });
-  }
+  ffmpegInstance.on('progress', ({ progress }) => {
+    progressHandler?.(Math.round(progress * 100));
+  });
 
   loadPromise = (async () => {
     const base = window.location.origin + '/ffmpeg';
@@ -107,6 +114,120 @@ async function probeMediaInput(fileOrUrl: Uint8Array | File | string): Promise<{
 function toEvenDimension(value: number, fallback: number): number {
   const safe = Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
   return safe % 2 === 0 ? safe : safe + 1;
+}
+
+async function execOrThrow(ffmpeg: FFmpeg, args: string[]) {
+  const exitCode = await ffmpeg.exec(args);
+  if (exitCode !== 0) {
+    throw new Error(`FFmpeg exited with code ${exitCode}.`);
+  }
+}
+
+function isPlainCutClip(clip: VideoClip): boolean {
+  return (
+    clip.speed === 1
+    && clip.volume === 1
+    && clip.fadeIn === 0
+    && clip.fadeOut === 0
+    && (!clip.filter || clip.filter.type === 'none')
+  );
+}
+
+function mergeAdjacentCopyClips(clips: VideoClip[]): VideoClip[] {
+  const merged: VideoClip[] = [];
+
+  for (const clip of clips) {
+    const last = merged[merged.length - 1];
+    const lastSourceId = last ? getClipSourceId(last) : null;
+    const clipSourceId = getClipSourceId(clip);
+
+    if (
+      last
+      && lastSourceId === clipSourceId
+      && isPlainCutClip(last)
+      && isPlainCutClip(clip)
+      && Math.abs((last.sourceStart + last.sourceDuration) - clip.sourceStart) < 0.001
+    ) {
+      last.sourceDuration += clip.sourceDuration;
+      continue;
+    }
+
+    merged.push({ ...clip });
+  }
+
+  return merged;
+}
+
+function canUseFastCopyExport(
+  clips: VideoClip[],
+  sources: Array<{ sourceId: string; fileUrl: Uint8Array | File | string }>,
+): boolean {
+  if (clips.length === 0 || sources.length !== 1) return false;
+  const sourceId = sources[0].sourceId;
+  return clips.every((clip) => getClipSourceId(clip) === sourceId && isPlainCutClip(clip));
+}
+
+function createOverallProgressReporter(onProgress?: (progress: number) => void) {
+  let lastReported = 0;
+
+  return (nextProgress: number) => {
+    if (!onProgress) return;
+    lastReported = Math.max(lastReported, Math.round(nextProgress));
+    onProgress(Math.max(0, Math.min(100, lastReported)));
+  };
+}
+
+function createFFmpegJobHandle(signal?: AbortSignal) {
+  let cancelled = false;
+
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    try {
+      ffmpegInstance?.terminate();
+    } finally {
+      resetFFmpeg();
+    }
+  };
+
+  activeJobCancel = cancel;
+
+  const handleAbort = () => {
+    cancel();
+  };
+
+  signal?.addEventListener('abort', handleAbort, { once: true });
+
+  return {
+    throwIfCancelled() {
+      if (cancelled || signal?.aborted) {
+        cancel();
+        throw createAbortError();
+      }
+    },
+    cleanup() {
+      signal?.removeEventListener('abort', handleAbort);
+      if (activeJobCancel === cancel) {
+        activeJobCancel = null;
+      }
+    },
+  };
+}
+
+export function cancelActiveFFmpegJob() {
+  if (!activeJobCancel) return false;
+  activeJobCancel();
+  return true;
+}
+
+export function isFFmpegAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'AbortError') {
+    return true;
+  }
+  if (error instanceof Error) {
+    return error.message.includes('FFmpeg.terminate()') || error.message === 'Export canceled.';
+  }
+  return typeof error === 'string' && error.includes('FFmpeg.terminate()');
 }
 
 export async function extractAudioSegment(
@@ -226,6 +347,7 @@ export interface ExportClipsOptions {
     fileUrl: Uint8Array | File | string;
   }>;
   clips: VideoClip[];
+  signal?: AbortSignal;
   onStage?: (stage: string) => void;
   onProgress?: (progress: number) => void;
 }
@@ -233,153 +355,251 @@ export interface ExportClipsOptions {
 export async function exportClips({
   sources,
   clips,
+  signal,
   onStage,
   onProgress,
 }: ExportClipsOptions): Promise<string> {
   if (clips.length === 0) throw new Error('No clips to export');
   if (sources.length === 0) throw new Error('No media sources available for export');
 
-  onStage?.('Loading FFmpeg…');
-  const ffmpeg = await getFFmpeg(onProgress);
+  const job = createFFmpegJobHandle(signal);
+  const reportOverallProgress = createOverallProgressReporter(onProgress);
+  let phaseStart = 0;
+  let phaseSpan = 5;
 
-  onStage?.('Reading source media…');
-  const sourceFileNames = new Map<string, string>();
-  const sourceDimensions = new Map<string, { width: number; height: number }>();
-  for (let index = 0; index < sources.length; index += 1) {
-    const source = sources[index];
-    const inputName = `input_export_${index}.mp4`;
-    const [inputData, dimensions] = await Promise.all([
-      readMediaInput(source.fileUrl),
-      probeMediaInput(source.fileUrl).catch(() => ({ width: 0, height: 0 })),
+  try {
+    onStage?.('Loading FFmpeg…');
+    const ffmpeg = await getFFmpeg((progress) => {
+      reportOverallProgress(phaseStart + (phaseSpan * progress) / 100);
+    });
+    job.throwIfCancelled();
+    reportOverallProgress(5);
+
+    if (canUseFastCopyExport(clips, sources)) {
+      const mergedClips = mergeAdjacentCopyClips(clips);
+      const source = sources[0];
+      const inputName = 'input_export_fast.mp4';
+
+      onStage?.('Reading source media…');
+      const inputData = await readMediaInput(source.fileUrl);
+      job.throwIfCancelled();
+      await ffmpeg.writeFile(inputName, inputData);
+      reportOverallProgress(15);
+
+      const segFiles: string[] = [];
+      const segmentSpan = mergedClips.length > 0 ? 75 / mergedClips.length : 75;
+
+      for (let index = 0; index < mergedClips.length; index += 1) {
+        job.throwIfCancelled();
+        const clip = mergedClips[index];
+        const segName = `export_fast_seg${index}.mp4`;
+        phaseStart = 15 + (segmentSpan * index);
+        phaseSpan = segmentSpan;
+        onStage?.(`Copying clip ${index + 1} of ${mergedClips.length}…`);
+        await execOrThrow(ffmpeg, [
+          '-ss', String(clip.sourceStart),
+          '-t', String(clip.sourceDuration),
+          '-i', inputName,
+          '-c', 'copy',
+          '-avoid_negative_ts', 'make_zero',
+          segName,
+        ]);
+        segFiles.push(segName);
+        reportOverallProgress(phaseStart + phaseSpan);
+      }
+
+      if (segFiles.length === 1) {
+        onStage?.('Preparing download…');
+        reportOverallProgress(98);
+        const data = await ffmpeg.readFile(segFiles[0]);
+        reportOverallProgress(100);
+        const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
+        return URL.createObjectURL(blob);
+      }
+
+      phaseStart = 90;
+      phaseSpan = 8;
+      onStage?.('Concatenating clips…');
+      const concatContent = segFiles.map((file) => `file '${file}'`).join('\n');
+      const encoder = new TextEncoder();
+      await ffmpeg.writeFile('export_fast_concat.txt', encoder.encode(concatContent));
+      await execOrThrow(ffmpeg, [
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', 'export_fast_concat.txt',
+        '-c', 'copy',
+        'export_output.mp4',
+      ]);
+
+      onStage?.('Preparing download…');
+      reportOverallProgress(98);
+      const data = await ffmpeg.readFile('export_output.mp4');
+      reportOverallProgress(100);
+      const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
+      return URL.createObjectURL(blob);
+    }
+
+    onStage?.('Reading source media…');
+    const sourceFileNames = new Map<string, string>();
+    const sourceDimensions = new Map<string, { width: number; height: number }>();
+    for (let index = 0; index < sources.length; index += 1) {
+      job.throwIfCancelled();
+      const source = sources[index];
+      const inputName = `input_export_${index}.mp4`;
+      const [inputData, dimensions] = await Promise.all([
+        readMediaInput(source.fileUrl),
+        probeMediaInput(source.fileUrl).catch(() => ({ width: 0, height: 0 })),
+      ]);
+      job.throwIfCancelled();
+      await ffmpeg.writeFile(inputName, inputData);
+      sourceFileNames.set(source.sourceId, inputName);
+      sourceDimensions.set(source.sourceId, dimensions);
+      reportOverallProgress(5 + (((index + 1) / sources.length) * 10));
+    }
+
+    const firstClipSourceId = getClipSourceId(clips[0]);
+    const firstClipDimensions = sourceDimensions.get(firstClipSourceId);
+    const fallbackDimensions = [...sourceDimensions.values()].find((dims) => dims.width > 0 && dims.height > 0);
+    const targetWidth = toEvenDimension(firstClipDimensions?.width ?? fallbackDimensions?.width ?? 1280, 1280);
+    const targetHeight = toEvenDimension(firstClipDimensions?.height ?? fallbackDimensions?.height ?? 720, 720);
+
+    onStage?.('Processing clips…');
+    const segFiles: string[] = [];
+    const processingSpan = clips.length > 0 ? 75 / clips.length : 75;
+
+    for (let i = 0; i < clips.length; i++) {
+      job.throwIfCancelled();
+      const clip = clips[i];
+      const segName = `export_seg${i}.mp4`;
+      const sourceId = getClipSourceId(clip);
+      const inputName = sourceFileNames.get(sourceId);
+      if (!inputName) {
+        throw new Error(`Missing media source for export (${sourceId}).`);
+      }
+
+      const vFilters: string[] = [];
+      const aFilters: string[] = [];
+
+      if (clip.speed !== 1.0) {
+        vFilters.push(`setpts=(PTS-STARTPTS)/${clip.speed}`);
+        let remainingSpeed = clip.speed;
+        const atempoChain: string[] = [];
+        while (remainingSpeed > 2.0) {
+          atempoChain.push('atempo=2.0');
+          remainingSpeed /= 2.0;
+        }
+        while (remainingSpeed < 0.5) {
+          atempoChain.push('atempo=0.5');
+          remainingSpeed /= 0.5;
+        }
+        atempoChain.push(`atempo=${remainingSpeed.toFixed(4)}`);
+        aFilters.push(...atempoChain);
+      } else {
+        vFilters.push('setpts=PTS-STARTPTS');
+      }
+
+      if (clip.volume !== 1.0) {
+        aFilters.push(`volume=${clip.volume.toFixed(3)}`);
+      }
+
+      if (clip.filter && clip.filter.type !== 'none') {
+        const filterMap: Record<string, string> = {
+          cinematic: 'eq=contrast=1.2:saturation=0.8:brightness=-0.05',
+          vintage: 'eq=contrast=1.1:saturation=0.7:brightness=0.05,hue=s=0.7',
+          warm: 'eq=saturation=1.2:brightness=0.05,colorchannelmixer=rr=1.1:bb=0.9',
+          cool: 'eq=saturation=1.1,colorchannelmixer=rr=0.9:bb=1.1',
+          bw: 'hue=s=0',
+        };
+        const filterValue = filterMap[clip.filter.type];
+        if (filterValue) {
+          vFilters.push(filterValue);
+        }
+      }
+
+      vFilters.push(
+        `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease`,
+        `pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2`,
+        'setsar=1',
+        'fps=30',
+        'format=yuv420p',
+      );
+
+      if (aFilters.length > 0) {
+        aFilters.unshift('asetpts=PTS-STARTPTS');
+      }
+
+      const args: string[] = [
+        '-i', inputName,
+        '-ss', String(clip.sourceStart),
+        '-t', String(clip.sourceDuration),
+      ];
+
+      if (vFilters.length > 0) {
+        args.push('-vf', vFilters.join(','));
+      }
+      if (aFilters.length > 0) {
+        args.push('-af', aFilters.join(','));
+      }
+
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-pix_fmt', 'yuv420p',
+        '-r', '30',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-ac', '2',
+        '-avoid_negative_ts', 'make_zero',
+        '-movflags', '+faststart',
+        segName,
+      );
+
+      phaseStart = 15 + (processingSpan * i);
+      phaseSpan = processingSpan;
+      onStage?.(`Processing clip ${i + 1} of ${clips.length}…`);
+      await execOrThrow(ffmpeg, args);
+      segFiles.push(segName);
+      reportOverallProgress(phaseStart + phaseSpan);
+    }
+
+    if (segFiles.length === 1) {
+      onStage?.('Preparing download…');
+      reportOverallProgress(98);
+      const data = await ffmpeg.readFile(segFiles[0]);
+      reportOverallProgress(100);
+      const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
+      return URL.createObjectURL(blob);
+    }
+
+    phaseStart = 90;
+    phaseSpan = 8;
+    onStage?.('Concatenating clips…');
+    const concatContent = segFiles.map((file) => `file '${file}'`).join('\n');
+    const encoder = new TextEncoder();
+    await ffmpeg.writeFile('export_concat.txt', encoder.encode(concatContent));
+    await execOrThrow(ffmpeg, [
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', 'export_concat.txt',
+      '-c', 'copy',
+      'export_output.mp4',
     ]);
-    await ffmpeg.writeFile(inputName, inputData);
-    sourceFileNames.set(source.sourceId, inputName);
-    sourceDimensions.set(source.sourceId, dimensions);
-  }
 
-  const firstClipSourceId = getClipSourceId(clips[0]);
-  const firstClipDimensions = sourceDimensions.get(firstClipSourceId);
-  const fallbackDimensions = [...sourceDimensions.values()].find((dims) => dims.width > 0 && dims.height > 0);
-  const targetWidth = toEvenDimension(firstClipDimensions?.width ?? fallbackDimensions?.width ?? 1280, 1280);
-  const targetHeight = toEvenDimension(firstClipDimensions?.height ?? fallbackDimensions?.height ?? 720, 720);
-
-  onStage?.('Processing clips…');
-  const segFiles: string[] = [];
-
-  for (let i = 0; i < clips.length; i++) {
-    const clip = clips[i];
-    const segName = `export_seg${i}.mp4`;
-    const sourceId = getClipSourceId(clip);
-    const inputName = sourceFileNames.get(sourceId);
-    if (!inputName) {
-      throw new Error(`Missing media source for export (${sourceId}).`);
-    }
-
-    // Build video filter chain
-    const vFilters: string[] = [];
-    const aFilters: string[] = [];
-
-    if (clip.speed !== 1.0) {
-      vFilters.push(`setpts=(PTS-STARTPTS)/${clip.speed}`);
-      // atempo must be in range 0.5–2.0; chain for values outside that range
-      let remainingSpeed = clip.speed;
-      const atempoChain: string[] = [];
-      while (remainingSpeed > 2.0) {
-        atempoChain.push('atempo=2.0');
-        remainingSpeed /= 2.0;
-      }
-      while (remainingSpeed < 0.5) {
-        atempoChain.push('atempo=0.5');
-        remainingSpeed /= 0.5;
-      }
-      atempoChain.push(`atempo=${remainingSpeed.toFixed(4)}`);
-      aFilters.push(...atempoChain);
-    } else {
-      vFilters.push('setpts=PTS-STARTPTS');
-    }
-
-    if (clip.volume !== 1.0) {
-      aFilters.push(`volume=${clip.volume.toFixed(3)}`);
-    }
-
-    if (clip.filter && clip.filter.type !== 'none') {
-      const filterMap: Record<string, string> = {
-        cinematic: 'eq=contrast=1.2:saturation=0.8:brightness=-0.05',
-        vintage: 'eq=contrast=1.1:saturation=0.7:brightness=0.05,hue=s=0.7',
-        warm: 'eq=saturation=1.2:brightness=0.05,colorchannelmixer=rr=1.1:bb=0.9',
-        cool: 'eq=saturation=1.1,colorchannelmixer=rr=0.9:bb=1.1',
-        bw: 'hue=s=0',
-      };
-      const f = filterMap[clip.filter.type];
-      if (f) vFilters.push(f);
-    }
-
-    // Normalize all exported segments so mixed-source concatenation stays decodable.
-    vFilters.push(
-      `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease`,
-      `pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2`,
-      'setsar=1',
-      'fps=30',
-      'format=yuv420p',
-    );
-
-    if (aFilters.length > 0) {
-      aFilters.unshift('asetpts=PTS-STARTPTS');
-    }
-
-    const args: string[] = [
-      '-i', inputName,
-      '-ss', String(clip.sourceStart),
-      '-t', String(clip.sourceDuration),
-    ];
-
-    if (vFilters.length > 0) {
-      args.push('-vf', vFilters.join(','));
-    }
-    if (aFilters.length > 0) {
-      args.push('-af', aFilters.join(','));
-    }
-    args.push(
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-pix_fmt', 'yuv420p',
-      '-r', '30',
-      '-c:a', 'aac',
-      '-ar', '48000',
-      '-ac', '2',
-      '-avoid_negative_ts', 'make_zero',
-      '-movflags', '+faststart',
-    );
-
-    args.push(segName);
-    await ffmpeg.exec(args);
-    segFiles.push(segName);
-  }
-
-  onStage?.('Concatenating…');
-
-  if (segFiles.length === 1) {
-    const data = await ffmpeg.readFile(segFiles[0]);
+    onStage?.('Preparing download…');
+    reportOverallProgress(98);
+    const data = await ffmpeg.readFile('export_output.mp4');
+    reportOverallProgress(100);
     const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
     return URL.createObjectURL(blob);
+  } catch (error) {
+    if (isFFmpegAbortError(error)) {
+      throw createAbortError();
+    }
+    throw error;
+  } finally {
+    job.cleanup();
+    progressHandler = null;
   }
-
-  const concatContent = segFiles.map(f => `file '${f}'`).join('\n');
-  const encoder = new TextEncoder();
-  await ffmpeg.writeFile('export_concat.txt', encoder.encode(concatContent));
-
-  await ffmpeg.exec([
-    '-f', 'concat',
-    '-safe', '0',
-    '-i', 'export_concat.txt',
-    '-c', 'copy',
-    'export_output.mp4',
-  ]);
-
-  onStage?.('Preparing download…');
-  const data = await ffmpeg.readFile('export_output.mp4');
-  const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
-  return URL.createObjectURL(blob);
 }
 
 export async function extractVideoFrames(

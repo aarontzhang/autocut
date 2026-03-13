@@ -49,8 +49,9 @@ export interface MediaLibraryItem {
 
 export type FFmpegJob =
   | { status: 'idle' }
-  | { status: 'running'; progress: number; stage: string }
+  | { status: 'running'; progress: number; stage: string; isCancelling?: boolean }
   | { status: 'done'; outputUrl: string }
+  | { status: 'cancelled'; message: string }
   | { status: 'error'; message: string };
 
 export type SelectedItem = {

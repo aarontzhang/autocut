@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { exportClips } from '@/lib/ffmpegClient';
+import { exportClips, isFFmpegAbortError } from '@/lib/ffmpegClient';
 import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
@@ -41,16 +41,29 @@ export default function TopBar() {
 
   const handleExport = useCallback(async () => {
     if (clips.length === 0 || exportInputs.length === 0) return;
-    setFFmpegJob({ status: 'running', progress: 0, stage: 'Initializing…' });
+    const abortController = new AbortController();
+    const setRunningJob = (patch: Partial<{ progress: number; stage: string; isCancelling?: boolean }>) => {
+      const currentJob = useEditorStore.getState().ffmpegJob;
+      if (currentJob.status !== 'running') return;
+      if (currentJob.isCancelling && patch.isCancelling !== true) return;
+      setFFmpegJob({ ...currentJob, ...patch, status: 'running' });
+    };
+
+    setFFmpegJob({ status: 'running', progress: 0, stage: 'Initializing…', isCancelling: false });
     try {
       const outputUrl = await exportClips({
         sources: exportInputs,
         clips,
-        onStage: stage => setFFmpegJob({ status: 'running', progress: 0, stage }),
-        onProgress: progress => setFFmpegJob({ status: 'running', progress, stage: 'Processing…' }),
+        signal: abortController.signal,
+        onStage: (stage) => setRunningJob({ stage }),
+        onProgress: (progress) => setRunningJob({ progress }),
       });
       setFFmpegJob({ status: 'done', outputUrl });
     } catch (err) {
+      if (isFFmpegAbortError(err)) {
+        setFFmpegJob({ status: 'cancelled', message: 'Export canceled.' });
+        return;
+      }
       const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
       setFFmpegJob({ status: 'error', message: msg || 'Unknown error' });
     }
