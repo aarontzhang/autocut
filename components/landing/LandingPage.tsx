@@ -1,9 +1,36 @@
 'use client';
 
 import Link from 'next/link';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import AutocutMark from '@/components/branding/AutocutMark';
+import { useAuth } from '@/components/auth/AuthProvider';
 
 const VIDEO_IMAGE = 'https://images.unsplash.com/photo-1633077353753-cc4f0df5eb88?w=900&q=85&auto=format&fit=crop';
+
+type HeroTrackSegment = {
+  w: string;
+  ml?: string;
+};
+
+type HeroTrack = {
+  label: string;
+  segs: HeroTrackSegment[];
+  color: string;
+  opacity?: number;
+};
+
+type TimelineTrackSegment = {
+  l: string;
+  w: string;
+};
+
+type TimelineTrack = {
+  label: string;
+  segs: TimelineTrackSegment[];
+  color: string;
+  opacity?: number;
+};
 
 /* ─── Reusable window chrome ─────────────────────────────────── */
 
@@ -62,6 +89,12 @@ function AppWindow({
 /* ─── Full editor mock (hero) ────────────────────────────────── */
 
 function HeroEditorMock() {
+  const tracks: HeroTrack[] = [
+    { label: 'video', segs: [{ w: '28%' }, { w: '38%', ml: '30%' }, { w: '24%', ml: '72%' }], color: 'linear-gradient(90deg,#149bff,#67e8ff)' },
+    { label: 'audio', segs: [{ w: '96%' }], color: 'linear-gradient(90deg,#18acff,#82f0ff)', opacity: 0.7 },
+    { label: 'text', segs: [{ w: '16%', ml: '4%' }], color: 'linear-gradient(90deg,#7c3aed,#a78bfa)' },
+  ];
+
   return (
     <AppWindow accent style={{ flex: 1, minHeight: 0 }}>
       {/* App top bar */}
@@ -173,19 +206,15 @@ function HeroEditorMock() {
                 <div key={i} style={{ flex: 1, fontSize: 8, color: 'rgba(255,255,255,0.2)' }}>{t}</div>
               ))}
             </div>
-            {[
-              { label: 'video', segs: [{ w: '28%' }, { w: '38%', ml: '30%' }, { w: '24%', ml: '72%' }], color: 'linear-gradient(90deg,#149bff,#67e8ff)' },
-              { label: 'audio', segs: [{ w: '96%' }], color: 'linear-gradient(90deg,#18acff,#82f0ff)', opacity: 0.7 },
-              { label: 'text', segs: [{ w: '16%', ml: '4%' }], color: 'linear-gradient(90deg,#7c3aed,#a78bfa)' },
-            ].map(track => (
+            {tracks.map(track => (
               <div key={track.label} style={{ display: 'flex', alignItems: 'center', height: 14 }}>
                 <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)', width: 38, textAlign: 'right', paddingRight: 6, flexShrink: 0 }}>{track.label}</span>
                 <div style={{ flex: 1, height: '100%', background: 'rgba(255,255,255,0.04)', borderRadius: 2, position: 'relative' }}>
                   {track.segs.map((seg, i) => (
                     <div key={i} style={{
                       position: 'absolute', top: 0, bottom: 0,
-                      left: (seg as any).ml ?? '0%', width: seg.w,
-                      background: track.color, borderRadius: 2, opacity: (track as any).opacity ?? 1,
+                      left: seg.ml ?? '0%', width: seg.w,
+                      background: track.color, borderRadius: 2, opacity: track.opacity ?? 1,
                     }} />
                   ))}
                   {track.label === 'video' && (
@@ -348,7 +377,7 @@ function ChatFlowMock() {
             padding: '8px 12px', fontSize: 12,
             color: 'rgba(255,255,255,0.75)', maxWidth: '78%', lineHeight: 1.5,
           }}>
-            Cut the first 20 seconds — the intro is too slow
+            Cut the first 20 seconds, the intro is too slow
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -362,7 +391,7 @@ function ChatFlowMock() {
               <div style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
                 <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>Delete range</span>
-                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>0:00–0:20</span>
+                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>0:00 to 0:20</span>
               </div>
               <div style={{ padding: '0 12px 8px', fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>
                 Auto-applied ✓
@@ -379,6 +408,25 @@ function ChatFlowMock() {
 /* ─── Timeline mock (feature 2) ─────────────────────────────── */
 
 function TimelineMock() {
+  const tracks: TimelineTrack[] = [
+    {
+      label: 'video',
+      segs: [{ l: '0%', w: '28%' }, { l: '30%', w: '38%' }, { l: '72%', w: '24%' }],
+      color: 'linear-gradient(90deg,#149bff,#67e8ff)',
+    },
+    {
+      label: 'audio',
+      segs: [{ l: '0%', w: '97%' }],
+      color: 'linear-gradient(90deg,#18acff,#82f0ff)',
+      opacity: 0.7,
+    },
+    {
+      label: 'text',
+      segs: [{ l: '4%', w: '18%' }, { l: '55%', w: '12%' }],
+      color: 'linear-gradient(90deg,#7c3aed,#a78bfa)',
+    },
+  ];
+
   return (
     <AppWindow accent style={{ width: '100%' }}>
       <div style={{ padding: '14px 12px 18px' }}>
@@ -393,24 +441,7 @@ function TimelineMock() {
 
         {/* Tracks */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {[
-            {
-              label: 'video',
-              segs: [{ l: '0%', w: '28%' }, { l: '30%', w: '38%' }, { l: '72%', w: '24%' }],
-              color: 'linear-gradient(90deg,#149bff,#67e8ff)',
-            },
-            {
-              label: 'audio',
-              segs: [{ l: '0%', w: '97%' }],
-              color: 'linear-gradient(90deg,#18acff,#82f0ff)',
-              opacity: 0.7,
-            },
-            {
-              label: 'text',
-              segs: [{ l: '4%', w: '18%' }, { l: '55%', w: '12%' }],
-              color: 'linear-gradient(90deg,#7c3aed,#a78bfa)',
-            },
-          ].map(track => (
+          {tracks.map(track => (
             <div key={track.label} style={{ display: 'flex', alignItems: 'center', height: 20 }}>
               <div style={{ width: 68, flexShrink: 0, fontSize: 9.5, color: 'rgba(255,255,255,0.22)', textAlign: 'right', paddingRight: 8 }}>
                 {track.label}
@@ -421,7 +452,7 @@ function TimelineMock() {
                     position: 'absolute', top: 0, bottom: 0,
                     left: seg.l, width: seg.w,
                     background: track.color, borderRadius: 3,
-                    opacity: (track as any).opacity ?? 1,
+                    opacity: track.opacity ?? 1,
                   }} />
                 ))}
                 {track.label === 'video' && (
@@ -456,6 +487,58 @@ function TimelineMock() {
 /* ─── Main page ─────────────────────────────────────────────── */
 
 export default function LandingPage() {
+  const router = useRouter();
+  const { user, initialized } = useAuth();
+
+  useEffect(() => {
+    if (!initialized || !user) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const response = await fetch('/api/projects', { cache: 'no-store' });
+        if (!response.ok) {
+          if (!cancelled) router.replace('/new');
+          return;
+        }
+
+        const projects = await response.json();
+        const latestProjectId = Array.isArray(projects) && typeof projects[0]?.id === 'string'
+          ? projects[0].id
+          : null;
+
+        if (cancelled) return;
+        router.replace(latestProjectId ? `/editor?project=${latestProjectId}` : '/new');
+      } catch {
+        if (!cancelled) router.replace('/new');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialized, router, user]);
+
+  if (initialized && user) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        background: '#111111',
+        color: 'rgba(255,255,255,0.92)',
+        fontFamily: 'var(--font-serif), system-ui, sans-serif',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
+          <AutocutMark size={36} withTile />
+          <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)' }}>Opening your editor…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{
       minHeight: '100vh',
@@ -473,7 +556,7 @@ export default function LandingPage() {
         .lp-hero {
           display: grid;
           grid-template-columns: 380px 1fr;
-          min-height: calc(100vh - 54px);
+          min-height: 100vh;
           padding: 0 64px;
           gap: 56px;
           align-items: stretch;
@@ -539,7 +622,7 @@ export default function LandingPage() {
         @media (max-width: 640px) {
           .lp-hero {
             grid-template-columns: 1fr;
-            padding: 40px 20px 48px;
+            padding: 0 20px 48px;
             min-height: auto;
             gap: 36px;
           }
@@ -562,8 +645,10 @@ export default function LandingPage() {
         alignItems: 'center',
         justifyContent: 'space-between',
         height: 54,
-        position: 'sticky',
+        position: 'fixed',
         top: 0,
+        left: 0,
+        right: 0,
         zIndex: 50,
         background: 'rgba(17,17,17,0.92)',
         backdropFilter: 'blur(16px)',
@@ -587,7 +672,7 @@ export default function LandingPage() {
       <section className="lp-hero">
         <div style={{
           display: 'flex', flexDirection: 'column', justifyContent: 'center',
-          paddingTop: 48, paddingBottom: 48,
+          paddingTop: 112, paddingBottom: 48,
         }}>
           <h1 style={{
             fontSize: 'clamp(36px, 3.4vw, 56px)',
@@ -602,7 +687,7 @@ export default function LandingPage() {
             fontSize: 16, color: 'rgba(255,255,255,0.42)',
             lineHeight: 1.65, margin: '0 0 36px',
           }}>
-            Tell Autocut what you want changed — cut the filler, trim a section, place markers. It finds the right moments and applies every edit directly to your timeline.
+            Tell Autocut what you want changed. Cut the filler, trim a section, place markers. It finds the right moments and applies every edit directly to your timeline.
           </p>
           <div>
             <Link href="/auth/login" className="iridescent-button" style={{
@@ -637,7 +722,7 @@ export default function LandingPage() {
             fontSize: 15, color: 'rgba(255,255,255,0.42)',
             lineHeight: 1.7, margin: 0,
           }}>
-            Each edit is proposed as an action card. Step through the cuts one at a time, keep what works, skip what doesn't — nothing commits until you say so.
+            Each edit is proposed as an action card. Step through the cuts one at a time, keep what works, skip what doesn&apos;t. Nothing commits until you say so.
           </p>
         </div>
       </section>
@@ -656,7 +741,7 @@ export default function LandingPage() {
             fontSize: 15, color: 'rgba(255,255,255,0.42)',
             lineHeight: 1.7, margin: 0,
           }}>
-            Cuts and text overlays land on the timeline precisely. Markers let you jump to any tagged moment before committing — you stay in control of every change.
+            Cuts and text overlays land on the timeline precisely. Markers let you jump to any tagged moment before committing. You stay in control of every change.
           </p>
         </div>
         <div className="lp-feat-graphic">
