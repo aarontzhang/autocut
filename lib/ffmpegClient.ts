@@ -124,12 +124,18 @@ async function execOrThrow(ffmpeg: FFmpeg, args: string[]) {
 }
 
 function isPlainCutClip(clip: VideoClip): boolean {
+  const speed = Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1;
+  const volume = Number.isFinite(clip.volume) ? clip.volume : 1;
+  const fadeIn = Number.isFinite(clip.fadeIn) ? clip.fadeIn : 0;
+  const fadeOut = Number.isFinite(clip.fadeOut) ? clip.fadeOut : 0;
+  const filterType = clip.filter?.type ?? 'none';
+
   return (
-    clip.speed === 1
-    && clip.volume === 1
-    && clip.fadeIn === 0
-    && clip.fadeOut === 0
-    && (!clip.filter || clip.filter.type === 'none')
+    speed === 1
+    && volume === 1
+    && fadeIn === 0
+    && fadeOut === 0
+    && filterType === 'none'
   );
 }
 
@@ -174,6 +180,16 @@ function createOverallProgressReporter(onProgress?: (progress: number) => void) 
     if (!onProgress) return;
     lastReported = Math.max(lastReported, Math.round(nextProgress));
     onProgress(Math.max(0, Math.min(100, lastReported)));
+  };
+}
+
+function getClipExportState(clip: VideoClip) {
+  return {
+    speed: Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1,
+    volume: Number.isFinite(clip.volume) ? clip.volume : 1,
+    fadeIn: Number.isFinite(clip.fadeIn) ? clip.fadeIn : 0,
+    fadeOut: Number.isFinite(clip.fadeOut) ? clip.fadeOut : 0,
+    filter: clip.filter ?? null,
   };
 }
 
@@ -395,7 +411,7 @@ export async function exportClips({
         const segName = `export_fast_seg${index}.mp4`;
         phaseStart = 15 + (segmentSpan * index);
         phaseSpan = segmentSpan;
-        onStage?.(`Copying clip ${index + 1} of ${mergedClips.length}…`);
+        onStage?.(`Fast exporting clip ${index + 1} of ${mergedClips.length}…`);
         await execOrThrow(ffmpeg, [
           '-ss', String(clip.sourceStart),
           '-t', String(clip.sourceDuration),
@@ -470,6 +486,7 @@ export async function exportClips({
     for (let i = 0; i < clips.length; i++) {
       job.throwIfCancelled();
       const clip = clips[i];
+      const clipState = getClipExportState(clip);
       const segName = `export_seg${i}.mp4`;
       const sourceId = getClipSourceId(clip);
       const inputName = sourceFileNames.get(sourceId);
@@ -480,9 +497,9 @@ export async function exportClips({
       const vFilters: string[] = [];
       const aFilters: string[] = [];
 
-      if (clip.speed !== 1.0) {
-        vFilters.push(`setpts=(PTS-STARTPTS)/${clip.speed}`);
-        let remainingSpeed = clip.speed;
+      if (clipState.speed !== 1.0) {
+        vFilters.push(`setpts=(PTS-STARTPTS)/${clipState.speed}`);
+        let remainingSpeed = clipState.speed;
         const atempoChain: string[] = [];
         while (remainingSpeed > 2.0) {
           atempoChain.push('atempo=2.0');
@@ -498,11 +515,11 @@ export async function exportClips({
         vFilters.push('setpts=PTS-STARTPTS');
       }
 
-      if (clip.volume !== 1.0) {
-        aFilters.push(`volume=${clip.volume.toFixed(3)}`);
+      if (clipState.volume !== 1.0) {
+        aFilters.push(`volume=${clipState.volume.toFixed(3)}`);
       }
 
-      if (clip.filter && clip.filter.type !== 'none') {
+      if (clipState.filter && clipState.filter.type !== 'none') {
         const filterMap: Record<string, string> = {
           cinematic: 'eq=contrast=1.2:saturation=0.8:brightness=-0.05',
           vintage: 'eq=contrast=1.1:saturation=0.7:brightness=0.05,hue=s=0.7',
@@ -510,7 +527,7 @@ export async function exportClips({
           cool: 'eq=saturation=1.1,colorchannelmixer=rr=0.9:bb=1.1',
           bw: 'hue=s=0',
         };
-        const filterValue = filterMap[clip.filter.type];
+        const filterValue = filterMap[clipState.filter.type];
         if (filterValue) {
           vFilters.push(filterValue);
         }

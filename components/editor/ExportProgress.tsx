@@ -70,8 +70,16 @@ export default function ExportProgress() {
               </svg>
             )}
             {isRunning && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="2">
-                <path d="M21 2H3v16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V2zM7 22v-4M17 22v-4"/>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--teal)"
+                strokeWidth="2.2"
+                style={{ animation: 'spinExportIndicator 1s linear infinite' }}
+              >
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" strokeLinecap="round"/>
               </svg>
             )}
           </div>
@@ -124,6 +132,10 @@ export default function ExportProgress() {
                 @keyframes slideIndeterminate {
                   0%   { left: -40%; }
                   100% { left: 110%; }
+                }
+                @keyframes spinExportIndicator {
+                  0% { transform: rotate(0deg); }
+                  100% { transform: rotate(360deg); }
                 }
               `}</style>
             </>

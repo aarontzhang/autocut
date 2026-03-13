@@ -80,6 +80,18 @@ function normalizeClipSourceId(
   return normalizeSourceId(clip.sourceId) ?? normalizeSourceId(clip.sourcePath) ?? fallback;
 }
 
+function normalizeLoadedClip(clip: VideoClip): VideoClip {
+  return {
+    ...clip,
+    sourceId: normalizeClipSourceId(clip),
+    speed: Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1,
+    volume: Number.isFinite(clip.volume) ? clip.volume : 1,
+    filter: clip.filter ?? null,
+    fadeIn: Number.isFinite(clip.fadeIn) ? clip.fadeIn : 0,
+    fadeOut: Number.isFinite(clip.fadeOut) ? clip.fadeOut : 0,
+  };
+}
+
 function normalizeCaptionSourceId(caption: CaptionEntry): CaptionEntry {
   return {
     ...caption,
@@ -750,10 +762,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   loadProject: (editState, project) => {
     const { videoUrl, storagePath, projectId, videoFilename, duration, signedUrls = {} } = project;
-    const clips = ((editState.clips as VideoClip[] | undefined) ?? []).map((clip) => ({
-      ...clip,
-      sourceId: normalizeClipSourceId(clip),
-    }));
+    const clips = ((editState.clips as VideoClip[] | undefined) ?? []).map(normalizeLoadedClip);
     const rawTranscriptCaptions = ((editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null)
       ?.map(normalizeCaptionSourceId) ?? null;
     const persistedMediaLibrary = Array.isArray(editState.mediaLibrary)
