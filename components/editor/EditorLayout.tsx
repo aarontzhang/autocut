@@ -300,7 +300,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         });
         const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
         setBackgroundTranscript(text, 'done', rawWords);
-      } catch {
+      } catch (error) {
+        console.warn('Background transcription failed:', error);
         setBackgroundTranscript(null, 'error');
       }
     })();

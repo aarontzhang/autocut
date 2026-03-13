@@ -1535,10 +1535,12 @@ function EmptyState({
   isIndexing,
   indexingReason,
   indexingProgress,
+  statusNotice,
 }: {
   isIndexing: boolean;
   indexingReason: string | null;
   indexingProgress: IndexingProgress | null;
+  statusNotice?: string | null;
 }) {
   const indexingDetail = indexingReason?.includes('take a while')
     ? null
@@ -1562,6 +1564,21 @@ function EmptyState({
             progress={indexingProgress}
             detail={indexingDetail}
           />
+        </div>
+      )}
+      {statusNotice && (
+        <div style={{
+          width: '100%',
+          maxWidth: 290,
+          marginTop: isIndexing ? 0 : 10,
+          padding: '12px 14px',
+          borderRadius: 14,
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.08)',
+        }}>
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.6, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
+            {statusNotice}
+          </p>
         </div>
       )}
     </div>
@@ -2078,7 +2095,9 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
-  const agentContextReady = transcriptStatus === 'done' && videoFrames !== null && frameDescriptionsReady;
+  const framesReady = videoFrames !== null && frameDescriptionsReady;
+  const transcriptFailed = transcriptStatus === 'error';
+  const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
   const estimatedTranscriptEta = estimateTranscriptSeconds(videoDuration);
   const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
@@ -2094,7 +2113,9 @@ export default function ChatSidebar() {
           : 'Transcribing audio',
         etaSeconds: estimatedTranscriptRemainingEta,
       }
-    : frameIndexingProgress;
+    : framesReady
+      ? null
+      : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && videoFrames === null)
       ? 'Transcribing audio and sampling frames…'
@@ -2106,11 +2127,22 @@ export default function ChatSidebar() {
             ? 'Analyzing sampled frames…'
           : null
     : null;
+  const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
+    ? 'Audio transcription did not finish, but the assistant is ready to work from the video and visual analysis.'
+    : null;
   const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
   const canSendDespiteIndexing = pendingVisualQuery;
-  const mediaPreparationBlockingSend = hasVideoSource && !agentContextReady && !canSendDespiteIndexing;
+  const isAnalyzingSampledFrames = hasVideoSource
+    && (transcriptStatus === 'done' || transcriptFailed)
+    && videoFrames !== null
+    && !frameDescriptionsReady;
+  const mediaPreparationBlockingSend = hasVideoSource
+    && !agentContextReady
+    && !canSendDespiteIndexing
+    && !isAnalyzingSampledFrames;
   const composerInputDisabled = isChatLoading || reviewLocked;
   const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
+  const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
 
   const resizeComposer = useCallback(() => {
     const ta = textareaRef.current;
@@ -2162,15 +2194,15 @@ export default function ChatSidebar() {
   }, [focusComposer, input, setTaggedMarkerIds, taggedMarkerIds]);
 
   useEffect(() => {
-    if (agentContextReady) {
+    if (framesReady) {
       setFrameIndexingProgress(null);
     }
-  }, [agentContextReady]);
+  }, [framesReady]);
 
   const handleSend = useCallback(() => {
-    if (reviewLocked || (hasVideoSource && !agentContextReady && !canSendDespiteIndexing)) return;
+    if (!canSubmitMessage) return;
     handleSendSingle();
-  }, [handleSendSingle, reviewLocked, hasVideoSource, agentContextReady, canSendDespiteIndexing]);
+  }, [canSubmitMessage, handleSendSingle]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (reviewLocked) return;
@@ -2358,12 +2390,20 @@ export default function ChatSidebar() {
             isIndexing={hasVideoSource && !agentContextReady}
             indexingReason={agentNotReadyReason}
             indexingProgress={indexingProgress}
+            statusNotice={transcriptUnavailableNotice}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {messages.map(msg => msg.role === 'user'
               ? <UserMessage key={msg.id} msg={msg} />
               : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
+            )}
+            {transcriptUnavailableNotice && (
+              <ProgressStatusCard
+                title="Transcript unavailable"
+                progress={null}
+                detail={transcriptUnavailableNotice}
+              />
             )}
             {!isChatLoading && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
               <ProgressStatusCard
@@ -2514,6 +2554,8 @@ export default function ChatSidebar() {
                 ? 'Complete the active review…'
                 : isChatLoading
                   ? 'Autocut is working…'
+                  : isAnalyzingSampledFrames
+                    ? 'Autocut is analyzing frames. You can send now…'
                   : mediaPreparationBlockingSend
                     ? 'Autocut is preparing the media. You can keep typing…'
                   : 'Find events, reference markers, and review cuts…'
@@ -2555,19 +2597,19 @@ export default function ChatSidebar() {
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || composerInputDisabled || mediaPreparationBlockingSend}
+                disabled={!canSubmitMessage}
                 style={{
                   width: 28, height: 28,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
+                  background: canSubmitMessage ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                   border: 'none', borderRadius: 6,
-                  cursor: input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? 'pointer' : 'default',
+                  cursor: canSubmitMessage ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill={input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? '#000' : 'rgba(255,255,255,0.25)'}>
-                  <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !composerInputDisabled && !mediaPreparationBlockingSend ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={canSubmitMessage ? '#000' : 'rgba(255,255,255,0.25)'}>
+                  <line x1="22" y1="2" x2="11" y2="13" stroke={canSubmitMessage ? '#000' : 'rgba(255,255,255,0.25)'} strokeWidth="2" fill="none"/>
                   <polygon points="22 2 15 22 11 13 2 9 22 2"/>
                 </svg>
               </button>
