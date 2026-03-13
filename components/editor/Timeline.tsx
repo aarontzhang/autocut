@@ -89,6 +89,67 @@ export default function Timeline({
   const requestSeek = useEditorStore(s => s.requestSeek);
   const { user } = useAuth();
 
+  const readVideoDuration = useCallback((sourceUrl: string) => (
+    new Promise<number>((resolve) => {
+      const tmp = document.createElement('video');
+      tmp.preload = 'metadata';
+      tmp.src = sourceUrl;
+      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
+      tmp.onerror = () => { resolve(10); tmp.src = ''; };
+    })
+  ), []);
+
+  const insertFilesIntoTimeline = useCallback(async (files: File[], initialDropTime?: number) => {
+    const videoFiles = files.filter((file) => file.type.startsWith('video/'));
+    if (videoFiles.length === 0) return;
+
+    if (!useEditorStore.getState().videoUrl) {
+      const [firstFile] = videoFiles;
+      if (firstFile) onImportFile?.(firstFile);
+      return;
+    }
+
+    const initialSchedule = buildClipSchedule(useEditorStore.getState().clips);
+    let nextInsertTime = initialDropTime ?? (
+      initialSchedule.length > 0
+        ? initialSchedule[initialSchedule.length - 1].timelineEnd
+        : useEditorStore.getState().videoDuration
+    );
+    for (const file of videoFiles) {
+      const sourceUrl = URL.createObjectURL(file);
+      const duration = await readVideoDuration(sourceUrl);
+      const currentSchedule = buildClipSchedule(useEditorStore.getState().clips);
+      const currentTrackEnd = currentSchedule.length > 0
+        ? currentSchedule[currentSchedule.length - 1].timelineEnd
+        : useEditorStore.getState().videoDuration;
+      const clipId = nextInsertTime >= currentTrackEnd - 0.05
+        ? appendVideoToTimeline(sourceUrl, file.name, duration)
+        : insertVideoIntoTimeline(sourceUrl, file.name, duration, nextInsertTime);
+
+      const { currentProjectId } = useEditorStore.getState();
+      if (user && currentProjectId) {
+        uploadProjectMedia(file, currentProjectId, 'sources').then((storagePath) => {
+          updateClipSourcePath(clipId, storagePath);
+          onStorageUploadSuccess?.();
+        }).catch((error: Error) => {
+          console.warn('Timeline clip upload failed:', error.message);
+          onStorageUploadError?.(error);
+        });
+      }
+
+      nextInsertTime += duration;
+    }
+  }, [
+    appendVideoToTimeline,
+    insertVideoIntoTimeline,
+    onImportFile,
+    onStorageUploadError,
+    onStorageUploadSuccess,
+    readVideoDuration,
+    updateClipSourcePath,
+    user,
+  ]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
@@ -357,15 +418,6 @@ export default function Timeline({
     e.stopPropagation();
     setIsMainDragOver(false);
 
-    const file = e.dataTransfer.files[0];
-    if (!file || !file.type.startsWith('video/')) return;
-
-    if (!useEditorStore.getState().videoUrl) {
-      if (onImportFile) onImportFile(file);
-      else useEditorStore.getState().setVideoFile(file);
-      return;
-    }
-
     const el = scrollRef.current;
     let dropTime = useEditorStore.getState().currentTime;
     if (el) {
@@ -374,28 +426,7 @@ export default function Timeline({
       dropTime = Math.max(0, (px / totalW) * totalTimelineDuration);
     }
 
-    const sourceUrl = URL.createObjectURL(file);
-    const duration = await new Promise<number>((resolve) => {
-      const tmp = document.createElement('video');
-      tmp.src = sourceUrl;
-      tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; };
-      tmp.onerror = () => { resolve(10); tmp.src = ''; };
-    });
-
-    const clipId = dropTime >= mainTrackEnd - 0.05
-      ? appendVideoToTimeline(sourceUrl, file.name, duration)
-      : insertVideoIntoTimeline(sourceUrl, file.name, duration, dropTime);
-
-    const { currentProjectId } = useEditorStore.getState();
-    if (user && currentProjectId) {
-      uploadProjectMedia(file, currentProjectId, 'sources').then((storagePath) => {
-        updateClipSourcePath(clipId, storagePath);
-        onStorageUploadSuccess?.();
-      }).catch((error: Error) => {
-        console.warn('Main timeline clip upload failed:', error.message);
-        onStorageUploadError?.(error);
-      });
-    }
+    await insertFilesIntoTimeline(Array.from(e.dataTransfer.files), dropTime);
   };
 
   useEffect(() => {

@@ -87,6 +87,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const sourceVideoMapRef = useRef<Map<string, Array<HTMLVideoElement | null>>>(new Map());
   const activePlaybackRef = useRef<PlaybackTarget | null>(null);
+  const playbackIntentRef = useRef(false);
   const currentTimeRef = useRef(currentTime);
   useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
 
@@ -99,6 +100,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const getAllVideoInstances = useCallback(() => (
     [...sourceVideoMapRef.current.values()].flatMap((instances) => instances.filter((el): el is HTMLVideoElement => el !== null))
   ), []);
+
+  const pauseInactiveVideoInstances = useCallback((activeEl?: HTMLVideoElement | null) => {
+    for (const el of getAllVideoInstances()) {
+      if (activeEl && el === activeEl) continue;
+      if (!el.paused) el.pause();
+    }
+  }, [getAllVideoInstances]);
 
   useEffect(() => {
     const container = videoContainerRef.current;
@@ -363,7 +371,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (nextEntry) {
       const nextClip = currentClips.find(item => item.id === nextEntry.clipId);
       const nextSource = nextClip?.sourceUrl ?? videoUrl;
-      const wasPlaying = !videoRef.current.paused;
+      const shouldContinuePlayback = playbackIntentRef.current || !videoRef.current.paused;
       const nextTimelineTime = Math.max(currentTimeRef.current, nextEntry.timelineStart);
       const nextSourceTime = Math.min(
         nextEntry.sourceStart + Math.max(0, nextTimelineTime - nextEntry.timelineStart) * nextEntry.speed,
@@ -379,20 +387,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const nextEl = getVideoInstance(nextSource, resolvedNextSlot);
 
       if (nextEl && (nextSource !== currentSource || resolvedNextSlot !== currentSlot)) {
-        videoRef.current.pause();
         activateSource(nextSource, resolvedNextSlot);
         if (Math.abs(nextEl.currentTime - nextSourceTime) > 1 / 120) {
           nextEl.currentTime = nextSourceTime;
         }
-        if (wasPlaying) {
+        if (shouldContinuePlayback) {
+          playbackIntentRef.current = true;
           if (nextReady) {
+            pauseInactiveVideoInstances(nextEl);
             nextEl.play().catch(() => {});
           } else {
             const resumePlayback = () => {
+              pauseInactiveVideoInstances(nextEl);
               nextEl.play().catch(() => {});
             };
             nextEl.addEventListener('canplay', resumePlayback, { once: true });
           }
+        } else {
+          pauseInactiveVideoInstances(nextEl);
         }
       } else {
         videoRef.current.currentTime = nextSourceTime;
@@ -402,8 +414,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       return;
     }
 
+    playbackIntentRef.current = false;
     videoRef.current.pause();
-    for (const el of getAllVideoInstances()) el.pause();
+    pauseInactiveVideoInstances();
     const lastEntry = currentSchedule[currentSchedule.length - 1];
     if (lastEntry) {
       const lastClip = currentClips.find(clip => clip.id === lastEntry.clipId);
@@ -413,7 +426,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
     currentTimeRef.current = totalTimelineDuration;
     setCurrentTime(totalTimelineDuration);
-  }, [activateSource, applyClipEffects, getAllVideoInstances, getVideoInstance, primeSourceAtTime, setCurrentTime, totalTimelineDuration, videoRef, videoUrl]);
+  }, [activateSource, applyClipEffects, getVideoInstance, pauseInactiveVideoInstances, primeSourceAtTime, setCurrentTime, totalTimelineDuration, videoRef, videoUrl]);
 
   useEffect(() => {
     const activeVideo = videoRef.current;
@@ -481,7 +494,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
     const previousActiveEl = videoRef.current;
     const switchingSource = previousActiveEl !== activeEl;
-    const wasPlaying = getAllVideoInstances().some(el => !el.paused);
+    const shouldResumePlayback = playbackIntentRef.current || getAllVideoInstances().some(el => !el.paused);
     const offsetInTimeline = timelineTime - targetEntry.timelineStart;
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
     const shouldApplySeek =
@@ -490,9 +503,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       || Math.abs(activeEl.currentTime - sourceTime) > 1 / 120;
 
     if (switchingSource) {
-      for (const el of getAllVideoInstances()) {
-        if (!el.paused) el.pause();
-      }
       activateSource(targetSourceUrl, targetSlot);
     }
 
@@ -504,17 +514,20 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setCurrentTime(timelineTime);
     }
     applyClipEffects(sourceTime);
-    if (switchingSource && wasPlaying) {
+    if (switchingSource && shouldResumePlayback) {
+      playbackIntentRef.current = true;
       if (targetReady) {
+        pauseInactiveVideoInstances(activeEl);
         activeEl.play().catch(() => {});
       } else {
         const resumePlayback = () => {
+          pauseInactiveVideoInstances(activeEl);
           activeEl.play().catch(() => {});
         };
         activeEl.addEventListener('canplay', resumePlayback, { once: true });
       }
     }
-  }, [activateSource, applyClipEffects, getAllVideoInstances, getVideoInstance, primeSourceAtTime, setCurrentTime, videoRef, videoUrl]);
+  }, [activateSource, applyClipEffects, getAllVideoInstances, getVideoInstance, pauseInactiveVideoInstances, primeSourceAtTime, setCurrentTime, videoRef, videoUrl]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;
@@ -531,26 +544,32 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const video = videoRef.current;
       if (!video) return;
       if (video.paused) {
+        playbackIntentRef.current = true;
         setupAudio();
         if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
         video.play().catch(() => {});
       } else {
-        for (const el of getAllVideoInstances()) el.pause();
+        playbackIntentRef.current = false;
+        pauseInactiveVideoInstances();
+        video.pause();
       }
     },
-  }), [getAllVideoInstances, seekToTimelineTime, setupAudio, videoRef]);
+  }), [pauseInactiveVideoInstances, seekToTimelineTime, setupAudio, videoRef]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
+      playbackIntentRef.current = true;
       setupAudio();
       if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
       video.play().catch(() => {});
     } else {
-      for (const el of getAllVideoInstances()) el.pause();
+      playbackIntentRef.current = false;
+      pauseInactiveVideoInstances();
+      video.pause();
     }
-  }, [getAllVideoInstances, setupAudio, videoRef]);
+  }, [pauseInactiveVideoInstances, setupAudio, videoRef]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
