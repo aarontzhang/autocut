@@ -19,6 +19,7 @@ export default function MediaPanel({
   const addToMediaLibrary = useEditorStore(s => s.addToMediaLibrary);
   const appendVideoToTimeline = useEditorStore(s => s.appendVideoToTimeline);
   const inputRef = useRef<HTMLInputElement>(null);
+  const canAppendToTimeline = Boolean(videoUrl);
 
   const handleImport = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
@@ -43,8 +44,13 @@ export default function MediaPanel({
     }
   }, [handleImport, onImportFiles]);
 
+  const handleAppendItem = useCallback((index: number, item: typeof mediaLibrary[number]) => {
+    if (!canAppendToTimeline || index === 0 || item.duration <= 0) return;
+    appendVideoToTimeline(item.url, item.name, item.duration, item.sourcePath, item.sourceId);
+  }, [appendVideoToTimeline, canAppendToTimeline]);
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-panel)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: 'var(--bg-panel)' }}>
       <div style={{
         height: 40, display: 'flex', alignItems: 'center',
         padding: '0 12px', borderBottom: '1px solid var(--border)', flexShrink: 0,
@@ -54,13 +60,42 @@ export default function MediaPanel({
         </span>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {mediaLibrary.map((item, idx) => (
-          <div key={item.id} style={{
-            borderRadius: 7, overflow: 'hidden',
-            border: '1px solid var(--border-mid)',
-            background: 'var(--bg-elevated)',
-          }}>
+          <div
+            key={item.id}
+            onClick={() => handleAppendItem(idx, item)}
+            role={!canAppendToTimeline || idx === 0 || item.duration <= 0 ? undefined : 'button'}
+            tabIndex={!canAppendToTimeline || idx === 0 || item.duration <= 0 ? -1 : 0}
+            onKeyDown={(event) => {
+              if (!canAppendToTimeline || idx === 0 || item.duration <= 0) return;
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleAppendItem(idx, item);
+              }
+            }}
+            title={idx === 0 ? 'Main source' : 'Add to timeline'}
+            style={{
+              flexShrink: 0,
+              borderRadius: 7,
+              overflow: 'hidden',
+              border: '1px solid var(--border-mid)',
+              background: 'var(--bg-elevated)',
+              padding: 0,
+              textAlign: 'left',
+              cursor: !canAppendToTimeline || idx === 0 || item.duration <= 0 ? 'default' : 'pointer',
+              transition: 'transform 0.12s ease, border-color 0.12s ease, background 0.12s ease',
+            }}
+            onMouseEnter={e => {
+              if (!canAppendToTimeline || idx === 0 || item.duration <= 0) return;
+              e.currentTarget.style.borderColor = 'rgba(90, 176, 255, 0.45)';
+              e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.borderColor = 'var(--border-mid)';
+              e.currentTarget.style.background = 'var(--bg-elevated)';
+            }}
+          >
             <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', position: 'relative', overflow: 'hidden' }}>
               <video
                 src={item.url}
@@ -78,6 +113,26 @@ export default function MediaPanel({
                   {formatTimeShort(item.duration)}
                 </div>
               )}
+              {idx > 0 && (
+                <div style={{
+                  position: 'absolute',
+                  top: 6,
+                  right: 6,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 24,
+                  height: 24,
+                  borderRadius: 999,
+                  background: 'rgba(0,0,0,0.64)',
+                  border: '1px solid rgba(255,255,255,0.14)',
+                  color: '#fff',
+                  fontSize: 16,
+                  lineHeight: 1,
+                }}>
+                  +
+                </div>
+              )}
             </div>
             <div style={{ padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -85,12 +140,16 @@ export default function MediaPanel({
                   {item.name}
                 </p>
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)' }}>
-                  {item.duration > 0 ? formatTimeShort(item.duration) : '—'}{idx === 0 ? ' · main' : ''}
+                  {item.duration > 0 ? formatTimeShort(item.duration) : '—'}{idx === 0 ? ' · main' : ' · click to add'}
                 </p>
               </div>
               {idx > 0 && (
                 <button
-                  onClick={() => appendVideoToTimeline(item.url, item.name, item.duration, item.sourcePath, item.sourceId)}
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleAppendItem(idx, item);
+                  }}
                   title="Append to timeline"
                   style={{
                     display: 'flex', alignItems: 'center', gap: 4,
@@ -117,6 +176,7 @@ export default function MediaPanel({
         <button
           onClick={() => inputRef.current?.click()}
           style={{
+            flexShrink: 0,
             display: 'flex', alignItems: 'center', gap: 7,
             width: '100%', padding: '7px 10px',
             background: 'rgba(255,255,255,0.03)',

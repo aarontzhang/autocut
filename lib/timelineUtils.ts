@@ -477,8 +477,16 @@ export function buildTimelineSilenceCandidates(
       return [];
     }
 
-    const deleteStart = Math.min(gap.gapEnd, gap.gapStart + paddingSeconds);
-    const deleteEnd = Math.max(deleteStart, gap.gapEnd - paddingSeconds);
+    const touchesTimelineStart = gap.gapStart <= 1e-3;
+    const touchesTimelineEnd = gap.gapEnd >= timelineDuration - 1e-3;
+    // Only preserve padding next to speech. If silence reaches the timeline edge,
+    // cut all the way to that edge instead of leaving a silent tail/head behind.
+    const deleteStart = touchesTimelineStart
+      ? gap.gapStart
+      : Math.min(gap.gapEnd, gap.gapStart + paddingSeconds);
+    const deleteEnd = touchesTimelineEnd
+      ? gap.gapEnd
+      : Math.max(deleteStart, gap.gapEnd - paddingSeconds);
     const duration = deleteEnd - deleteStart;
     if (duration < minDurationSeconds) return [];
 
