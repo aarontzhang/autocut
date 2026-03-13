@@ -216,6 +216,23 @@ export interface AnalysisJob {
   updatedAt: string;
 }
 
+export interface SourceIndexedFrame {
+  sourceId: string;
+  sourceTime: number;
+  description?: string;
+  image?: string;
+  assetId?: string | null;
+  indexedAt?: string | null;
+}
+
+export interface SourceIndexState {
+  overview: boolean;
+  transcript: boolean;
+  version: string;
+  assetId?: string | null;
+  indexedAt?: string | null;
+}
+
 export interface IndexedVideoFrame {
   image?: string;
   timelineTime: number;

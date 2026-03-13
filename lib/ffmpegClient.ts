@@ -164,13 +164,59 @@ function mergeAdjacentCopyClips(clips: VideoClip[]): VideoClip[] {
   return merged;
 }
 
-function canUseFastCopyExport(
+function samePhysicalSource(
+  left: Uint8Array | File | string,
+  right: Uint8Array | File | string,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  if (typeof left === 'string' && typeof right === 'string') {
+    return left === right;
+  }
+
+  if (left instanceof File && right instanceof File) {
+    return (
+      left.name === right.name
+      && left.size === right.size
+      && left.lastModified === right.lastModified
+    );
+  }
+
+  if (left instanceof Uint8Array && right instanceof Uint8Array) {
+    return left.byteLength === right.byteLength;
+  }
+
+  return false;
+}
+
+function getFastCopySource(
   clips: VideoClip[],
   sources: Array<{ sourceId: string; fileUrl: Uint8Array | File | string }>,
-): boolean {
-  if (clips.length === 0 || sources.length !== 1) return false;
-  const sourceId = sources[0].sourceId;
-  return clips.every((clip) => getClipSourceId(clip) === sourceId && isPlainCutClip(clip));
+) {
+  if (clips.length === 0 || sources.length === 0) {
+    return null;
+  }
+
+  const sourceById = new Map(sources.map((source) => [source.sourceId, source]));
+  const firstSource = sourceById.get(getClipSourceId(clips[0]));
+  if (!firstSource) {
+    return null;
+  }
+
+  for (const clip of clips) {
+    if (!isPlainCutClip(clip)) {
+      return null;
+    }
+
+    const clipSource = sourceById.get(getClipSourceId(clip));
+    if (!clipSource || !samePhysicalSource(firstSource.fileUrl, clipSource.fileUrl)) {
+      return null;
+    }
+  }
+
+  return firstSource;
 }
 
 function createOverallProgressReporter(onProgress?: (progress: number) => void) {
@@ -391,13 +437,13 @@ export async function exportClips({
     job.throwIfCancelled();
     reportOverallProgress(5);
 
-    if (canUseFastCopyExport(clips, sources)) {
+    const fastCopySource = getFastCopySource(clips, sources);
+    if (fastCopySource) {
       const mergedClips = mergeAdjacentCopyClips(clips);
-      const source = sources[0];
       const inputName = 'input_export_fast.mp4';
 
       onStage?.('Reading source media…');
-      const inputData = await readMediaInput(source.fileUrl);
+      const inputData = await readMediaInput(fastCopySource.fileUrl);
       job.throwIfCancelled();
       await ffmpeg.writeFile(inputName, inputData);
       reportOverallProgress(15);
@@ -444,6 +490,7 @@ export async function exportClips({
         '-safe', '0',
         '-i', 'export_fast_concat.txt',
         '-c', 'copy',
+        '-movflags', '+faststart',
         'export_output.mp4',
       ]);
 
@@ -546,9 +593,9 @@ export async function exportClips({
       }
 
       const args: string[] = [
-        '-i', inputName,
         '-ss', String(clip.sourceStart),
         '-t', String(clip.sourceDuration),
+        '-i', inputName,
       ];
 
       if (vFilters.length > 0) {
@@ -560,14 +607,13 @@ export async function exportClips({
 
       args.push(
         '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p',
         '-r', '30',
         '-c:a', 'aac',
         '-ar', '48000',
         '-ac', '2',
         '-avoid_negative_ts', 'make_zero',
-        '-movflags', '+faststart',
         segName,
       );
 
@@ -599,6 +645,7 @@ export async function exportClips({
       '-safe', '0',
       '-i', 'export_concat.txt',
       '-c', 'copy',
+      '-movflags', '+faststart',
       'export_output.mp4',
     ]);
 

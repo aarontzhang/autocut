@@ -16,6 +16,8 @@ import {
   AIEditingSettings,
   AppliedActionRecord,
   MarkerEntry,
+  SourceIndexedFrame,
+  SourceIndexState,
   VisualSearchSession,
 } from './types';
 import {
@@ -27,7 +29,7 @@ import {
   splitClipsAtTime,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
-import { buildTranscriptContext, formatTimePrecise } from './timelineUtils';
+import { buildTranscriptContext, formatTimePrecise, projectSourceFramesToTimeline } from './timelineUtils';
 import { createImportedSourceId, MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 
 export type { EditSnapshot } from './editActionUtils';
@@ -37,6 +39,9 @@ export type TranscriptProgress = {
   completed: number;
   total: number;
 } | null;
+
+export const SOURCE_INDEX_VERSION = 'source-index-v1';
+export type SourceIndexStateMap = Record<string, SourceIndexState>;
 
 export interface MediaLibraryItem {
   id: string;
@@ -80,10 +85,21 @@ function normalizeClipSourceId(
   return normalizeSourceId(clip.sourceId) ?? normalizeSourceId(clip.sourcePath) ?? fallback;
 }
 
-function normalizeLoadedClip(clip: VideoClip): VideoClip {
+function normalizeLoadedClip(clip: VideoClip, mainSourcePath?: string | null): VideoClip {
+  const normalizedSourceId = normalizeClipSourceId(clip);
+  const resolvedSourceId = (
+    mainSourcePath
+    && (
+      normalizeSourceId(clip.sourcePath) === mainSourcePath
+      || normalizedSourceId === mainSourcePath
+    )
+  )
+    ? MAIN_SOURCE_ID
+    : normalizedSourceId;
+
   return {
     ...clip,
-    sourceId: normalizeClipSourceId(clip),
+    sourceId: resolvedSourceId,
     speed: Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1,
     volume: Number.isFinite(clip.volume) ? clip.volume : 1,
     filter: clip.filter ?? null,
@@ -107,6 +123,98 @@ function sourceCoverageIncludesAll(sourceIds: Set<string>, expectedIds: Set<stri
   if (expectedIds.size === 0) return true;
   if (sourceIds.size === 0) return false;
   return [...expectedIds].every((sourceId) => sourceIds.has(sourceId));
+}
+
+function mergeSourceTranscriptCaptions(
+  current: CaptionEntry[] | null,
+  sourceId: string,
+  nextCaptions: CaptionEntry[] | null,
+): CaptionEntry[] | null {
+  const preserved = (current ?? []).filter((caption) => (
+    (normalizeSourceId(caption.sourceId) ?? MAIN_SOURCE_ID) !== sourceId
+  ));
+  if (!nextCaptions || nextCaptions.length === 0) {
+    return preserved.length > 0 ? preserved : null;
+  }
+  return [
+    ...preserved,
+    ...nextCaptions.map((caption) => ({
+      ...caption,
+      sourceId: normalizeSourceId(caption.sourceId) ?? sourceId,
+    })),
+  ];
+}
+
+function mergeSourceOverviewFrames(
+  current: SourceIndexedFrame[] | null,
+  sourceId: string,
+  nextFrames: SourceIndexedFrame[] | null,
+): SourceIndexedFrame[] | null {
+  const preserved = (current ?? []).filter((frame) => frame.sourceId !== sourceId);
+  if (!nextFrames || nextFrames.length === 0) {
+    return preserved.length > 0 ? preserved : null;
+  }
+  return [
+    ...preserved,
+    ...nextFrames.map((frame) => ({
+      ...frame,
+      sourceId,
+    })),
+  ].sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.sourceTime - b.sourceTime);
+}
+
+function patchSourceIndexState(
+  current: SourceIndexStateMap,
+  sourceId: string,
+  patch: Partial<SourceIndexState>,
+): SourceIndexStateMap {
+  const existing = current[sourceId] ?? {
+    overview: false,
+    transcript: false,
+    version: SOURCE_INDEX_VERSION,
+  };
+  return {
+    ...current,
+    [sourceId]: {
+      ...existing,
+      ...patch,
+      version: patch.version ?? existing.version ?? SOURCE_INDEX_VERSION,
+    },
+  };
+}
+
+function buildInitialSourceIndexState(
+  sourceIds: Iterable<string>,
+  overrides?: SourceIndexStateMap,
+): SourceIndexStateMap {
+  const next: SourceIndexStateMap = {};
+  for (const sourceId of sourceIds) {
+    next[sourceId] = overrides?.[sourceId] ?? {
+      overview: false,
+      transcript: false,
+      version: SOURCE_INDEX_VERSION,
+    };
+  }
+  return next;
+}
+
+function buildDerivedIndexState(
+  clips: VideoClip[],
+  aiSettings: AIEditingSettings,
+  sourceTranscriptCaptions: CaptionEntry[] | null,
+  sourceOverviewFrames: SourceIndexedFrame[] | null,
+) {
+  const backgroundTranscript = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
+    ? buildTranscriptContext(clips, sourceTranscriptCaptions)
+    : null;
+  const projectedOverviewFrames = sourceOverviewFrames && sourceOverviewFrames.length > 0
+    ? projectSourceFramesToTimeline(clips, sourceOverviewFrames, aiSettings.frameInspection)
+    : [];
+  return {
+    backgroundTranscript,
+    projectedOverviewFrames: projectedOverviewFrames.length > 0 ? projectedOverviewFrames : null,
+    timelineProjectionFresh: true,
+  };
 }
 
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
@@ -209,15 +317,17 @@ interface EditorState {
 
   // Timeline
   zoom: number;
+  playbackActive: boolean;
 
   // Background transcription
   backgroundTranscript: string | null;
   transcriptStatus: TranscriptStatus;
   transcriptProgress: TranscriptProgress;
-  rawTranscriptCaptions: CaptionEntry[] | null;
-  // Video frames cache
-  videoFrames: IndexedVideoFrame[] | null;
-  videoFramesFresh: boolean; // false when the indexed source set changed and overview frames must be rebuilt
+  sourceTranscriptCaptions: CaptionEntry[] | null;
+  sourceOverviewFrames: SourceIndexedFrame[] | null;
+  projectedOverviewFrames: IndexedVideoFrame[] | null;
+  sourceIndexFreshBySourceId: SourceIndexStateMap;
+  timelineProjectionFresh: boolean;
   visualSearchSession: VisualSearchSession | null;
 
   // Actions
@@ -282,6 +392,9 @@ interface EditorState {
       aiSettings?: unknown;
       backgroundTranscript?: unknown;
       transcriptStatus?: unknown;
+      sourceTranscriptCaptions?: unknown[];
+      sourceOverviewFrames?: unknown[];
+      sourceIndexFreshBySourceId?: unknown;
       rawTranscriptCaptions?: unknown[];
       videoFrames?: unknown[];
       mediaLibrary?: unknown[];
@@ -301,10 +414,20 @@ interface EditorState {
 
   // Zoom
   setZoom: (zoom: number) => void;
+  setPlaybackActive: (active: boolean) => void;
 
   setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
   setTranscriptProgress: (progress: TranscriptProgress) => void;
-  setVideoFrames: (frames: IndexedVideoFrame[]) => void;
+  setSourceOverviewFrames: (
+    sourceId: string,
+    frames: SourceIndexedFrame[] | null,
+    options?: { fresh?: boolean; assetId?: string | null; indexedAt?: string | null },
+  ) => void;
+  hydrateSourceIndex: (payload: {
+    sourceTranscriptCaptions?: CaptionEntry[] | null;
+    sourceOverviewFrames?: SourceIndexedFrame[] | null;
+    sourceIndexFreshBySourceId?: SourceIndexStateMap;
+  }) => void;
   setVisualSearchSession: (session: VisualSearchSession | null) => void;
   addMarker: (marker: Omit<MarkerEntry, 'id' | 'number'> & { id?: string; number?: number }) => string;
   updateMarker: (id: string, patch: Partial<Omit<MarkerEntry, 'id'>>) => void;
@@ -378,12 +501,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   uploadProgress: null,
   saveStatus: 'idle' as const,
   zoom: 1,
+  playbackActive: false,
   backgroundTranscript: null,
   transcriptStatus: 'idle' as TranscriptStatus,
   transcriptProgress: null,
-  rawTranscriptCaptions: null,
-  videoFrames: null,
-  videoFramesFresh: true,
+  sourceTranscriptCaptions: null,
+  sourceOverviewFrames: null,
+  projectedOverviewFrames: null,
+  sourceIndexFreshBySourceId: {},
+  timelineProjectionFresh: true,
   visualSearchSession: null,
   mediaLibrary: [],
 
@@ -409,7 +535,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle' as TranscriptStatus,
+      transcriptProgress: null,
+      sourceTranscriptCaptions: null,
+      sourceOverviewFrames: null,
+      projectedOverviewFrames: null,
+      sourceIndexFreshBySourceId: buildInitialSourceIndexState([MAIN_SOURCE_ID]),
+      timelineProjectionFresh: true,
       visualSearchSession: null,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID }],
@@ -449,7 +582,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: state.videoFramesFresh,
+      ...buildDerivedIndexState(
+        snapshot.clips,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
     }));
   },
 
@@ -474,7 +612,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: false,
+      ...buildDerivedIndexState(
+        newClips,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
       appliedActions: [
         ...state.appliedActions.slice(-24),
         { id: uuidv4(), timestamp: Date.now(), action, summary: action.message },
@@ -495,7 +638,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: false,
+      ...buildDerivedIndexState(
+        newClips,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
     }));
   },
 
@@ -508,7 +656,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: null,
-      videoFramesFresh: false,
+      ...buildDerivedIndexState(
+        s.clips.filter(c => c.id !== clipId),
+        s.aiSettings,
+        s.sourceTranscriptCaptions,
+        s.sourceOverviewFrames,
+      ),
     }));
   },
 
@@ -527,44 +680,70 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: false,
+      ...buildDerivedIndexState(
+        newClips,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
     }));
   },
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
-    set(s => ({
-      clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
+    set(s => {
+      const nextClips = s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c);
+      return {
+      clips: nextClips,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: false,
-    }));
+      ...buildDerivedIndexState(
+        nextClips,
+        s.aiSettings,
+        s.sourceTranscriptCaptions,
+        s.sourceOverviewFrames,
+      ),
+    };});
   },
 
   trimClipWithHistory: (clipId, newSourceStart, newSourceDuration) => {
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    set(s => ({
+    set(s => {
+      const nextClips = s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c);
+      return {
       history: [...s.history, snap],
       future: [],
-      clips: s.clips.map(c => c.id === clipId ? { ...c, sourceStart: newSourceStart, sourceDuration: newSourceDuration } : c),
+      clips: nextClips,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: false,
-    }));
+      ...buildDerivedIndexState(
+        nextClips,
+        s.aiSettings,
+        s.sourceTranscriptCaptions,
+        s.sourceOverviewFrames,
+      ),
+    };});
   },
 
   setClipSpeed: (clipId, speed) => {
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    set(s => ({
+    set(s => {
+      const nextClips = s.clips.map(c => c.id === clipId ? { ...c, speed: Math.max(0.1, Math.min(10, speed)) } : c);
+      return {
       history: [...s.history, snap],
       future: [],
-      clips: s.clips.map(c => c.id === clipId ? { ...c, speed: Math.max(0.1, Math.min(10, speed)) } : c),
+      clips: nextClips,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: false,
-    }));
+      ...buildDerivedIndexState(
+        nextClips,
+        s.aiSettings,
+        s.sourceTranscriptCaptions,
+        s.sourceOverviewFrames,
+      ),
+    };});
   },
 
   setClipVolume: (clipId, volume, fadeIn, fadeOut) => {
@@ -627,7 +806,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: actionChangesTimelineStructure(action) ? false : state.videoFramesFresh,
+      ...(actionChangesTimelineStructure(action)
+        ? buildDerivedIndexState(
+            next.clips,
+            state.aiSettings,
+            state.sourceTranscriptCaptions,
+            state.sourceOverviewFrames,
+          )
+        : {}),
     }));
   },
 
@@ -647,7 +833,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: get().videoFramesFresh,
+      ...buildDerivedIndexState(
+        prev.clips,
+        get().aiSettings,
+        get().sourceTranscriptCaptions,
+        get().sourceOverviewFrames,
+      ),
     });
   },
 
@@ -665,7 +856,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: get().videoFramesFresh,
+      ...buildDerivedIndexState(
+        next.clips,
+        get().aiSettings,
+        get().sourceTranscriptCaptions,
+        get().sourceOverviewFrames,
+      ),
     });
   },
 
@@ -735,7 +931,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle' as TranscriptStatus,
+      transcriptProgress: null,
+      sourceTranscriptCaptions: null,
+      sourceOverviewFrames: null,
+      projectedOverviewFrames: null,
+      sourceIndexFreshBySourceId: buildInitialSourceIndexState([MAIN_SOURCE_ID]),
+      timelineProjectionFresh: true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [{ id: uuidv4(), url: blobUrl, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID, sourcePath: storagePath }],
@@ -753,7 +956,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings: DEFAULT_AI_EDITING_SETTINGS,
       appliedActions: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle' as TranscriptStatus,
+      transcriptProgress: null,
+      sourceTranscriptCaptions: null,
+      sourceOverviewFrames: null,
+      projectedOverviewFrames: null,
+      sourceIndexFreshBySourceId: buildInitialSourceIndexState([MAIN_SOURCE_ID]),
+      timelineProjectionFresh: true,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary: [{ id: uuidv4(), url, name: file.name, duration: 0, sourceId: MAIN_SOURCE_ID, ...(storagePath ? { sourcePath: storagePath } : {}) }],
@@ -763,7 +973,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   loadProject: (editState, project) => {
     const { videoUrl, storagePath, projectId, videoFilename, duration, signedUrls = {} } = project;
     const clips = ((editState.clips as VideoClip[] | undefined) ?? []).map(normalizeLoadedClip);
-    const rawTranscriptCaptions = ((editState.rawTranscriptCaptions as CaptionEntry[] | undefined) ?? null)
+    const sourceTranscriptCaptions = ((
+      (editState.sourceTranscriptCaptions as CaptionEntry[] | undefined)
+      ?? (editState.rawTranscriptCaptions as CaptionEntry[] | undefined)
+      ?? null
+    ))
       ?.map(normalizeCaptionSourceId) ?? null;
     const persistedMediaLibrary = Array.isArray(editState.mediaLibrary)
       ? (editState.mediaLibrary as Array<Partial<MediaLibraryItem>>)
@@ -780,34 +994,62 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             sourcePath: typeof item.sourcePath === 'string' ? item.sourcePath : undefined,
           }))
       : [];
-    const persistedVideoFrames = Array.isArray(editState.videoFrames)
-      ? (editState.videoFrames as Array<Partial<IndexedVideoFrame>>)
+    const persistedSourceOverviewFrames = Array.isArray(editState.sourceOverviewFrames)
+      ? (editState.sourceOverviewFrames as Array<Partial<SourceIndexedFrame>>)
+          .filter((frame) => (
+            typeof frame?.sourceTime === 'number'
+            && typeof frame.sourceId === 'string'
+          ))
+          .map((frame) => ({
+            sourceTime: frame.sourceTime as number,
+            sourceId: normalizeSourceId(frame.sourceId) ?? MAIN_SOURCE_ID,
+            description: typeof frame.description === 'string' ? frame.description : undefined,
+            image: typeof frame.image === 'string' ? frame.image : undefined,
+            assetId: normalizeSourceId(frame.assetId) ?? null,
+            indexedAt: typeof frame.indexedAt === 'string' ? frame.indexedAt : null,
+          }))
+      : Array.isArray(editState.videoFrames)
+        ? (editState.videoFrames as Array<Partial<IndexedVideoFrame>>)
           .filter((frame) => (
             frame?.kind === 'overview'
-            && typeof frame.timelineTime === 'number'
             && typeof frame.sourceTime === 'number'
             && typeof frame.description === 'string'
           ))
           .map((frame) => ({
-            timelineTime: frame.timelineTime as number,
             sourceTime: frame.sourceTime as number,
             sourceId: normalizeSourceId(frame.sourceId) ?? MAIN_SOURCE_ID,
-            kind: 'overview' as const,
             description: frame.description as string,
+            image: typeof frame.image === 'string' ? frame.image : undefined,
+            assetId: null,
+            indexedAt: null,
           }))
-      : null;
+        : null;
     const persistedTranscript = typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null;
+    const persistedFreshness = editState.sourceIndexFreshBySourceId && typeof editState.sourceIndexFreshBySourceId === 'object'
+      ? Object.entries(editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>).reduce<SourceIndexStateMap>((acc, [sourceId, value]) => {
+          const normalizedSourceId = normalizeSourceId(sourceId);
+          if (!normalizedSourceId) return acc;
+          acc[normalizedSourceId] = {
+            overview: value?.overview === true,
+            transcript: value?.transcript === true,
+            version: typeof value?.version === 'string' ? value.version : SOURCE_INDEX_VERSION,
+            assetId: normalizeSourceId(value?.assetId) ?? null,
+            indexedAt: typeof value?.indexedAt === 'string' ? value.indexedAt : null,
+          };
+          return acc;
+        }, {})
+      : {};
     const clipSourceIds = collectSourceIds(clips);
-    const transcriptSourceIds = collectSourceIds(rawTranscriptCaptions ?? []);
-    const frameSourceIds = collectSourceIds(persistedVideoFrames ?? []);
-    const transcriptCoverageComplete = rawTranscriptCaptions && rawTranscriptCaptions.length > 0
+    const transcriptSourceIds = collectSourceIds(sourceTranscriptCaptions ?? []);
+    const frameSourceIds = collectSourceIds(persistedSourceOverviewFrames ?? []);
+    const transcriptCoverageComplete = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
       ? sourceCoverageIncludesAll(transcriptSourceIds, clipSourceIds)
       : clipSourceIds.size <= 1 && !!persistedTranscript;
     const frameCoverageComplete = sourceCoverageIncludesAll(frameSourceIds, clipSourceIds);
-    const usableRawTranscriptCaptions = transcriptCoverageComplete ? rawTranscriptCaptions : null;
-    const usableVideoFrames = frameCoverageComplete ? persistedVideoFrames : null;
-    const backgroundTranscript = usableRawTranscriptCaptions && usableRawTranscriptCaptions.length > 0
-      ? buildTranscriptContext(clips, usableRawTranscriptCaptions)
+    const usableSourceTranscriptCaptions = transcriptCoverageComplete ? sourceTranscriptCaptions : null;
+    const usableSourceOverviewFrames = frameCoverageComplete ? persistedSourceOverviewFrames : null;
+    const backgroundTranscript = usableSourceTranscriptCaptions && usableSourceTranscriptCaptions.length > 0
+      ? buildTranscriptContext(clips, usableSourceTranscriptCaptions)
       : transcriptCoverageComplete
         ? persistedTranscript
         : null;
@@ -846,6 +1088,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...mainLibraryItem,
       ...persistedMediaLibrary.filter((item) => item.sourcePath !== storagePath),
     ];
+    let sourceIndexFreshBySourceId = buildInitialSourceIndexState(clipSourceIds, persistedFreshness);
+    for (const sourceId of clipSourceIds) {
+      const existing = sourceIndexFreshBySourceId[sourceId];
+      sourceIndexFreshBySourceId = patchSourceIndexState(sourceIndexFreshBySourceId, sourceId, {
+        overview: existing?.overview || frameSourceIds.has(sourceId),
+        transcript: existing?.transcript || transcriptSourceIds.has(sourceId),
+      });
+    }
+    const derivedIndexState = buildDerivedIndexState(
+      hydratedClips,
+      mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
+      usableSourceTranscriptCaptions,
+      usableSourceOverviewFrames,
+    );
 
     set({
       videoUrl, videoData: null, videoFile: null, videoDuration: duration ?? 0,
@@ -870,9 +1126,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
-      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: usableRawTranscriptCaptions,
-      videoFrames: usableVideoFrames && usableVideoFrames.length > 0 ? usableVideoFrames : null,
-      videoFramesFresh: usableVideoFrames ? usableVideoFrames.length > 0 : false,
+      backgroundTranscript: derivedIndexState.backgroundTranscript ?? backgroundTranscript,
+      transcriptStatus: transcriptStatus as TranscriptStatus,
+      transcriptProgress: null,
+      sourceTranscriptCaptions: usableSourceTranscriptCaptions,
+      sourceOverviewFrames: usableSourceOverviewFrames && usableSourceOverviewFrames.length > 0 ? usableSourceOverviewFrames : null,
+      projectedOverviewFrames: derivedIndexState.projectedOverviewFrames,
+      sourceIndexFreshBySourceId,
+      timelineProjectionFresh: derivedIndexState.timelineProjectionFresh,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary,
@@ -886,6 +1147,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // ── Zoom ────────────────────────────────────────────────────────────────────
 
   setZoom: (zoom) => set({ zoom: Math.max(0.25, Math.min(20, zoom)) }),
+  setPlaybackActive: (active) => set({ playbackActive: active }),
 
   // ── Reset ───────────────────────────────────────────────────────────────────
 
@@ -902,7 +1164,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       appliedActions: [],
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       history: [], future: [],
-      backgroundTranscript: null, transcriptStatus: 'idle' as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: null, videoFrames: null, videoFramesFresh: true,
+      playbackActive: false,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle' as TranscriptStatus,
+      transcriptProgress: null,
+      sourceTranscriptCaptions: null,
+      sourceOverviewFrames: null,
+      projectedOverviewFrames: null,
+      sourceIndexFreshBySourceId: {},
+      timelineProjectionFresh: true,
       visualSearchSession: null,
       currentProjectId: null, storagePath: null, uploadProgress: null, saveStatus: 'idle' as const,
       mediaLibrary: [],
@@ -927,14 +1197,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { type, id } = s.selectedItem;
     const newHistory = [...s.history, snap];
     if (type === 'clip') {
+      const nextClips = s.clips.filter(c => c.id !== id);
       set({
         history: newHistory,
         future: [],
-        clips: s.clips.filter(c => c.id !== id),
+        clips: nextClips,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: null,
-        videoFramesFresh: s.videoFramesFresh,
+        ...buildDerivedIndexState(
+          nextClips,
+          s.aiSettings,
+          s.sourceTranscriptCaptions,
+          s.sourceOverviewFrames,
+        ),
       });
     } else if (type === 'caption') {
       set({ history: newHistory, future: [], captions: s.captions.filter(c => c.id !== id), selectedItem: null });

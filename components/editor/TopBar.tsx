@@ -56,7 +56,7 @@ export default function TopBar() {
         clips,
         signal: abortController.signal,
         onStage: (stage) => setRunningJob({ stage }),
-        onProgress: (progress) => setRunningJob({ progress }),
+        onProgress: (progress) => setRunningJob({ progress: Math.min(progress, 99) }),
       });
       setFFmpegJob({ status: 'done', outputUrl });
     } catch (err) {

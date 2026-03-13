@@ -70,17 +70,16 @@ export default function ExportProgress() {
               </svg>
             )}
             {isRunning && (
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--teal)"
-                strokeWidth="2.2"
-                style={{ animation: 'spinExportIndicator 1s linear infinite' }}
-              >
-                <path d="M21 12a9 9 0 1 1-2.64-6.36" strokeLinecap="round"/>
-              </svg>
+              <div
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: '50%',
+                  border: '2px solid rgba(0,196,204,0.25)',
+                  borderTopColor: 'var(--teal)',
+                  animation: 'spinExportIndicator 0.9s linear infinite',
+                }}
+              />
             )}
           </div>
           <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg-primary)' }}>

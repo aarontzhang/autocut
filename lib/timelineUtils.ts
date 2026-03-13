@@ -1,5 +1,5 @@
 import { getCaptionSourceId, getClipSourceId, getSourceRangeId } from './sourceUtils';
-import { VideoClip, CaptionEntry, EditAction, SilenceCandidate, SourceRangeRef } from './types';
+import { VideoClip, CaptionEntry, EditAction, IndexedVideoFrame, SilenceCandidate, SourceIndexedFrame, SourceRangeRef } from './types';
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
@@ -96,6 +96,14 @@ export function formatTimeShort(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
+  if (duration <= 0) return 0;
+  const interval = duration <= preferredInterval * maxOverviewFrames
+    ? preferredInterval
+    : duration / maxOverviewFrames;
+  return Math.floor(duration / interval) + 1;
 }
 
 export function getRulerTicks(duration: number, width: number): { time: number; major: boolean }[] {
@@ -366,6 +374,67 @@ export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionE
   }
 
   return lines.join('\n');
+}
+
+function evenlyDownsampleFrames(
+  frames: IndexedVideoFrame[],
+  targetCount: number,
+): IndexedVideoFrame[] {
+  if (targetCount <= 0 || frames.length <= targetCount) return frames;
+  if (targetCount === 1) return [frames[0]];
+
+  const selected: IndexedVideoFrame[] = [];
+  for (let index = 0; index < targetCount; index += 1) {
+    const frameIndex = Math.min(
+      frames.length - 1,
+      Math.round(index * (frames.length - 1) / (targetCount - 1)),
+    );
+    const frame = frames[frameIndex];
+    if (!frame) continue;
+    if (selected.length > 0 && selected[selected.length - 1] === frame) continue;
+    selected.push(frame);
+  }
+
+  return selected;
+}
+
+export function projectSourceFramesToTimeline(
+  clips: VideoClip[],
+  sourceFrames: SourceIndexedFrame[],
+  frameTargetConfig: { overviewIntervalSeconds: number; maxOverviewFrames: number },
+): IndexedVideoFrame[] {
+  if (clips.length === 0 || sourceFrames.length === 0) return [];
+
+  const projected = sourceFrames
+    .flatMap((frame) => {
+      const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId)
+        .filter((timelineTime) => Number.isFinite(timelineTime));
+      return timelineOccurrences.map((timelineTime) => ({
+        image: frame.image,
+        timelineTime,
+        projectedTimelineTime: timelineTime,
+        sourceTime: frame.sourceTime,
+        sourceId: frame.sourceId,
+        kind: 'overview' as const,
+        description: frame.description,
+        visibleOnTimeline: true,
+      }));
+    })
+    .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
+
+  if (projected.length === 0) return [];
+
+  const duration = getTimelineDuration(clips);
+  const preferredInterval = Math.max(0.1, frameTargetConfig.overviewIntervalSeconds);
+  const targetCount = Math.max(
+    1,
+    Math.min(
+      projected.length,
+      getOverviewFrameTarget(duration, preferredInterval, frameTargetConfig.maxOverviewFrames),
+    ),
+  );
+
+  return evenlyDownsampleFrames(projected, targetCount);
 }
 
 type TimelineSpeechSegment = {
