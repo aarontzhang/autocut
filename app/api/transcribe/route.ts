@@ -6,6 +6,7 @@ import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/b
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const TRANSCRIBE_REQUESTS_PER_MINUTE = 25;
 type WhisperWord = { start: number; end: number; word: string };
 
 export async function POST(req: NextRequest) {
@@ -19,7 +20,7 @@ export async function POST(req: NextRequest) {
 
     const rateLimitError = enforceRateLimit({
       key: `transcribe:${getRateLimitIdentity(req.headers, user.id)}`,
-      limit: 10,
+      limit: TRANSCRIBE_REQUESTS_PER_MINUTE,
       windowMs: 60_000,
     });
     if (rateLimitError) return rateLimitError;

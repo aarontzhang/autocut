@@ -5,10 +5,89 @@ import { CaptionEntry } from './types';
 import { getCaptionSourceId } from './sourceUtils';
 
 type TimeRange = { startTime: number; endTime: number };
+type TranscriptionResponse = {
+  captions?: CaptionEntry[];
+  words?: CaptionEntry[];
+  error?: string;
+  retryAfterSeconds?: number;
+};
 type TranscriptionProgressOptions = {
   onProgress?: (progress: { completed: number; total: number }) => void;
   sourceId?: string;
 };
+
+const MAX_TRANSCRIPTION_REQUEST_RETRIES = 3;
+const TRANSCRIPTION_REQUEST_TIMEOUT_MS = 120_000;
+const TRANSCRIPTION_RETRY_BASE_DELAY_MS = 1_500;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function parseTranscriptionResponse(res: Response): Promise<TranscriptionResponse | null> {
+  return res.json().catch(() => null);
+}
+
+async function requestTranscriptionChunk(params: {
+  audioBlob: Blob;
+  range: TimeRange;
+  wordsPerCaption: number;
+}): Promise<TranscriptionResponse> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_TRANSCRIPTION_REQUEST_RETRIES; attempt += 1) {
+    const ctrl = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      try {
+        ctrl.abort(new DOMException('The transcription request timed out.', 'AbortError'));
+      } catch {
+        ctrl.abort();
+      }
+    }, TRANSCRIPTION_REQUEST_TIMEOUT_MS);
+
+    try {
+      const form = new FormData();
+      form.append('audio', params.audioBlob, 'audio.mp3');
+      form.append('startTime', String(params.range.startTime));
+      form.append('requestedDuration', String(Math.max(0, params.range.endTime - params.range.startTime)));
+      form.append('wordsPerCaption', String(params.wordsPerCaption));
+
+      const res = await fetch('/api/transcribe', {
+        method: 'POST',
+        body: form,
+        signal: ctrl.signal,
+      });
+      const data = await parseTranscriptionResponse(res);
+      if (!res.ok) {
+        const retryAfterSeconds = Number(res.headers.get('Retry-After') ?? data?.retryAfterSeconds);
+        const nextError = new Error(data?.error ?? 'Transcription failed');
+        lastError = nextError;
+        if (
+          attempt < MAX_TRANSCRIPTION_REQUEST_RETRIES
+          && (res.status === 429 || res.status >= 500)
+        ) {
+          const retryDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : TRANSCRIPTION_RETRY_BASE_DELAY_MS * (attempt + 1);
+          await sleep(retryDelay);
+          continue;
+        }
+        throw nextError;
+      }
+      return data ?? {};
+    } catch (error) {
+      const nextError = error instanceof Error ? error : new Error('Transcription failed');
+      lastError = nextError;
+      if (attempt >= MAX_TRANSCRIPTION_REQUEST_RETRIES) break;
+      const isAbort = nextError.name === 'AbortError';
+      await sleep((isAbort ? TRANSCRIPTION_RETRY_BASE_DELAY_MS * 2 : TRANSCRIPTION_RETRY_BASE_DELAY_MS) * (attempt + 1));
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
+  throw lastError ?? new Error('Transcription failed');
+}
 
 export function buildOverlappingRanges(
   startTime: number,
@@ -80,15 +159,7 @@ export async function transcribeSourceRanges(
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index];
     const audioBlob = await extractAudioSegment(source, range.startTime, range.endTime);
-    const form = new FormData();
-    form.append('audio', audioBlob, 'audio.mp3');
-    form.append('startTime', String(range.startTime));
-    form.append('requestedDuration', String(Math.max(0, range.endTime - range.startTime)));
-    form.append('wordsPerCaption', String(wordsPerCaption));
-
-    const res = await fetch('/api/transcribe', { method: 'POST', body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? 'Transcription failed');
+    const data = await requestTranscriptionChunk({ audioBlob, range, wordsPerCaption });
     const entries = ((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? [])
       .map((entry) => ({
         ...entry,

@@ -17,20 +17,57 @@ export interface EditSnapshot {
   textOverlays: TextOverlayEntry[];
 }
 
-function splitClipAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
+export const MIN_CLIP_DURATION_SECONDS = 0.05;
+export const CLIP_EDGE_SNAP_EPSILON_SECONDS = 0.08;
+
+function snapTimeToClipEdge(time: number, timelineStart: number, timelineEnd: number) {
+  if (Math.abs(time - timelineStart) <= CLIP_EDGE_SNAP_EPSILON_SECONDS) {
+    return timelineStart;
+  }
+  if (Math.abs(time - timelineEnd) <= CLIP_EDGE_SNAP_EPSILON_SECONDS) {
+    return timelineEnd;
+  }
+  return time;
+}
+
+function mergeDeleteRanges(ranges: Array<{ start: number; end: number }>) {
+  if (ranges.length === 0) return [];
+
+  const sorted = [...ranges]
+    .filter((range) => range.end > range.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  if (sorted.length === 0) return [];
+
+  const merged = [{ ...sorted[0] }];
+  for (const range of sorted.slice(1)) {
+    const current = merged[merged.length - 1];
+    if (range.start <= current.end + CLIP_EDGE_SNAP_EPSILON_SECONDS) {
+      current.end = Math.max(current.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
   const schedule = buildClipSchedule(clips);
-  const targetEntry = schedule.find(entry => timelineTime > entry.timelineStart && timelineTime < entry.timelineEnd);
+  const targetEntry = schedule.find((entry) => {
+    const snappedTime = snapTimeToClipEdge(timelineTime, entry.timelineStart, entry.timelineEnd);
+    return snappedTime > entry.timelineStart && snappedTime < entry.timelineEnd;
+  });
   if (!targetEntry) return clips;
 
   const clip = clips.find(item => item.id === targetEntry.clipId);
   if (!clip) return clips;
 
-  const offsetInTimeline = timelineTime - targetEntry.timelineStart;
+  const snappedTime = snapTimeToClipEdge(timelineTime, targetEntry.timelineStart, targetEntry.timelineEnd);
+  const offsetInTimeline = snappedTime - targetEntry.timelineStart;
   const splitSourceOffset = offsetInTimeline * targetEntry.speed;
   const firstDuration = splitSourceOffset;
   const secondStart = clip.sourceStart + splitSourceOffset;
   const secondDuration = clip.sourceDuration - splitSourceOffset;
-  if (firstDuration < 0.05 || secondDuration < 0.05) return clips;
+  if (firstDuration < MIN_CLIP_DURATION_SECONDS || secondDuration < MIN_CLIP_DURATION_SECONDS) return clips;
 
   const firstClip: VideoClip = { ...clip, sourceDuration: firstDuration };
   const secondClip: VideoClip = { ...clip, id: uuidv4(), sourceStart: secondStart, sourceDuration: secondDuration };
@@ -38,7 +75,8 @@ function splitClipAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] 
   return [...clips.slice(0, index), firstClip, secondClip, ...clips.slice(index + 1)];
 }
 
-function deleteRange(clips: VideoClip[], startTime: number, endTime: number): VideoClip[] {
+export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endTime: number): VideoClip[] {
+  if (endTime <= startTime) return clips;
   const schedule = buildClipSchedule(clips);
   const nextClips: VideoClip[] = [];
 
@@ -48,22 +86,24 @@ function deleteRange(clips: VideoClip[], startTime: number, endTime: number): Vi
     const timelineStart = entry.timelineStart;
     const timelineEnd = entry.timelineEnd;
     const speed = entry.speed;
+    const effectiveStart = snapTimeToClipEdge(startTime, timelineStart, timelineEnd);
+    const effectiveEnd = snapTimeToClipEdge(endTime, timelineStart, timelineEnd);
 
-    if (timelineEnd <= startTime || timelineStart >= endTime) {
+    if (timelineEnd <= effectiveStart || timelineStart >= effectiveEnd) {
       nextClips.push(clip);
       continue;
     }
 
-    if (timelineStart >= startTime && timelineEnd <= endTime) {
+    if (timelineStart >= effectiveStart && timelineEnd <= effectiveEnd) {
       continue;
     }
 
-    if (timelineStart < startTime && timelineEnd > endTime) {
-      const firstDuration = (startTime - timelineStart) * speed;
-      const secondOffset = (endTime - timelineStart) * speed;
+    if (timelineStart < effectiveStart && timelineEnd > effectiveEnd) {
+      const firstDuration = (effectiveStart - timelineStart) * speed;
+      const secondOffset = (effectiveEnd - timelineStart) * speed;
       const secondDuration = clip.sourceDuration - secondOffset;
-      if (firstDuration >= 0.05) nextClips.push({ ...clip, sourceDuration: firstDuration });
-      if (secondDuration >= 0.05) {
+      if (firstDuration >= MIN_CLIP_DURATION_SECONDS) nextClips.push({ ...clip, sourceDuration: firstDuration });
+      if (secondDuration >= MIN_CLIP_DURATION_SECONDS) {
         nextClips.push({
           ...clip,
           id: uuidv4(),
@@ -74,15 +114,15 @@ function deleteRange(clips: VideoClip[], startTime: number, endTime: number): Vi
       continue;
     }
 
-    if (timelineStart < startTime) {
-      const keptDuration = (startTime - timelineStart) * speed;
-      if (keptDuration >= 0.05) nextClips.push({ ...clip, sourceDuration: keptDuration });
+    if (timelineStart < effectiveStart) {
+      const keptDuration = (effectiveStart - timelineStart) * speed;
+      if (keptDuration >= MIN_CLIP_DURATION_SECONDS) nextClips.push({ ...clip, sourceDuration: keptDuration });
       continue;
     }
 
-    const cutOffset = (endTime - timelineStart) * speed;
+    const cutOffset = (effectiveEnd - timelineStart) * speed;
     const remainingDuration = clip.sourceDuration - cutOffset;
-    if (remainingDuration >= 0.05) {
+    if (remainingDuration >= MIN_CLIP_DURATION_SECONDS) {
       nextClips.push({
         ...clip,
         sourceStart: clip.sourceStart + cutOffset,
@@ -116,22 +156,22 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
 
   if (action.type === 'split_clip') {
     if (action.splitTime === undefined) return snapshot;
-    const clips = splitClipAtTime(snapshot.clips, action.splitTime);
+    const clips = splitClipsAtTime(snapshot.clips, action.splitTime);
     return clips === snapshot.clips ? snapshot : withClearedMarkers(snapshot, { clips });
   }
 
   if (action.type === 'delete_range') {
     if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return snapshot;
     return withClearedMarkers(snapshot, {
-      clips: deleteRange(snapshot.clips, action.deleteStartTime, action.deleteEndTime),
+      clips: deleteRangeFromClips(snapshot.clips, action.deleteStartTime, action.deleteEndTime),
     });
   }
 
   if (action.type === 'delete_ranges') {
-    const ranges = [...(action.ranges ?? [])].sort((a, b) => b.start - a.start);
+    const ranges = mergeDeleteRanges(action.ranges ?? []).sort((a, b) => b.start - a.start);
     const clips = ranges.reduce((acc, range) => {
       if (range.end <= range.start) return acc;
-      return deleteRange(acc, range.start, range.end);
+      return deleteRangeFromClips(acc, range.start, range.end);
     }, snapshot.clips);
     return withClearedMarkers(snapshot, { clips });
   }

@@ -21,7 +21,9 @@ import {
 import {
   applyActionToSnapshot,
   actionChangesTimelineStructure,
+  deleteRangeFromClips,
   EditSnapshot,
+  splitClipsAtTime,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
 import { buildTranscriptContext } from './timelineUtils';
@@ -441,38 +443,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   splitClipAtTime: (timelineTime) => {
     const { clips } = get();
-    const schedule = buildClipSchedule(clips);
-
-    // Find which clip contains this timeline time
-    let targetEntry = null;
-    for (const entry of schedule) {
-      if (timelineTime > entry.timelineStart && timelineTime < entry.timelineEnd) {
-        targetEntry = entry;
-        break;
-      }
-    }
-    if (!targetEntry) return;
+    const newClips = splitClipsAtTime(clips, timelineTime);
+    if (newClips === clips) return;
 
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-
-    // Compute split point in source
-    const offsetInTimeline = timelineTime - targetEntry.timelineStart;
-    const splitSourceOffset = offsetInTimeline * targetEntry.speed;
-
-    const clip = clips.find(c => c.id === targetEntry!.clipId);
-    if (!clip) return;
-
-    const firstDuration = splitSourceOffset;
-    const secondStart = clip.sourceStart + splitSourceOffset;
-    const secondDuration = clip.sourceDuration - splitSourceOffset;
-
-    if (firstDuration < 0.05 || secondDuration < 0.05) return; // too small to split
-
-    const firstClip: VideoClip = { ...clip, sourceDuration: firstDuration };
-    const secondClip: VideoClip = { ...clip, id: uuidv4(), sourceStart: secondStart, sourceDuration: secondDuration };
-
-    const idx = clips.findIndex(c => c.id === clip.id);
-    const newClips = [...clips.slice(0, idx), firstClip, secondClip, ...clips.slice(idx + 1)];
 
     set(state => ({
       history: [...state.history, snap],
@@ -487,48 +461,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   deleteRangeAtTime: (startTime, endTime) => {
     const { clips } = get();
-    const schedule = buildClipSchedule(clips);
+    const newClips = deleteRangeFromClips(clips, startTime, endTime);
+    if (newClips === clips) return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-
-    const newClips: VideoClip[] = [];
-    for (const entry of schedule) {
-      const clip = clips.find(c => c.id === entry.clipId)!;
-      const tStart = entry.timelineStart;
-      const tEnd = entry.timelineEnd;
-      const speed = entry.speed;
-
-      if (tEnd <= startTime || tStart >= endTime) {
-        // Entirely outside the delete range — keep as-is
-        newClips.push(clip);
-      } else if (tStart >= startTime && tEnd <= endTime) {
-        // Entirely inside the delete range — remove
-      } else if (tStart < startTime && tEnd > endTime) {
-        // Straddles both boundaries — keep before and after portions
-        const firstDuration = (startTime - tStart) * speed;
-        const secondOffset = (endTime - tStart) * speed;
-        const secondDuration = clip.sourceDuration - secondOffset;
-        if (firstDuration >= 0.05) {
-          newClips.push({ ...clip, sourceDuration: firstDuration });
-        }
-        if (secondDuration >= 0.05) {
-          newClips.push({ ...clip, id: uuidv4(), sourceStart: clip.sourceStart + secondOffset, sourceDuration: secondDuration });
-        }
-      } else if (tStart < startTime) {
-        // Starts before range, ends inside — trim end
-        const newDuration = (startTime - tStart) * speed;
-        if (newDuration >= 0.05) {
-          newClips.push({ ...clip, sourceDuration: newDuration });
-        }
-      } else {
-        // Starts inside range, ends after — trim start
-        const trimOffset = (endTime - tStart) * speed;
-        const newSourceStart = clip.sourceStart + trimOffset;
-        const newDuration = clip.sourceDuration - trimOffset;
-        if (newDuration >= 0.05) {
-          newClips.push({ ...clip, id: uuidv4(), sourceStart: newSourceStart, sourceDuration: newDuration });
-        }
-      }
-    }
 
     set(state => ({
       history: [...state.history, snap],
