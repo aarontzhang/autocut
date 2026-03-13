@@ -64,17 +64,6 @@ export default function MediaPanel({
         {mediaLibrary.map((item, idx) => (
           <div
             key={item.id}
-            onClick={() => handleAppendItem(idx, item)}
-            role={!canAppendToTimeline || idx === 0 || item.duration <= 0 ? undefined : 'button'}
-            tabIndex={!canAppendToTimeline || idx === 0 || item.duration <= 0 ? -1 : 0}
-            onKeyDown={(event) => {
-              if (!canAppendToTimeline || idx === 0 || item.duration <= 0) return;
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault();
-                handleAppendItem(idx, item);
-              }
-            }}
-            title={idx === 0 ? 'Main source' : 'Add to timeline'}
             style={{
               flexShrink: 0,
               borderRadius: 7,
@@ -83,17 +72,6 @@ export default function MediaPanel({
               background: 'var(--bg-elevated)',
               padding: 0,
               textAlign: 'left',
-              cursor: !canAppendToTimeline || idx === 0 || item.duration <= 0 ? 'default' : 'pointer',
-              transition: 'transform 0.12s ease, border-color 0.12s ease, background 0.12s ease',
-            }}
-            onMouseEnter={e => {
-              if (!canAppendToTimeline || idx === 0 || item.duration <= 0) return;
-              e.currentTarget.style.borderColor = 'rgba(90, 176, 255, 0.45)';
-              e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.borderColor = 'var(--border-mid)';
-              e.currentTarget.style.background = 'var(--bg-elevated)';
             }}
           >
             <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', position: 'relative', overflow: 'hidden' }}>
@@ -113,25 +91,33 @@ export default function MediaPanel({
                   {formatTimeShort(item.duration)}
                 </div>
               )}
-              {idx > 0 && (
-                <div style={{
-                  position: 'absolute',
-                  top: 6,
-                  right: 6,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: 24,
-                  height: 24,
-                  borderRadius: 999,
-                  background: 'rgba(0,0,0,0.64)',
-                  border: '1px solid rgba(255,255,255,0.14)',
-                  color: '#fff',
-                  fontSize: 16,
-                  lineHeight: 1,
-                }}>
+              {idx > 0 && canAppendToTimeline && item.duration > 0 && (
+                <button
+                  type="button"
+                  aria-label={`Add ${item.name} to timeline`}
+                  title="Add to timeline"
+                  onClick={() => handleAppendItem(idx, item)}
+                  style={{
+                    position: 'absolute',
+                    top: 6,
+                    right: 6,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 24,
+                    height: 24,
+                    padding: 0,
+                    borderRadius: 999,
+                    background: 'rgba(0,0,0,0.64)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: '#fff',
+                    fontSize: 16,
+                    lineHeight: 1,
+                    cursor: 'pointer',
+                  }}
+                >
                   +
-                </div>
+                </button>
               )}
             </div>
             <div style={{ padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -140,35 +126,9 @@ export default function MediaPanel({
                   {item.name}
                 </p>
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)' }}>
-                  {item.duration > 0 ? formatTimeShort(item.duration) : '—'}{idx === 0 ? ' · main' : ' · click to add'}
+                  {item.duration > 0 ? formatTimeShort(item.duration) : '—'}{idx === 0 ? ' · main' : ''}
                 </p>
               </div>
-              {idx > 0 && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleAppendItem(idx, item);
-                  }}
-                  title="Append to timeline"
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 4,
-                    padding: '4px 8px', borderRadius: 5,
-                    border: '1px solid var(--border-mid)',
-                    background: 'rgba(255,255,255,0.05)', cursor: 'pointer',
-                    fontSize: 11, color: 'var(--fg-secondary)', flexShrink: 0,
-                    transition: 'background 0.15s',
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="5" y1="12" x2="19" y2="12"/>
-                    <polyline points="12 5 19 12 12 19"/>
-                  </svg>
-                  Append
-                </button>
-              )}
             </div>
           </div>
         ))}
