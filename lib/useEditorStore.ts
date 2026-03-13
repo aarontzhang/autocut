@@ -83,6 +83,16 @@ function normalizeCaptionSourceId(caption: CaptionEntry): CaptionEntry {
   };
 }
 
+function collectSourceIds(items: Array<{ sourceId?: string | null }>): Set<string> {
+  return new Set(items.map((item) => normalizeSourceId(item.sourceId) ?? MAIN_SOURCE_ID));
+}
+
+function sourceCoverageIncludesAll(sourceIds: Set<string>, expectedIds: Set<string>): boolean {
+  if (expectedIds.size === 0) return true;
+  if (sourceIds.size === 0) return false;
+  return [...expectedIds].every((sourceId) => sourceIds.has(sourceId));
+}
+
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   silenceRemoval: {
     paddingSeconds: 0.12,
@@ -832,9 +842,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           }))
       : null;
     const persistedTranscript = typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null;
-    const backgroundTranscript = rawTranscriptCaptions && rawTranscriptCaptions.length > 0
-      ? buildTranscriptContext(clips, rawTranscriptCaptions)
-      : persistedTranscript;
+    const clipSourceIds = collectSourceIds(clips);
+    const transcriptSourceIds = collectSourceIds(rawTranscriptCaptions ?? []);
+    const frameSourceIds = collectSourceIds(persistedVideoFrames ?? []);
+    const transcriptCoverageComplete = rawTranscriptCaptions && rawTranscriptCaptions.length > 0
+      ? sourceCoverageIncludesAll(transcriptSourceIds, clipSourceIds)
+      : clipSourceIds.size <= 1 && !!persistedTranscript;
+    const frameCoverageComplete = sourceCoverageIncludesAll(frameSourceIds, clipSourceIds);
+    const usableRawTranscriptCaptions = transcriptCoverageComplete ? rawTranscriptCaptions : null;
+    const usableVideoFrames = frameCoverageComplete ? persistedVideoFrames : null;
+    const backgroundTranscript = usableRawTranscriptCaptions && usableRawTranscriptCaptions.length > 0
+      ? buildTranscriptContext(clips, usableRawTranscriptCaptions)
+      : transcriptCoverageComplete
+        ? persistedTranscript
+        : null;
     const transcriptStatus = backgroundTranscript
       ? 'done'
       : editState.transcriptStatus === 'error'
@@ -894,9 +915,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ffmpegJob: { status: 'idle' }, zoom: 1, selectedItem: null, taggedMarkerIds: [],
       aiSettings: mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined),
       history: [], future: [],
-      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions,
-      videoFrames: persistedVideoFrames && persistedVideoFrames.length > 0 ? persistedVideoFrames : null,
-      videoFramesFresh: persistedVideoFrames ? persistedVideoFrames.length > 0 : true,
+      backgroundTranscript, transcriptStatus: transcriptStatus as TranscriptStatus, transcriptProgress: null, rawTranscriptCaptions: usableRawTranscriptCaptions,
+      videoFrames: usableVideoFrames && usableVideoFrames.length > 0 ? usableVideoFrames : null,
+      videoFramesFresh: usableVideoFrames ? usableVideoFrames.length > 0 : false,
       visualSearchSession: null,
       currentProjectId: projectId, storagePath, uploadProgress: null, saveStatus: 'idle',
       mediaLibrary,
@@ -1198,7 +1219,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceId: resolvedSourceId,
       sourcePath,
     }];
-    set({ history: [...get().history, snap], future: [], clips: [...clips, newClip], mediaLibrary: newLibrary, videoFramesFresh: false });
+    set({
+      history: [...get().history, snap],
+      future: [],
+      clips: [...clips, newClip],
+      mediaLibrary: newLibrary,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle',
+      transcriptProgress: null,
+      rawTranscriptCaptions: null,
+      videoFramesFresh: false,
+    });
     return clipId;
   },
 
@@ -1270,7 +1301,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceId: resolvedSourceId,
       sourcePath,
     }];
-    set({ history: [...get().history, snap], future: [], clips: newClips, mediaLibrary: newLibrary, videoFramesFresh: false });
+    set({
+      history: [...get().history, snap],
+      future: [],
+      clips: newClips,
+      mediaLibrary: newLibrary,
+      backgroundTranscript: null,
+      transcriptStatus: 'idle',
+      transcriptProgress: null,
+      rawTranscriptCaptions: null,
+      videoFramesFresh: false,
+    });
     return clipId;
   },
 

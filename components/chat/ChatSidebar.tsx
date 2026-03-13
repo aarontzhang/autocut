@@ -7,7 +7,7 @@ import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourc
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
-import { buildClipSchedule } from '@/lib/playbackEngine';
+import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
@@ -454,17 +454,6 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
   }
 }
 
-function getReviewMessage(message: string, action?: EditAction | null): string {
-  if (action?.type === 'delete_ranges' && action.ranges) {
-    const count = action.ranges.length;
-    return `Prepared ${count} cut ${count === 1 ? 'range' : 'ranges'} for review.`;
-  }
-  if (action?.type === 'delete_range') {
-    return 'Prepared 1 cut range for review.';
-  }
-  return message.trim() || getAssistantFallbackMessage(action);
-}
-
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
   return action?.type === 'add_marker'
     || action?.type === 'add_markers'
@@ -596,35 +585,6 @@ function resolveReviewStep(
       message: action.message,
     },
     sourceRanges: remainingSourceRanges,
-  };
-}
-
-function buildReviewSelectionPreview(
-  baseSnapshot: EditSnapshot,
-  reviewSteps: EditAction[],
-  selectedSteps: boolean[],
-): {
-  snapshot: EditSnapshot;
-  sourceRanges: SourceRangeRef[];
-  resolvedActions: EditAction[];
-} {
-  let draft = baseSnapshot;
-  let committedSourceRanges: SourceRangeRef[] = [];
-  const resolvedActions: EditAction[] = [];
-
-  reviewSteps.forEach((step, index) => {
-    if (!selectedSteps[index]) return;
-    const resolvedStep = resolveReviewStep(baseSnapshot, draft, step, committedSourceRanges);
-    if (!resolvedStep) return;
-    draft = applyActionToSnapshot(draft, resolvedStep.action);
-    committedSourceRanges = [...committedSourceRanges, ...resolvedStep.sourceRanges];
-    resolvedActions.push(resolvedStep.action);
-  });
-
-  return {
-    snapshot: draft,
-    sourceRanges: committedSourceRanges,
-    resolvedActions,
   };
 }
 
@@ -1058,6 +1018,99 @@ function ActionDetails({ action }: { action: EditAction }) {
   return null;
 }
 
+type TimelineFrameSample = {
+  index: number;
+  timelineTime: number;
+  sourceTime: number;
+  sourceId: string;
+};
+
+async function extractTimelineFramesFromSources(
+  input: {
+    clips: ReturnType<typeof useEditorStore.getState>['clips'];
+    mediaLibrary: ReturnType<typeof useEditorStore.getState>['mediaLibrary'];
+    videoData: Uint8Array | null;
+    videoFile: File | null;
+    videoUrl: string;
+    videoDuration: number;
+    timelineTimestamps: number[];
+    kind: IndexedVideoFrame['kind'];
+    onProgress?: (progress: { completed: number; total: number }) => void;
+  },
+): Promise<IndexedVideoFrame[]> {
+  if (input.timelineTimestamps.length === 0) return [];
+
+  const schedule = buildClipSchedule(input.clips);
+  const samples = input.timelineTimestamps
+    .map((timelineTime, index) => {
+      const resolved = timelineTimeToSource(schedule, timelineTime);
+      if (!resolved) return null;
+      return {
+        index,
+        timelineTime,
+        sourceTime: resolved.sourceTime,
+        sourceId: resolved.entry.sourceId ?? MAIN_SOURCE_ID,
+      } satisfies TimelineFrameSample;
+    })
+    .filter((sample): sample is TimelineFrameSample => !!sample);
+
+  if (samples.length === 0) return [];
+
+  const availableSources = resolveMainTrackSources({
+    clips: input.clips,
+    mediaLibrary: input.mediaLibrary,
+    videoData: input.videoData,
+    videoFile: input.videoFile,
+    videoUrl: input.videoUrl,
+    videoDuration: input.videoDuration,
+  });
+  const sourceMap = new Map(availableSources.map((entry) => [entry.sourceId, entry]));
+  const samplesBySource = new Map<string, TimelineFrameSample[]>();
+
+  for (const sample of samples) {
+    const group = samplesBySource.get(sample.sourceId) ?? [];
+    group.push(sample);
+    samplesBySource.set(sample.sourceId, group);
+  }
+
+  const frames = new Array<IndexedVideoFrame | null>(samples.length).fill(null);
+  let completed = 0;
+  input.onProgress?.({ completed: 0, total: samples.length });
+
+  for (const [sourceId, sourceSamples] of samplesBySource) {
+    const sourceEntry = sourceMap.get(sourceId);
+    if (!sourceEntry?.source) {
+      throw new Error(`Missing media source for frame extraction (${sourceId}).`);
+    }
+
+    const images = await extractVideoFrames(
+      sourceEntry.source,
+      sourceSamples.map((sample) => sample.sourceTime),
+      {
+        concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
+        onProgress: ({ completed: sourceCompleted }) => {
+          input.onProgress?.({ completed: completed + sourceCompleted, total: samples.length });
+        },
+      },
+    );
+
+    sourceSamples.forEach((sample, imageIndex) => {
+      frames[sample.index] = {
+        image: images[imageIndex],
+        timelineTime: sample.timelineTime,
+        sourceTime: sample.sourceTime,
+        sourceId: sample.sourceId,
+        kind: input.kind,
+      };
+    });
+
+    completed += sourceSamples.length;
+    input.onProgress?.({ completed, total: samples.length });
+  }
+
+  return frames.filter((frame): frame is IndexedVideoFrame => !!frame);
+}
+
 // ─── Markdown renderer ─────────────────────────────────────────────────────────
 function renderMarkdown(text: string): React.ReactNode {
   const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
@@ -1157,7 +1210,13 @@ function AssistantMessage({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewBaseSnapshot, setReviewBaseSnapshot] = useState<EditSnapshot | null>(null);
-  const [selectedReviewSteps, setSelectedReviewSteps] = useState<boolean[]>([]);
+  const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [acceptedSteps, setAcceptedSteps] = useState(0);
+  const [skippedSteps, setSkippedSteps] = useState(0);
+  const [reviewResult, setReviewResult] = useState<string | null>(null);
+  const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<SourceRangeRef[]>([]);
+  const [acceptedReviewActions, setAcceptedReviewActions] = useState<EditAction[]>([]);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
@@ -1168,19 +1227,16 @@ function AssistantMessage({
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
-  const reviewSelection = useMemo(() => (
-    reviewBaseSnapshot && action
-      ? buildReviewSelectionPreview(reviewBaseSnapshot, reviewSteps, selectedReviewSteps)
-      : null
-  ), [action, reviewBaseSnapshot, reviewSteps, selectedReviewSteps]);
-  const reviewItems = useMemo(() => (
-    reviewSteps.map((step, index) => ({
-      id: `${msg.id}-review-step-${index}`,
-      index,
-      selected: selectedReviewSteps[index] ?? false,
-      meta: getActionMeta(step),
-    }))
-  ), [msg.id, reviewSteps, selectedReviewSteps]);
+  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
+  const resolvedReviewStep = useMemo(() => {
+    if (!reviewInProgress || !reviewBaseSnapshot || !reviewDraft) return null;
+    const step = reviewSteps[reviewIndex];
+    if (!step) return null;
+    return resolveReviewStep(reviewBaseSnapshot, reviewDraft, step, acceptedSourceRanges);
+  }, [acceptedSourceRanges, reviewBaseSnapshot, reviewDraft, reviewInProgress, reviewIndex, reviewSteps]);
+  const activeReviewAction = reviewInProgress
+    ? (resolvedReviewStep?.action ?? reviewSteps[reviewIndex] ?? null)
+    : action ?? null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const actionPreviouslyApplied = useMemo(() => (
     !!action && appliedActions.some(record => actionsMatch(record.action, action))
@@ -1189,15 +1245,7 @@ function AssistantMessage({
     || msg.actionStatus === 'rejected'
     || msg.autoApplied
     || actionPreviouslyApplied;
-  const displayAction = useMemo(() => {
-    if (!action) return null;
-    if (!reviewSelection || reviewSelection.resolvedActions.length === 0) return action;
-    return combineResolvedReviewActions(action, reviewSelection.resolvedActions) ?? action;
-  }, [action, reviewSelection]);
-  const meta = displayAction ? getActionMeta(displayAction) : null;
-  const selectedReviewCount = reviewItems.filter((item) => item.selected).length;
-  const resolvedReviewCount = reviewSelection?.resolvedActions.length ?? 0;
-  const multipleReviewOptions = reviewItems.length > 1;
+  const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const actionResultText = msg.actionResult ?? (
     msg.actionStatus === 'rejected'
       ? 'No changes applied.'
@@ -1215,90 +1263,131 @@ function AssistantMessage({
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
   }, [actionPreviouslyApplied, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
-  useEffect(() => {
+  const finalizeReview = useCallback((
+    draft: EditSnapshot,
+    accepted: number,
+    skipped: number,
+    committedSourceRanges: SourceRangeRef[],
+    committedReviewActions: EditAction[],
+  ) => {
+    clearPreviewSnapshot(msg.id);
+    if (accepted > 0) {
+      commitPreviewSnapshot(draft);
+      if (action) {
+        const committedAction = combineResolvedReviewActions(action, committedReviewActions) ?? action;
+        recordAppliedAction(committedAction, committedAction.message, { sourceRanges: committedSourceRanges });
+      }
+    }
+    const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
+    updateMessage(msg.id, {
+      actionStatus: 'completed',
+      actionResult: result,
+    });
+    setReviewBaseSnapshot(null);
+    setReviewDraft(null);
+    setReviewIndex(reviewSteps.length);
+    setAcceptedSteps(accepted);
+    setSkippedSteps(skipped);
+    setAcceptedSourceRanges([]);
+    setAcceptedReviewActions([]);
+    setReviewResult(result);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
+
+  const startReview = useCallback(() => {
     if (
       !action
       || action.type === 'none'
       || action.type === 'transcribe_request'
       || action.type === 'update_ai_settings'
-      || actionResolved
-    ) {
-      setReviewBaseSnapshot(null);
-      setSelectedReviewSteps([]);
-      return;
-    }
-    if (anotherReviewActive) return;
-    setReviewBaseSnapshot((current) => {
-      if (current) return current;
-      const state = useEditorStore.getState();
-      return {
-        clips: state.clips,
-        captions: state.captions,
-        transitions: state.transitions,
-        markers: state.markers,
-        textOverlays: state.textOverlays,
-      };
-    });
-    setSelectedReviewSteps((current) => (
-      current.length === reviewSteps.length && current.some(Boolean)
-        ? current
-        : reviewSteps.map(() => true)
-    ));
-  }, [action, actionResolved, anotherReviewActive, reviewSteps]);
-
-  useEffect(() => {
-    if (!action || !reviewBaseSnapshot || actionResolved || anotherReviewActive) return;
-    if (!reviewSelection || reviewSelection.resolvedActions.length === 0) {
-      clearPreviewSnapshot(msg.id);
-      return;
-    }
-    setPreviewSnapshot(msg.id, reviewSelection.snapshot);
-    const reviewSeekTime = getReviewSeekTime(reviewBaseSnapshot, reviewSelection.resolvedActions[0]);
+      || anotherReviewActive
+    ) return;
+    const state = useEditorStore.getState();
+    const baseSnapshot: EditSnapshot = {
+      clips: state.clips,
+      captions: state.captions,
+      transitions: state.transitions,
+      markers: state.markers,
+      textOverlays: state.textOverlays,
+    };
+    const firstStep = reviewSteps[0];
+    if (!firstStep) return;
+    const firstResolvedStep = resolveReviewStep(baseSnapshot, baseSnapshot, firstStep, []);
+    if (!firstResolvedStep) return;
+    setReviewBaseSnapshot(baseSnapshot);
+    setReviewDraft(baseSnapshot);
+    setReviewIndex(0);
+    setAcceptedSteps(0);
+    setSkippedSteps(0);
+    setAcceptedSourceRanges([]);
+    setAcceptedReviewActions([]);
+    setReviewResult(null);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstResolvedStep.action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [
-    action,
-    actionResolved,
-    anotherReviewActive,
-    clearPreviewSnapshot,
-    msg.id,
-    requestSeek,
-    reviewBaseSnapshot,
-    reviewSelection,
-    setPreviewSnapshot,
-  ]);
+  }, [action, anotherReviewActive, msg.id, requestSeek, reviewSteps, setPreviewSnapshot]);
 
-  const handleToggleReviewStep = useCallback((index: number) => {
-    setSelectedReviewSteps((current) => current.map((selected, stepIndex) => (
-      stepIndex === index ? !selected : selected
-    )));
-  }, []);
+  const handleApplyStep = useCallback(() => {
+    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
+    const resolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, reviewSteps[reviewIndex], acceptedSourceRanges);
+    if (!resolvedStep) return;
+    const stepAction = resolvedStep.action;
+    const nextCommittedSourceRanges = [...acceptedSourceRanges, ...resolvedStep.sourceRanges];
+    const nextCommittedReviewActions = [...acceptedReviewActions, stepAction];
+    const nextDraft = applyActionToSnapshot(reviewDraft, stepAction);
+    const accepted = acceptedSteps + 1;
+    const nextIndex = reviewIndex + 1;
+    if (nextIndex >= reviewSteps.length) {
+      finalizeReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges, nextCommittedReviewActions);
+      return;
+    }
+    const nextStep = reviewSteps[nextIndex];
+    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, nextDraft, nextStep, nextCommittedSourceRanges);
+    if (!nextResolvedStep) {
+      finalizeReview(nextDraft, accepted, skippedSteps + 1, nextCommittedSourceRanges, nextCommittedReviewActions);
+      return;
+    }
+    setReviewDraft(nextDraft);
+    setReviewIndex(nextIndex);
+    setAcceptedSteps(accepted);
+    setAcceptedSourceRanges(nextCommittedSourceRanges);
+    setAcceptedReviewActions(nextCommittedReviewActions);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(nextDraft, nextResolvedStep.action);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [acceptedReviewActions, acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
 
-  const handleApplyReviewedChanges = useCallback(() => {
-    if (!action || !reviewSelection || reviewSelection.resolvedActions.length === 0) return;
-    const committedAction = combineResolvedReviewActions(action, reviewSelection.resolvedActions);
-    if (!committedAction) return;
+  const handleSkipStep = useCallback(() => {
+    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
+    const skipped = skippedSteps + 1;
+    const nextIndex = reviewIndex + 1;
+    if (nextIndex >= reviewSteps.length) {
+      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges, acceptedReviewActions);
+      return;
+    }
+    const nextStep = reviewSteps[nextIndex];
+    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, nextStep, acceptedSourceRanges);
+    if (!nextResolvedStep) {
+      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges, acceptedReviewActions);
+      return;
+    }
+    setReviewIndex(nextIndex);
+    setSkippedSteps(skipped);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextResolvedStep.action));
+    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextResolvedStep.action);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [acceptedReviewActions, acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+
+  const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
-    commitPreviewSnapshot(reviewSelection.snapshot);
-    recordAppliedAction(committedAction, committedAction.message, { sourceRanges: reviewSelection.sourceRanges });
-    updateMessage(msg.id, {
-      actionStatus: 'completed',
-      actionResult: reviewItems.length > 1
-        ? `Applied ${reviewSelection.resolvedActions.length} of ${reviewItems.length} changes.`
-        : 'Applied edit.',
-    });
     setReviewBaseSnapshot(null);
-    setSelectedReviewSteps([]);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewItems.length, reviewSelection, updateMessage]);
-
-  const handleRejectReview = useCallback(() => {
-    clearPreviewSnapshot(msg.id);
-    updateMessage(msg.id, {
-      actionStatus: 'rejected',
-      actionResult: 'No changes applied.',
-    });
-    setReviewBaseSnapshot(null);
-    setSelectedReviewSteps([]);
-  }, [clearPreviewSnapshot, msg.id, updateMessage]);
+    setReviewDraft(null);
+    setReviewIndex(0);
+    setAcceptedSteps(0);
+    setSkippedSteps(0);
+    setAcceptedSourceRanges([]);
+    setAcceptedReviewActions([]);
+    setReviewResult(null);
+  }, [clearPreviewSnapshot, msg.id]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -1376,6 +1465,7 @@ function AssistantMessage({
     applyStoredAction(action);
     recordAppliedAction(action, action.message);
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
+    setReviewResult('AI settings updated.');
   }, [action, applyStoredAction, msg.id, recordAppliedAction, updateMessage]);
 
   return (
@@ -1425,7 +1515,7 @@ function AssistantMessage({
           </div>
 
           {/* Details */}
-          <ActionDetails action={displayAction!} />
+          <ActionDetails action={activeReviewAction!} />
 
           {/* Buttons */}
           {actionResolved ? (
@@ -1441,81 +1531,25 @@ function AssistantMessage({
                 {actionResultText ?? 'Completed.'}
               </span>
             </div>
+          ) : reviewResult ? (
+            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+              <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+                {reviewResult}
+              </span>
+            </div>
           ) : (
             <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              {multipleReviewOptions && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
+              {reviewSteps.length > 1 && activeReviewAction && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                  {selectedReviewCount > 0
-                    ? `Previewing ${selectedReviewCount} selected change${selectedReviewCount === 1 ? '' : 's'}.`
-                    : `Select which of the ${reviewItems.length} proposed changes you want to apply.`}
+                  {reviewInProgress
+                    ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
+                    : `Review ${reviewSteps.length} proposed changes.`}
                 </p>
               )}
-              {anotherReviewActive && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
+              {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   Finish the active review before opening another one.
                 </p>
-              )}
-              {multipleReviewOptions && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
-                <div style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                  marginBottom: 10,
-                  maxHeight: 156,
-                  overflowY: 'auto',
-                  paddingRight: 2,
-                }}>
-                  {reviewItems.map((item) => {
-                    return (
-                      <button
-                        type="button"
-                        key={item.id}
-                        onClick={() => handleToggleReviewStep(item.index)}
-                        disabled={anotherReviewActive}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: 8,
-                          padding: '7px 8px',
-                          borderRadius: 6,
-                          border: '1px solid rgba(255,255,255,0.06)',
-                          background: item.selected ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
-                          cursor: anotherReviewActive ? 'default' : 'pointer',
-                          textAlign: 'left',
-                        }}
-                      >
-                        <span style={{
-                          width: 16,
-                          height: 16,
-                          marginTop: 1,
-                          borderRadius: 4,
-                          border: `1px solid ${item.selected ? 'var(--accent)' : 'rgba(255,255,255,0.16)'}`,
-                          background: item.selected ? 'var(--accent)' : 'rgba(255,255,255,0.02)',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                        }}>
-                          {item.selected && (
-                            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#000" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M2.5 6.3 4.8 8.6 9.5 3.7" />
-                            </svg>
-                          )}
-                        </span>
-                        <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-                            {item.meta.label}
-                          </span>
-                          {item.meta.summary && (
-                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-                              {item.meta.summary}
-                            </span>
-                          )}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
               )}
               {action?.type === 'update_ai_settings' ? (
                 <button
@@ -1557,29 +1591,27 @@ function AssistantMessage({
                     {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
                   </button>
                 </>
-              ) : (
+              ) : reviewInProgress ? (
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button
-                    onClick={handleApplyReviewedChanges}
-                    disabled={anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0}
+                    onClick={handleApplyStep}
                     style={{
                       flex: 1,
                       padding: '5px 0',
                       fontSize: 12,
                       fontWeight: 500,
-                      background: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                      background: 'var(--accent)',
                       border: 'none',
-                      color: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'var(--fg-muted)' : '#000',
+                      color: '#000',
                       borderRadius: 4,
-                      cursor: anotherReviewActive || selectedReviewCount === 0 || resolvedReviewCount === 0 ? 'default' : 'pointer',
+                      cursor: 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
-                    {multipleReviewOptions ? 'Apply selected' : 'Apply'}
+                    Apply
                   </button>
                   <button
-                    onClick={handleRejectReview}
-                    disabled={anotherReviewActive}
+                    onClick={handleSkipStep}
                     style={{
                       flex: 1,
                       padding: '5px 0',
@@ -1589,13 +1621,44 @@ function AssistantMessage({
                       border: '1px solid rgba(255,255,255,0.08)',
                       color: 'var(--fg-secondary)',
                       borderRadius: 4,
-                      cursor: anotherReviewActive ? 'default' : 'pointer',
+                      cursor: 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
-                    Reject
+                    Skip
+                  </button>
+                  <button
+                    onClick={cancelReview}
+                    style={{
+                      padding: '5px 10px',
+                      fontSize: 12,
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--fg-muted)',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-serif)',
+                    }}
+                  >
+                    Cancel
                   </button>
                 </div>
+              ) : (
+                <button
+                  onClick={startReview}
+                  disabled={anotherReviewActive}
+                  style={{
+                    width: '100%', padding: '5px 0',
+                    fontSize: 12, fontWeight: 500,
+                    background: anotherReviewActive ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                    border: 'none',
+                    color: anotherReviewActive ? 'var(--fg-muted)' : '#000',
+                    borderRadius: 4, cursor: anotherReviewActive ? 'default' : 'pointer',
+                    fontFamily: 'var(--font-serif)',
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {reviewSteps.length > 1 ? 'Start review' : 'Preview edit'}
+                </button>
               )}
             </div>
           )}
@@ -1928,11 +1991,12 @@ export default function ChatSidebar() {
 
   const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
     if (videoFrames !== null && !force) return videoFrames;
-    const source = videoData ?? videoFile ?? videoUrl;
-    if (!source || videoDuration <= 0) return videoFrames ?? [];
+    const state = useEditorStore.getState();
+    const currentClips = state.clips;
+    const currentDuration = getTimelineDuration(currentClips);
+    if (currentDuration <= 0) return videoFrames ?? [];
     try {
-      const currentDuration = useEditorStore.getState().videoDuration;
-      const { overviewIntervalSeconds, maxOverviewFrames } = useEditorStore.getState().aiSettings.frameInspection;
+      const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
       const preferredInterval = Math.max(0.1, overviewIntervalSeconds);
       const frameTarget = getOverviewFrameTarget(currentDuration, preferredInterval, maxOverviewFrames);
       const interval = currentDuration <= preferredInterval * maxOverviewFrames
@@ -1954,8 +2018,15 @@ export default function ChatSidebar() {
         label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
         etaSeconds: estimateFrameExtractionSeconds(sourceTimestamps.length),
       });
-      const images = await extractVideoFrames(source, sourceTimestamps, {
-        concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
+      const frames = await extractTimelineFramesFromSources({
+        clips: currentClips,
+        mediaLibrary,
+        videoData,
+        videoFile,
+        videoUrl,
+        videoDuration: state.videoDuration,
+        timelineTimestamps: sourceTimestamps,
+        kind: 'overview',
         onProgress: ({ completed, total }) => {
           const now = performance.now();
           if (completed < total && now - lastProgressPaintAt < 120) return;
@@ -1974,13 +2045,6 @@ export default function ChatSidebar() {
           });
         },
       });
-      const frames = images.map((image, index) => ({
-        image,
-        timelineTime: sourceTimestamps[index],
-        sourceTime: sourceTimestamps[index],
-        sourceId: MAIN_SOURCE_ID,
-        kind: 'overview' as const,
-      }));
       setVideoFrames(frames);
       setFrameIndexingProgress({
         stage: 'extracting_frames',
@@ -1994,7 +2058,7 @@ export default function ChatSidebar() {
       setFrameIndexingProgress(null);
       return videoFrames ?? [];
     }
-  }, [videoData, videoDuration, videoFile, videoFrames, videoUrl, setVideoFrames]);
+  }, [mediaLibrary, videoData, videoFile, videoFrames, videoUrl, setVideoFrames]);
 
   const ensureFrameDescriptions = useCallback(async (
     frames: IndexedVideoFrame[],
@@ -2117,7 +2181,6 @@ export default function ChatSidebar() {
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
-      const source = freshState.videoData ?? freshState.videoFile ?? freshState.videoUrl;
 
       const { message = '', action, visualSearch } = await postChatRequest({
         messages: history,
@@ -2167,7 +2230,7 @@ export default function ChatSidebar() {
       if (!markerAction) {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
-      const assistantMessage = getReviewMessage(message, action);
+      const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
 
       if (action?.type === 'request_frames' && action.frameRequest) {
         const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
@@ -2181,15 +2244,17 @@ export default function ChatSidebar() {
         setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
         const interval = (req.endTime - req.startTime) / count;
         const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
-        const sourceTimestamps = timelineTimestamps.map(t => timelineToSourceTime(currentClips, t));
-        if (!source) throw new Error('No video source available for frame extraction');
-        const images = await extractVideoFrames(source, sourceTimestamps);
-        currentFrames = images.map((image, index) => ({
-          image,
-          timelineTime: timelineTimestamps[index],
-          sourceTime: sourceTimestamps[index],
-          sourceId: MAIN_SOURCE_ID,
-          kind: 'dense' as const,
+        currentFrames = (await extractTimelineFramesFromSources({
+          clips: currentClips,
+          mediaLibrary: freshState.mediaLibrary,
+          videoData: freshState.videoData,
+          videoFile: freshState.videoFile,
+          videoUrl: freshState.videoUrl,
+          videoDuration: freshState.videoDuration,
+          timelineTimestamps,
+          kind: 'dense',
+        })).map((frame) => ({
+          ...frame,
           rangeStart: req.startTime,
           rangeEnd: req.endTime,
         }));
