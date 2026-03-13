@@ -156,6 +156,8 @@ Example:
 - Ask a follow-up question only when the request is too vague, ambiguous, or under-specified to make a responsible edit.
 - Do not make the conversation artificially sequential. Some turns should be conversational, and some turns should immediately produce an action, depending on what the user asked right now.
 - Keep conversational replies concise but natural, not robotic.
+- If you emit an action and mention any explicit timestamp or time range in the prose above it, those times must exactly match the action JSON. Do not describe one range in prose and output a different range in <action>.
+- For single-range actions such as delete_range or request_frames, mention at most one explicit target range in prose, and make it the same final range you put in the action.
 
 ## Action block examples
 
@@ -854,6 +856,91 @@ function formatActionTime(seconds: number): string {
   const minutes = Math.floor(clamped / 60);
   const remainingSeconds = Math.floor(clamped % 60);
   return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+function parseAssistantTimeToken(token: string): number | null {
+  const normalized = token.trim().toLowerCase();
+  const mmss = normalized.match(/^(\d+):([0-5]\d)(?:\.(\d{1,3}))?$/);
+  if (mmss) {
+    const minutes = Number(mmss[1]);
+    const seconds = Number(mmss[2]);
+    const fractional = mmss[3] ? Number(`0.${mmss[3]}`) : 0;
+    const total = minutes * 60 + seconds + fractional;
+    return Number.isFinite(total) ? total : null;
+  }
+
+  const secondsOnly = normalized.match(/^(\d+(?:\.\d+)?)\s*seconds?$/);
+  if (secondsOnly) {
+    const total = Number(secondsOnly[1]);
+    return Number.isFinite(total) ? total : null;
+  }
+
+  return null;
+}
+
+function extractExplicitTimeRanges(message: string, videoDuration: number): Array<{ start: number; end: number }> {
+  const rangePattern = /\b(\d+:\d{2}(?:\.\d{1,3})?|\d+(?:\.\d+)?\s*seconds?)\b\s*(?:-|–|—|to|through|until)\s*\b(\d+:\d{2}(?:\.\d{1,3})?|\d+(?:\.\d+)?\s*seconds?)\b/gi;
+  const ranges: Array<{ start: number; end: number }> = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = rangePattern.exec(message)) !== null) {
+    const rawStart = parseAssistantTimeToken(match[1]);
+    const rawEnd = parseAssistantTimeToken(match[2]);
+    if (rawStart === null || rawEnd === null) continue;
+    const start = Math.max(0, Math.min(rawStart, videoDuration));
+    const end = Math.max(0, Math.min(rawEnd, videoDuration));
+    if (end <= start) continue;
+    ranges.push({ start, end });
+  }
+
+  return ranges;
+}
+
+function reconcileNarratedSingleRangeAction(
+  message: string,
+  action: EditAction | null,
+  videoDuration: number,
+): EditAction | null {
+  if (!action) return action;
+
+  const narratedRanges = extractExplicitTimeRanges(message, videoDuration);
+  if (narratedRanges.length === 0) return action;
+  const narrated = narratedRanges[narratedRanges.length - 1];
+
+  if (action.type === 'delete_range' && action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
+    const startDelta = Math.abs(action.deleteStartTime - narrated.start);
+    const endDelta = Math.abs(action.deleteEndTime - narrated.end);
+    if (startDelta <= 1 && endDelta <= 1) return action;
+
+    console.warn(
+      `[chat] Reconciled delete_range action from ${formatActionTime(action.deleteStartTime)}-${formatActionTime(action.deleteEndTime)} to narrated ${formatActionTime(narrated.start)}-${formatActionTime(narrated.end)}`,
+    );
+    return {
+      ...action,
+      deleteStartTime: narrated.start,
+      deleteEndTime: narrated.end,
+    };
+  }
+
+  if (action.type === 'request_frames' && action.frameRequest) {
+    const startDelta = Math.abs(action.frameRequest.startTime - narrated.start);
+    const endDelta = Math.abs(action.frameRequest.endTime - narrated.end);
+    if (startDelta <= 1 && endDelta <= 1) return action;
+
+    console.warn(
+      `[chat] Reconciled request_frames action from ${formatActionTime(action.frameRequest.startTime)}-${formatActionTime(action.frameRequest.endTime)} to narrated ${formatActionTime(narrated.start)}-${formatActionTime(narrated.end)}`,
+    );
+    return {
+      ...action,
+      frameRequest: {
+        ...action.frameRequest,
+        startTime: narrated.start,
+        endTime: narrated.end,
+      },
+    };
+  }
+
+  return action;
 }
 
 function extractMentionedMarkers(
@@ -1596,7 +1683,11 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
     const { message, parsedAction } = extractTrailingAction(rawText);
-    const action = validateEditAction(parsedAction, validationContext);
+    const action = reconcileNarratedSingleRangeAction(
+      message,
+      validateEditAction(parsedAction, validationContext),
+      validationContext.videoDuration,
+    );
     const fallbackMarkerAction = validateEditAction(
       buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, denseFrames, priorVisualSearch),
       validationContext,
