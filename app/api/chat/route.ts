@@ -400,6 +400,155 @@ function selectRelevantTranscriptLines(
   };
 }
 
+type TranscriptTimelineLine = {
+  raw: string;
+  startTime: number;
+  endTime: number;
+};
+
+function parsePreciseTimelineTimestamp(value: string): number | null {
+  const match = value.match(/^(\d+):([0-5]\d)\.(\d{3})$/);
+  if (!match) return null;
+  const minutes = Number(match[1]);
+  const seconds = Number(match[2]);
+  const milliseconds = Number(match[3]);
+  if (!Number.isFinite(minutes) || !Number.isFinite(seconds) || !Number.isFinite(milliseconds)) {
+    return null;
+  }
+  return minutes * 60 + seconds + milliseconds / 1000;
+}
+
+function parseTranscriptTimelineLines(transcript: string): TranscriptTimelineLine[] {
+  return transcript
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const match = line.match(/^\[([0-9]+:[0-5]\d\.\d{3})-([0-9]+:[0-5]\d\.\d{3})\]\s+(.+)$/);
+      if (!match) return [];
+      const startTime = parsePreciseTimelineTimestamp(match[1]);
+      const endTime = parsePreciseTimelineTimestamp(match[2]);
+      if (startTime === null || endTime === null || endTime <= startTime) return [];
+      return [{ raw: line, startTime, endTime }];
+    });
+}
+
+function selectTranscriptLinesForWindow(
+  transcript: string,
+  startTime: number,
+  endTime: number,
+  maxLines = MAX_TRANSCRIPT_LINES,
+): { text: string; truncated: boolean } {
+  const lines = parseTranscriptTimelineLines(transcript);
+  if (lines.length === 0 || endTime <= startTime) {
+    return { text: '', truncated: false };
+  }
+
+  const selected = new Set<number>();
+  lines.forEach((line, index) => {
+    if (line.endTime <= startTime || line.startTime >= endTime) return;
+    selected.add(index);
+    if (index > 0) selected.add(index - 1);
+    if (index < lines.length - 1) selected.add(index + 1);
+  });
+
+  const indexes = [...selected].sort((a, b) => a - b).slice(0, maxLines);
+  return {
+    text: indexes.map((index) => lines[index].raw).join('\n'),
+    truncated: indexes.length < selected.size || indexes.length < lines.length,
+  };
+}
+
+type TranscriptWindow = {
+  startTime: number;
+  endTime: number;
+  reason: string;
+};
+
+function resolveTranscriptWindow(params: {
+  latestUserMessage: string;
+  frames: IndexedVideoFrame[];
+  markers: Array<{
+    number?: number;
+    timelineTime?: number;
+    linkedRange?: { startTime?: number; endTime?: number } | null;
+  }>;
+}): TranscriptWindow | null {
+  const denseFrames = params.frames.filter((frame) => frame.kind === 'dense');
+  if (denseFrames.length > 0) {
+    const starts = denseFrames
+      .map((frame) => typeof frame.rangeStart === 'number' ? frame.rangeStart : frame.timelineTime)
+      .filter((value) => Number.isFinite(value));
+    const ends = denseFrames
+      .map((frame) => typeof frame.rangeEnd === 'number' ? frame.rangeEnd : frame.timelineTime)
+      .filter((value) => Number.isFinite(value));
+    if (starts.length > 0 && ends.length > 0) {
+      const startTime = Math.min(...starts);
+      const endTime = Math.max(...ends);
+      if (endTime > startTime) {
+        return { startTime, endTime, reason: 'dense-frame inspection window' };
+      }
+    }
+  }
+
+  const explicitMarkers = extractMentionedMarkers(params.latestUserMessage, params.markers);
+  if (explicitMarkers.length >= 2) {
+    const times = explicitMarkers
+      .map((marker) => marker.timelineTime)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .sort((a, b) => a - b);
+    if (times.length >= 2 && times[times.length - 1] > times[0]) {
+      return {
+        startTime: times[0],
+        endTime: times[times.length - 1],
+        reason: 'explicit marker span',
+      };
+    }
+  }
+
+  if (explicitMarkers.length === 1) {
+    const marker = explicitMarkers[0];
+    const rangeStart = marker.linkedRange?.startTime;
+    const rangeEnd = marker.linkedRange?.endTime;
+    if (
+      typeof rangeStart === 'number'
+      && typeof rangeEnd === 'number'
+      && Number.isFinite(rangeStart)
+      && Number.isFinite(rangeEnd)
+      && rangeEnd > rangeStart
+    ) {
+      return { startTime: rangeStart, endTime: rangeEnd, reason: 'explicit marker range' };
+    }
+    if (typeof marker.timelineTime === 'number' && Number.isFinite(marker.timelineTime)) {
+      return {
+        startTime: Math.max(0, marker.timelineTime - 0.75),
+        endTime: marker.timelineTime + 0.75,
+        reason: 'explicit marker focus',
+      };
+    }
+  }
+
+  const explicitTimes = extractExplicitTimesFromText(params.latestUserMessage)
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (explicitTimes.length >= 2 && explicitTimes[explicitTimes.length - 1] > explicitTimes[0]) {
+    return {
+      startTime: explicitTimes[0],
+      endTime: explicitTimes[explicitTimes.length - 1],
+      reason: 'explicit timestamp span',
+    };
+  }
+  if (explicitTimes.length === 1) {
+    return {
+      startTime: Math.max(0, explicitTimes[0] - 0.75),
+      endTime: explicitTimes[0] + 0.75,
+      reason: 'explicit timestamp focus',
+    };
+  }
+
+  return null;
+}
+
 function selectRelevantOverviewFrames(
   frames: IndexedVideoFrame[],
   messages: ChatTurn[],
@@ -1605,18 +1754,47 @@ Honor these defaults unless the user explicitly asks for something different in 
       }
     }
 
+    const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
     contextLines.push(...formatSilenceCandidatesContext(silenceCandidates));
     if (context?.transcript) {
-      const transcriptExcerpt = selectRelevantTranscriptLines(context.transcript, normalizedMessages);
-      const transcriptBlock = buildUntrustedDataBlock(
-        `video transcript${transcriptExcerpt.truncated ? ' excerpted for relevance' : ''}`,
-        transcriptExcerpt.text,
-      );
-      if (transcriptBlock) {
+      const availableMarkers = Array.isArray(context?.markers)
+        ? (context.markers as Array<{
+            number?: number;
+            timelineTime?: number;
+            linkedRange?: { startTime?: number; endTime?: number } | null;
+          }>)
+            .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
+        : [];
+      const transcriptWindow = resolveTranscriptWindow({
+        latestUserMessage: effectiveLatestUserMessage,
+        frames: requestFrames,
+        markers: availableMarkers,
+      });
+      const transcriptExcerpt = transcriptWindow
+        ? selectTranscriptLinesForWindow(
+            context.transcript,
+            transcriptWindow.startTime,
+            transcriptWindow.endTime,
+          )
+        : selectRelevantTranscriptLines(context.transcript, normalizedMessages);
+
+      if (transcriptWindow && !transcriptExcerpt.text.trim()) {
         contextLines.push(
-          `\nVideo transcript (spoken content only — do NOT copy as captions, use transcribe_request for that):\n${transcriptBlock}`
+          `\nNo transcript lines overlap the requested timeline window ${fmtSec(transcriptWindow.startTime)}-${fmtSec(transcriptWindow.endTime)} (${transcriptWindow.reason}).`
         );
+      } else {
+        const transcriptBlock = buildUntrustedDataBlock(
+          transcriptWindow
+            ? `video transcript near ${fmtSec(transcriptWindow.startTime)}-${fmtSec(transcriptWindow.endTime)} (${transcriptWindow.reason})${transcriptExcerpt.truncated ? ', excerpted' : ''}`
+            : `video transcript${transcriptExcerpt.truncated ? ' excerpted for relevance' : ''}`,
+          transcriptExcerpt.text,
+        );
+        if (transcriptBlock) {
+          contextLines.push(
+            `\nVideo transcript (spoken content only — do NOT copy as captions, use transcribe_request for that):\n${transcriptBlock}`
+          );
+        }
       }
     }
     contextLines.push(

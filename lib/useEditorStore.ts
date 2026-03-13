@@ -456,7 +456,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: state.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -473,7 +473,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: state.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -486,7 +486,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: null,
-      videoFramesFresh: s.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -505,7 +505,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
-      videoFramesFresh: state.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -515,7 +515,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: s.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -528,7 +528,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: s.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -541,7 +541,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       selectedItem: s.selectedItem?.type === 'marker' ? null : s.selectedItem,
-      videoFramesFresh: s.videoFramesFresh,
+      videoFramesFresh: false,
     }));
   },
 
@@ -605,7 +605,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       previewSnapshot: null,
       previewOwnerId: null,
-      videoFramesFresh: state.videoFramesFresh,
+      videoFramesFresh: actionChangesTimelineStructure(action) ? false : state.videoFramesFresh,
     }));
   },
 
