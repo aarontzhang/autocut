@@ -33,6 +33,7 @@ import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const client = new Anthropic();
+const MIN_CHAT_CLIP_DURATION_SECONDS = 0.05;
 
 const BASE_SYSTEM_PROMPT = `You are an AI-assisted cutting assistant inside a professional clip-based timeline editor. Help users find moments, tag them with markers, and propose cuts or transitions for review using natural language commands.
 
@@ -988,17 +989,19 @@ function extractMentionedMarkers(
 }
 
 function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
-  return clips.map((clip, index) => ({
-    id: `clip-${clip.index ?? index}`,
-    sourceId: clip.sourceId ?? MAIN_SOURCE_ID,
-    sourceStart: clip.sourceStart,
-    sourceDuration: clip.sourceDuration,
-    speed: clip.speed ?? 1,
-    volume: 1,
-    filter: null,
-    fadeIn: 0,
-    fadeOut: 0,
-  }));
+  return clips
+    .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS)
+    .map((clip, index) => ({
+      id: `clip-${clip.index ?? index}`,
+      sourceId: clip.sourceId ?? MAIN_SOURCE_ID,
+      sourceStart: clip.sourceStart,
+      sourceDuration: clip.sourceDuration,
+      speed: clip.speed ?? 1,
+      volume: 1,
+      filter: null,
+      fadeIn: 0,
+      fadeOut: 0,
+    }));
 }
 
 function formatVisualCandidateMessage(session: VisualSearchSession): string {
@@ -1302,12 +1305,12 @@ Honor these defaults unless the user explicitly asks for something different in 
       return `${m}:${sec.toString().padStart(2, '0')}`;
     };
 
+    const clipSummaries = ((context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[])
+      .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS);
     const contextLines = [
       `Video duration: ${(context?.videoDuration ?? 0).toFixed(2)} seconds`,
-      `Number of clips: ${context?.clipCount ?? 1}`,
+      `Number of clips: ${clipSummaries.length || context?.clipCount || 1}`,
     ];
-
-    const clipSummaries = (context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[];
     const projectionClips = toProjectionClips(clipSummaries);
     const priorVisualSearch = isVisualSearchSession(context?.visualSearchSession)
       ? context.visualSearchSession

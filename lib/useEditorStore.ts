@@ -23,6 +23,7 @@ import {
   actionChangesTimelineStructure,
   deleteRangeFromClips,
   EditSnapshot,
+  sanitizeTimelineClips,
   splitClipsAtTime,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
@@ -806,12 +807,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         .filter((item) => item.sourceId)
         .map((item) => [item.sourceId as string, item]),
     );
-    const hydratedClips = clips.map((clip) => {
+    const hydratedClips = sanitizeTimelineClips(clips.map((clip) => {
       const sourceItem = (clip.sourcePath ? mediaLibraryByPath.get(clip.sourcePath) : null)
         ?? mediaLibraryBySourceId.get(clip.sourceId);
       const sourceUrl = sourceItem?.url || (!clip.sourcePath && clip.sourceId === MAIN_SOURCE_ID ? videoUrl : clip.sourceUrl);
       return sourceUrl ? { ...clip, sourceUrl } : clip;
-    });
+    }));
     const mainLibraryItem = videoUrl
       ? [{
           id: uuidv4(),

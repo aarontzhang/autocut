@@ -20,6 +20,15 @@ export interface EditSnapshot {
 export const MIN_CLIP_DURATION_SECONDS = 0.05;
 export const CLIP_EDGE_SNAP_EPSILON_SECONDS = 0.08;
 
+export function sanitizeTimelineClips(clips: VideoClip[]): VideoClip[] {
+  return clips.filter((clip) => (
+    Number.isFinite(clip.sourceDuration)
+    && Number.isFinite(clip.speed)
+    && clip.speed > 0
+    && clip.sourceDuration >= MIN_CLIP_DURATION_SECONDS
+  ));
+}
+
 function snapTimeToClipEdge(time: number, timelineStart: number, timelineEnd: number) {
   if (Math.abs(time - timelineStart) <= CLIP_EDGE_SNAP_EPSILON_SECONDS) {
     return timelineStart;
@@ -51,15 +60,16 @@ function mergeDeleteRanges(ranges: Array<{ start: number; end: number }>) {
 }
 
 export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
-  const schedule = buildClipSchedule(clips);
+  const normalizedClips = sanitizeTimelineClips(clips);
+  const schedule = buildClipSchedule(normalizedClips);
   const targetEntry = schedule.find((entry) => {
     const snappedTime = snapTimeToClipEdge(timelineTime, entry.timelineStart, entry.timelineEnd);
     return snappedTime > entry.timelineStart && snappedTime < entry.timelineEnd;
   });
-  if (!targetEntry) return clips;
+  if (!targetEntry) return normalizedClips;
 
-  const clip = clips.find(item => item.id === targetEntry.clipId);
-  if (!clip) return clips;
+  const clip = normalizedClips.find(item => item.id === targetEntry.clipId);
+  if (!clip) return normalizedClips;
 
   const snappedTime = snapTimeToClipEdge(timelineTime, targetEntry.timelineStart, targetEntry.timelineEnd);
   const offsetInTimeline = snappedTime - targetEntry.timelineStart;
@@ -67,21 +77,22 @@ export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): Vide
   const firstDuration = splitSourceOffset;
   const secondStart = clip.sourceStart + splitSourceOffset;
   const secondDuration = clip.sourceDuration - splitSourceOffset;
-  if (firstDuration < MIN_CLIP_DURATION_SECONDS || secondDuration < MIN_CLIP_DURATION_SECONDS) return clips;
+  if (firstDuration < MIN_CLIP_DURATION_SECONDS || secondDuration < MIN_CLIP_DURATION_SECONDS) return normalizedClips;
 
   const firstClip: VideoClip = { ...clip, sourceDuration: firstDuration };
   const secondClip: VideoClip = { ...clip, id: uuidv4(), sourceStart: secondStart, sourceDuration: secondDuration };
-  const index = clips.findIndex(item => item.id === clip.id);
-  return [...clips.slice(0, index), firstClip, secondClip, ...clips.slice(index + 1)];
+  const index = normalizedClips.findIndex(item => item.id === clip.id);
+  return [...normalizedClips.slice(0, index), firstClip, secondClip, ...normalizedClips.slice(index + 1)];
 }
 
 export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endTime: number): VideoClip[] {
-  if (endTime <= startTime) return clips;
-  const schedule = buildClipSchedule(clips);
+  const normalizedClips = sanitizeTimelineClips(clips);
+  if (endTime <= startTime) return normalizedClips;
+  const schedule = buildClipSchedule(normalizedClips);
   const nextClips: VideoClip[] = [];
 
   for (const entry of schedule) {
-    const clip = clips.find(item => item.id === entry.clipId);
+    const clip = normalizedClips.find(item => item.id === entry.clipId);
     if (!clip) continue;
     const timelineStart = entry.timelineStart;
     const timelineEnd = entry.timelineEnd;
@@ -131,7 +142,7 @@ export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endT
     }
   }
 
-  return nextClips;
+  return sanitizeTimelineClips(nextClips);
 }
 
 export function actionChangesTimelineStructure(action: EditAction) {
