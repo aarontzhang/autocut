@@ -549,8 +549,7 @@ export default function LandingPage() {
             padding: 48px 20px;
             gap: 28px;
           }
-          .lp-feat-1 .lp-feat-graphic { order: -1; }
-          .lp-feat-2 .lp-feat-graphic { order: 1; }
+          .lp-feat .lp-feat-graphic { order: 1; }
           .lp-quote { padding: 48px 20px; }
           .lp-nav { padding: 0 20px; }
           .lp-footer { padding: 16px 20px; }
