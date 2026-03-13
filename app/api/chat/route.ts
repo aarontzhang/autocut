@@ -19,7 +19,7 @@ import {
   projectVerifiedRangesToProposal,
   retrieveVisualCandidates,
 } from '@/lib/visualRetrieval';
-import { mergeSourceRanges, subtractSourceRanges } from '@/lib/timelineUtils';
+import { formatTimePrecise, mergeSourceRanges, subtractSourceRanges } from '@/lib/timelineUtils';
 import { verifyCandidatesAgainstQuery } from '@/lib/server/visionIndexing.mjs';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import {
@@ -1448,11 +1448,7 @@ export async function POST(req: NextRequest) {
 
 Honor these defaults unless the user explicitly asks for something different in the current message.`;
 
-    const fmtSec = (s: number) => {
-      const m = Math.floor(s / 60);
-      const sec = Math.floor(s % 60);
-      return `${m}:${sec.toString().padStart(2, '0')}`;
-    };
+    const fmtSec = (s: number) => formatTimePrecise(s);
 
     const clipSummaries = ((context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[])
       .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS);
