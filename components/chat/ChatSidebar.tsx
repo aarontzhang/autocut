@@ -2478,7 +2478,6 @@ export default function ChatSidebar() {
   const framesReady = projectedOverviewFrames !== null && frameDescriptionsReady;
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
-  const isReindexingFrames = projectedOverviewFrames !== null && missingOverviewSources.length > 0;
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
     ? estimatedTranscriptEta * Math.max(0, transcriptProgress.total - transcriptProgress.completed) / transcriptProgress.total
@@ -2743,24 +2742,6 @@ export default function ChatSidebar() {
           </div>
         </div>
 
-        {/* Non-blocking re-index badge */}
-        {isReindexingFrames && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            padding: '3px 8px',
-            background: 'rgba(232,255,0,0.06)',
-            border: '1px solid rgba(232,255,0,0.15)',
-            borderRadius: 4,
-          }}>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }}>
-              <circle cx="12" cy="12" r="10" stroke="rgba(232,255,0,0.2)" strokeWidth="2.5"/>
-              <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"/>
-            </svg>
-            <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--font-serif)', opacity: 0.7 }}>
-              Updating frames…
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Messages */}

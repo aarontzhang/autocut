@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { APIError } from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { getPrimaryMediaAsset } from '@/lib/analysisJobs';
 import {
@@ -34,6 +34,7 @@ import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const client = new Anthropic();
 const MIN_CHAT_CLIP_DURATION_SECONDS = 0.05;
+const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL ?? 'claude-sonnet-4-6';
 
 const BASE_SYSTEM_PROMPT = `You are an AI-assisted cutting assistant inside a professional clip-based timeline editor. Help users find moments, tag them with markers, and propose cuts or transitions for review using natural language commands.
 
@@ -1406,6 +1407,42 @@ function filterCandidatesAgainstRemovedSourceRanges(
   });
 }
 
+function parseRetryAfterSeconds(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return Math.ceil(numeric);
+  }
+
+  const retryAt = Date.parse(value);
+  if (!Number.isFinite(retryAt)) return null;
+
+  const seconds = Math.ceil((retryAt - Date.now()) / 1000);
+  return seconds > 0 ? seconds : null;
+}
+
+function buildUpstreamErrorResponse(error: unknown) {
+  if (error instanceof APIError) {
+    const status = typeof error.status === 'number' ? error.status : 502;
+    const retryAfterSeconds = parseRetryAfterSeconds(error.headers?.get('retry-after'));
+    const requestId = error.requestID ?? error.headers?.get('request-id') ?? null;
+    const headers = retryAfterSeconds
+      ? { 'Retry-After': String(retryAfterSeconds) }
+      : undefined;
+
+    return NextResponse.json(
+      {
+        error: error.message,
+        retryAfterSeconds,
+        requestId,
+      },
+      { status, headers },
+    );
+  }
+
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const csrfError = enforceSameOrigin(req);
@@ -1865,7 +1902,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     ];
 
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: CHAT_MODEL,
       max_tokens: 2048,
       system: systemPrompt,
       messages: anthropicMessages,
@@ -1887,6 +1924,11 @@ Honor these defaults unless the user explicitly asks for something different in 
       action: fallbackMarkerAction ?? action,
     });
   } catch (err) {
+    const upstreamErrorResponse = buildUpstreamErrorResponse(err);
+    if (upstreamErrorResponse) {
+      console.error('[chat] upstream model request failed', err);
+      return upstreamErrorResponse;
+    }
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }
 }
