@@ -105,7 +105,7 @@ export interface ChatMessage {
   action?: EditAction;
   visualSearch?: VisualSearchSession | null;
   autoApplied?: boolean;
-  actionStatus?: 'pending' | 'completed';
+  actionStatus?: 'pending' | 'completed' | 'rejected';
   actionResult?: string;
 }
 

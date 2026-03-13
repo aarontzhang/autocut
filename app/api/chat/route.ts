@@ -288,7 +288,7 @@ type RichChatTurn = ChatTurn & {
   rawAction?: unknown;
   actionType?: EditAction['type'];
   actionMessage?: string;
-  actionStatus?: 'pending' | 'completed';
+  actionStatus?: 'pending' | 'completed' | 'rejected';
   actionResult?: string;
   autoApplied?: boolean;
 };
@@ -594,7 +594,7 @@ function normalizeRichChatTurns(value: unknown): RichChatTurn[] {
       const actionTypeValue = (entry as { actionType?: unknown }).actionType;
       const actionType = typeof actionTypeValue === 'string' ? actionTypeValue as EditAction['type'] : undefined;
       const actionStatusValue = (entry as { actionStatus?: unknown }).actionStatus;
-      const actionStatus = actionStatusValue === 'pending' || actionStatusValue === 'completed'
+      const actionStatus = actionStatusValue === 'pending' || actionStatusValue === 'completed' || actionStatusValue === 'rejected'
         ? actionStatusValue
         : undefined;
 
@@ -612,8 +612,8 @@ function normalizeRichChatTurns(value: unknown): RichChatTurn[] {
     .slice(-MAX_TRANSCRIPT_LINES);
 }
 
-function isActionCompleted(turn: RichChatTurn): boolean {
-  return turn.actionStatus === 'completed' || turn.autoApplied === true;
+function isActionResolved(turn: RichChatTurn): boolean {
+  return turn.actionStatus === 'completed' || turn.actionStatus === 'rejected' || turn.autoApplied === true;
 }
 
 function isLikelySilenceRequest(message: string): boolean {
@@ -670,7 +670,7 @@ type ConversationTaskState = {
   activeUserMessages: string[];
   carriesPriorContext: boolean;
   latestAssistantActionSummary: string | null;
-  latestAssistantActionCompleted: boolean;
+  latestAssistantActionState: 'applied' | 'rejected' | 'pending' | 'none';
 };
 
 function buildConversationTaskState(messages: RichChatTurn[]): ConversationTaskState | null {
@@ -701,7 +701,13 @@ function buildConversationTaskState(messages: RichChatTurn[]): ConversationTaskS
     activeUserMessages,
     carriesPriorContext: activeUserMessages.length > 1,
     latestAssistantActionSummary: latestAssistantWithAction?.actionMessage ?? latestAssistantWithAction?.actionType ?? null,
-    latestAssistantActionCompleted: latestAssistantWithAction ? isActionCompleted(latestAssistantWithAction) : false,
+    latestAssistantActionState: latestAssistantWithAction
+      ? latestAssistantWithAction.autoApplied === true || latestAssistantWithAction.actionStatus === 'completed'
+        ? 'applied'
+        : latestAssistantWithAction.actionStatus === 'rejected'
+          ? 'rejected'
+          : 'pending'
+      : 'none',
   };
 }
 
@@ -716,7 +722,11 @@ function summarizeConversationTaskState(taskState: ConversationTaskState): strin
 
   if (taskState.latestAssistantActionSummary) {
     lines.push(
-      `Last assistant edit for this conversation: ${taskState.latestAssistantActionSummary} (${taskState.latestAssistantActionCompleted ? 'completed' : 'not completed yet'}).`,
+      `Last assistant edit for this conversation: ${taskState.latestAssistantActionSummary} (${taskState.latestAssistantActionState === 'applied'
+        ? 'applied'
+        : taskState.latestAssistantActionState === 'rejected'
+          ? 'rejected'
+          : 'still pending'}).`,
     );
   }
 
@@ -783,7 +793,7 @@ function getLatestPendingAssistantAction(
 ): { action: EditAction; turn: RichChatTurn } | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const turn = messages[index];
-    if (turn.role !== 'assistant' || isActionCompleted(turn)) continue;
+    if (turn.role !== 'assistant' || isActionResolved(turn)) continue;
     const action = validateEditAction(turn.rawAction, validationContext);
     if (!action || action.type === 'none') continue;
     return { action, turn };

@@ -564,6 +564,115 @@ function resolveReviewStep(
   };
 }
 
+function buildReviewSelectionPreview(
+  baseSnapshot: EditSnapshot,
+  reviewSteps: EditAction[],
+  selectedSteps: boolean[],
+): {
+  snapshot: EditSnapshot;
+  sourceRanges: Array<{ sourceStart: number; sourceEnd: number }>;
+  resolvedActions: EditAction[];
+} {
+  let draft = baseSnapshot;
+  let committedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }> = [];
+  const resolvedActions: EditAction[] = [];
+
+  reviewSteps.forEach((step, index) => {
+    if (!selectedSteps[index]) return;
+    const resolvedStep = resolveReviewStep(baseSnapshot, draft, step, committedSourceRanges);
+    if (!resolvedStep) return;
+    draft = applyActionToSnapshot(draft, resolvedStep.action);
+    committedSourceRanges = [...committedSourceRanges, ...resolvedStep.sourceRanges];
+    resolvedActions.push(resolvedStep.action);
+  });
+
+  return {
+    snapshot: draft,
+    sourceRanges: committedSourceRanges,
+    resolvedActions,
+  };
+}
+
+function combineResolvedReviewActions(
+  originalAction: EditAction,
+  resolvedActions: EditAction[],
+): EditAction | null {
+  if (resolvedActions.length === 0) return null;
+  if (resolvedActions.length === 1 && originalAction.type !== 'delete_ranges') {
+    return {
+      ...resolvedActions[0],
+      message: originalAction.message,
+    };
+  }
+
+  if (originalAction.type === 'delete_range' || originalAction.type === 'delete_ranges') {
+    const ranges = resolvedActions.flatMap((action) => {
+      if (action.type === 'delete_range' && action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
+        return [{ start: action.deleteStartTime, end: action.deleteEndTime }];
+      }
+      if (action.type === 'delete_ranges') {
+        return action.ranges ?? [];
+      }
+      return [];
+    });
+    if (ranges.length === 0) return null;
+    if (ranges.length === 1) {
+      return {
+        type: 'delete_range',
+        deleteStartTime: ranges[0].start,
+        deleteEndTime: ranges[0].end,
+        message: originalAction.message,
+      };
+    }
+    return {
+      type: 'delete_ranges',
+      ranges,
+      message: originalAction.message,
+    };
+  }
+
+  if (originalAction.type === 'add_captions') {
+    const captions = resolvedActions.flatMap((action) => action.type === 'add_captions' ? action.captions ?? [] : []);
+    return captions.length > 0 ? { type: 'add_captions', captions, message: originalAction.message } : null;
+  }
+
+  if (originalAction.type === 'add_transition') {
+    const transitions = resolvedActions.flatMap((action) => action.type === 'add_transition' ? action.transitions ?? [] : []);
+    return transitions.length > 0 ? { type: 'add_transition', transitions, message: originalAction.message } : null;
+  }
+
+  if (originalAction.type === 'add_markers') {
+    const markers = resolvedActions.flatMap((action) => {
+      if (action.type === 'add_marker' && action.marker) return [action.marker];
+      if (action.type === 'add_markers') return action.markers ?? [];
+      return [];
+    });
+    if (markers.length === 0) return null;
+    if (markers.length === 1) {
+      return {
+        type: 'add_marker',
+        marker: markers[0],
+        message: originalAction.message,
+      };
+    }
+    return {
+      type: 'add_markers',
+      markers,
+      message: originalAction.message,
+    };
+  }
+
+  if (originalAction.type === 'add_text_overlay') {
+    const textOverlays = resolvedActions.flatMap((action) => action.type === 'add_text_overlay' ? action.textOverlays ?? [] : []);
+    return textOverlays.length > 0 ? { type: 'add_text_overlay', textOverlays, message: originalAction.message } : null;
+  }
+
+  return {
+    ...resolvedActions[0],
+    message: originalAction.message,
+  };
+}
+
 function formatChatTime(seconds: number): string {
   return Math.abs(seconds - Math.round(seconds)) < 0.001
     ? formatTime(seconds)
@@ -1017,13 +1126,8 @@ function AssistantMessage({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewBaseSnapshot, setReviewBaseSnapshot] = useState<EditSnapshot | null>(null);
-  const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
-  const [reviewIndex, setReviewIndex] = useState(0);
-  const [acceptedSteps, setAcceptedSteps] = useState(0);
-  const [skippedSteps, setSkippedSteps] = useState(0);
-  const [reviewResult, setReviewResult] = useState<string | null>(null);
+  const [selectedReviewSteps, setSelectedReviewSteps] = useState<boolean[]>([]);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
-  const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<Array<{ sourceStart: number; sourceEnd: number }>>([]);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
@@ -1032,140 +1136,128 @@ function AssistantMessage({
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
-  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
-  const resolvedReviewStep = useMemo(() => {
-    if (!reviewInProgress || !reviewBaseSnapshot || !reviewDraft) return null;
-    const step = reviewSteps[reviewIndex];
-    if (!step) return null;
-    return resolveReviewStep(reviewBaseSnapshot, reviewDraft, step, acceptedSourceRanges);
-  }, [acceptedSourceRanges, reviewBaseSnapshot, reviewDraft, reviewInProgress, reviewIndex, reviewSteps]);
-  const activeReviewAction = reviewInProgress
-    ? (resolvedReviewStep?.action ?? reviewSteps[reviewIndex] ?? null)
-    : action ?? null;
-  const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
+  const reviewSelection = useMemo(() => (
+    reviewBaseSnapshot && action
+      ? buildReviewSelectionPreview(reviewBaseSnapshot, reviewSteps, selectedReviewSteps)
+      : null
+  ), [action, reviewBaseSnapshot, reviewSteps, selectedReviewSteps]);
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const actionPreviouslyApplied = useMemo(() => (
     !!action && appliedActions.some(record => actionsMatch(record.action, action))
   ), [action, appliedActions]);
-  const actionCompleted = msg.actionStatus === 'completed' || msg.autoApplied || actionPreviouslyApplied;
-  const actionResultText = msg.actionResult ?? (msg.autoApplied ? 'Auto-applied ✓' : actionPreviouslyApplied ? 'Already applied.' : null);
+  const actionResolved = msg.actionStatus === 'completed'
+    || msg.actionStatus === 'rejected'
+    || msg.autoApplied
+    || actionPreviouslyApplied;
+  const displayAction = useMemo(() => {
+    if (!action) return null;
+    if (!reviewSelection || reviewSelection.resolvedActions.length === 0) return action;
+    return combineResolvedReviewActions(action, reviewSelection.resolvedActions) ?? action;
+  }, [action, reviewSelection]);
+  const meta = displayAction ? getActionMeta(displayAction) : null;
+  const selectedReviewCount = reviewSelection?.resolvedActions.length ?? 0;
+  const multipleReviewOptions = reviewSteps.length > 1;
+  const actionResultText = msg.actionResult ?? (
+    msg.actionStatus === 'rejected'
+      ? 'No changes applied.'
+      : msg.autoApplied
+        ? 'Auto-applied ✓'
+        : actionPreviouslyApplied
+          ? 'Already applied.'
+          : null
+  );
 
   useEffect(() => () => clearPreviewSnapshot(msg.id), [clearPreviewSnapshot, msg.id]);
 
   useEffect(() => {
-    if (!actionCompleted || msg.actionStatus === 'completed') return;
+    if (!actionPreviouslyApplied || msg.actionStatus === 'completed' || msg.actionStatus === 'rejected') return;
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
-  }, [actionCompleted, actionResultText, msg.actionStatus, msg.id, updateMessage]);
+  }, [actionPreviouslyApplied, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
-  const finalizeReview = useCallback((
-    draft: EditSnapshot,
-    accepted: number,
-    skipped: number,
-    committedSourceRanges: Array<{ sourceStart: number; sourceEnd: number }>,
-  ) => {
+  useEffect(() => {
+    if (
+      !action
+      || action.type === 'none'
+      || action.type === 'transcribe_request'
+      || action.type === 'update_ai_settings'
+      || actionResolved
+    ) {
+      setReviewBaseSnapshot(null);
+      setSelectedReviewSteps([]);
+      return;
+    }
+    if (anotherReviewActive) return;
+    setReviewBaseSnapshot((current) => {
+      if (current) return current;
+      const state = useEditorStore.getState();
+      return {
+        clips: state.clips,
+        captions: state.captions,
+        transitions: state.transitions,
+        markers: state.markers,
+        textOverlays: state.textOverlays,
+      };
+    });
+    setSelectedReviewSteps((current) => (
+      current.length === reviewSteps.length && current.some(Boolean)
+        ? current
+        : reviewSteps.map(() => true)
+    ));
+  }, [action, actionResolved, anotherReviewActive, reviewSteps]);
+
+  useEffect(() => {
+    if (!action || !reviewBaseSnapshot || actionResolved || anotherReviewActive) return;
+    if (!reviewSelection || reviewSelection.resolvedActions.length === 0) {
+      clearPreviewSnapshot(msg.id);
+      return;
+    }
+    setPreviewSnapshot(msg.id, reviewSelection.snapshot);
+    const reviewSeekTime = getReviewSeekTime(reviewBaseSnapshot, reviewSelection.resolvedActions[0]);
+    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
+  }, [
+    action,
+    actionResolved,
+    anotherReviewActive,
+    clearPreviewSnapshot,
+    msg.id,
+    requestSeek,
+    reviewBaseSnapshot,
+    reviewSelection,
+    setPreviewSnapshot,
+  ]);
+
+  const handleToggleReviewStep = useCallback((index: number) => {
+    setSelectedReviewSteps((current) => current.map((selected, stepIndex) => (
+      stepIndex === index ? !selected : selected
+    )));
+  }, []);
+
+  const handleApplyReviewedChanges = useCallback(() => {
+    if (!action || !reviewSelection || reviewSelection.resolvedActions.length === 0) return;
+    const committedAction = combineResolvedReviewActions(action, reviewSelection.resolvedActions);
+    if (!committedAction) return;
     clearPreviewSnapshot(msg.id);
-    if (accepted > 0) commitPreviewSnapshot(draft);
-    if (accepted > 0 && action) {
-      recordAppliedAction(action, action.message, { sourceRanges: committedSourceRanges });
-    }
-    const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
-    updateMessage(msg.id, { actionStatus: 'completed', actionResult: result });
+    commitPreviewSnapshot(reviewSelection.snapshot);
+    recordAppliedAction(committedAction, committedAction.message, { sourceRanges: reviewSelection.sourceRanges });
+    updateMessage(msg.id, {
+      actionStatus: 'completed',
+      actionResult: reviewSteps.length > 1
+        ? `Applied ${reviewSelection.resolvedActions.length} of ${reviewSteps.length} changes.`
+        : 'Applied edit.',
+    });
     setReviewBaseSnapshot(null);
-    setReviewDraft(null);
-    setReviewIndex(reviewSteps.length);
-    setAcceptedSteps(accepted);
-    setSkippedSteps(skipped);
-    setAcceptedSourceRanges([]);
-    setReviewResult(result);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
+    setSelectedReviewSteps([]);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSelection, reviewSteps.length, updateMessage]);
 
-  const startReview = useCallback(() => {
-    if (!action || action.type === 'none' || action.type === 'transcribe_request' || anotherReviewActive) return;
-    const state = useEditorStore.getState();
-    const baseSnapshot: EditSnapshot = {
-      clips: state.clips,
-      captions: state.captions,
-      transitions: state.transitions,
-      markers: state.markers,
-      textOverlays: state.textOverlays,
-    };
-    const firstStep = reviewSteps[0];
-    if (!firstStep) return;
-    const firstResolvedStep = resolveReviewStep(baseSnapshot, baseSnapshot, firstStep, []);
-    if (!firstResolvedStep) return;
-    setReviewBaseSnapshot(baseSnapshot);
-    setReviewDraft(baseSnapshot);
-    setReviewIndex(0);
-    setAcceptedSteps(0);
-    setSkippedSteps(0);
-    setAcceptedSourceRanges([]);
-    setReviewResult(null);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstResolvedStep.action);
-    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [action, anotherReviewActive, msg.id, requestSeek, reviewSteps, setPreviewSnapshot]);
-
-  const handleApplyStep = useCallback(() => {
-    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
-    const resolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, reviewSteps[reviewIndex], acceptedSourceRanges);
-    if (!resolvedStep) return;
-    const stepAction = resolvedStep.action;
-    const nextCommittedSourceRanges = [
-      ...acceptedSourceRanges,
-      ...resolvedStep.sourceRanges,
-    ];
-    const nextDraft = applyActionToSnapshot(reviewDraft, stepAction);
-    const accepted = acceptedSteps + 1;
-    const nextIndex = reviewIndex + 1;
-    if (nextIndex >= reviewSteps.length) {
-      finalizeReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges);
-      return;
-    }
-    const nextStep = reviewSteps[nextIndex];
-    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, nextDraft, nextStep, nextCommittedSourceRanges);
-    if (!nextResolvedStep) {
-      finalizeReview(nextDraft, accepted, skippedSteps + 1, nextCommittedSourceRanges);
-      return;
-    }
-    setReviewDraft(nextDraft);
-    setReviewIndex(nextIndex);
-    setAcceptedSteps(accepted);
-    setAcceptedSourceRanges(nextCommittedSourceRanges);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(nextDraft, nextResolvedStep.action);
-    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
-
-  const handleSkipStep = useCallback(() => {
-    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
-    const skipped = skippedSteps + 1;
-    const nextIndex = reviewIndex + 1;
-    if (nextIndex >= reviewSteps.length) {
-      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
-      return;
-    }
-    const nextStep = reviewSteps[nextIndex];
-    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, nextStep, acceptedSourceRanges);
-    if (!nextResolvedStep) {
-      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges);
-      return;
-    }
-    setReviewIndex(nextIndex);
-    setSkippedSteps(skipped);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextResolvedStep.action);
-    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
-
-  const cancelReview = useCallback(() => {
+  const handleRejectReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
+    updateMessage(msg.id, {
+      actionStatus: 'rejected',
+      actionResult: 'No changes applied.',
+    });
     setReviewBaseSnapshot(null);
-    setReviewDraft(null);
-    setReviewIndex(0);
-    setAcceptedSteps(0);
-    setSkippedSteps(0);
-    setAcceptedSourceRanges([]);
-  }, [clearPreviewSnapshot, msg.id]);
+    setSelectedReviewSteps([]);
+  }, [clearPreviewSnapshot, msg.id, updateMessage]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -1212,7 +1304,6 @@ function AssistantMessage({
     applyStoredAction(action);
     recordAppliedAction(action, action.message);
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
-    setReviewResult('AI settings updated.');
   }, [action, applyStoredAction, msg.id, recordAppliedAction, updateMessage]);
 
   return (
@@ -1262,10 +1353,10 @@ function AssistantMessage({
           </div>
 
           {/* Details */}
-          <ActionDetails action={activeReviewAction!} />
+          <ActionDetails action={displayAction!} />
 
           {/* Buttons */}
-          {actionCompleted ? (
+          {actionResolved ? (
             <div style={{
               padding: '8px 12px',
               borderTop: '1px solid rgba(255,255,255,0.05)',
@@ -1278,25 +1369,68 @@ function AssistantMessage({
                 {actionResultText ?? 'Completed.'}
               </span>
             </div>
-          ) : reviewResult ? (
-            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-                {reviewResult}
-              </span>
-            </div>
           ) : (
             <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              {reviewSteps.length > 1 && activeReviewAction && action?.type !== 'transcribe_request' && (
+              {multipleReviewOptions && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                  {reviewInProgress
-                    ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
-                    : `Review ${reviewSteps.length} proposed changes.`}
+                  {selectedReviewCount > 0
+                    ? `Previewing ${selectedReviewCount} selected change${selectedReviewCount === 1 ? '' : 's'}.`
+                    : `Select which of the ${reviewSteps.length} proposed changes you want to apply.`}
                 </p>
               )}
-              {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && (
+              {anotherReviewActive && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   Finish the active review before opening another one.
                 </p>
+              )}
+              {multipleReviewOptions && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  marginBottom: 10,
+                  maxHeight: 156,
+                  overflowY: 'auto',
+                  paddingRight: 2,
+                }}>
+                  {reviewSteps.map((step, index) => {
+                    const stepMeta = getActionMeta(step);
+                    const checked = selectedReviewSteps[index] ?? false;
+                    return (
+                      <label
+                        key={`${msg.id}-review-step-${index}`}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: 8,
+                          padding: '7px 8px',
+                          borderRadius: 6,
+                          border: '1px solid rgba(255,255,255,0.06)',
+                          background: checked ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)',
+                          cursor: anotherReviewActive ? 'default' : 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={anotherReviewActive}
+                          onChange={() => handleToggleReviewStep(index)}
+                          style={{ marginTop: 2 }}
+                        />
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
+                            {stepMeta.label}
+                          </span>
+                          {stepMeta.summary && (
+                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+                              {stepMeta.summary}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
               )}
               {action?.type === 'update_ai_settings' ? (
                 <button
@@ -1338,27 +1472,29 @@ function AssistantMessage({
                     {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
                   </button>
                 </>
-              ) : reviewInProgress ? (
+              ) : (
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button
-                    onClick={handleApplyStep}
+                    onClick={handleApplyReviewedChanges}
+                    disabled={anotherReviewActive || selectedReviewCount === 0}
                     style={{
                       flex: 1,
                       padding: '5px 0',
                       fontSize: 12,
                       fontWeight: 500,
-                      background: 'var(--accent)',
+                      background: anotherReviewActive || selectedReviewCount === 0 ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
                       border: 'none',
-                      color: '#000',
+                      color: anotherReviewActive || selectedReviewCount === 0 ? 'var(--fg-muted)' : '#000',
                       borderRadius: 4,
-                      cursor: 'pointer',
+                      cursor: anotherReviewActive || selectedReviewCount === 0 ? 'default' : 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
-                    Apply
+                    {multipleReviewOptions ? 'Apply selected' : 'Apply'}
                   </button>
                   <button
-                    onClick={handleSkipStep}
+                    onClick={handleRejectReview}
+                    disabled={anotherReviewActive}
                     style={{
                       flex: 1,
                       padding: '5px 0',
@@ -1368,44 +1504,13 @@ function AssistantMessage({
                       border: '1px solid rgba(255,255,255,0.08)',
                       color: 'var(--fg-secondary)',
                       borderRadius: 4,
-                      cursor: 'pointer',
+                      cursor: anotherReviewActive ? 'default' : 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
-                    Skip
-                  </button>
-                  <button
-                    onClick={cancelReview}
-                    style={{
-                      padding: '5px 10px',
-                      fontSize: 12,
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--fg-muted)',
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                    }}
-                  >
-                    Cancel
+                    Reject
                   </button>
                 </div>
-              ) : (
-                <button
-                  onClick={startReview}
-                  disabled={anotherReviewActive}
-                  style={{
-                    width: '100%', padding: '5px 0',
-                    fontSize: 12, fontWeight: 500,
-                    background: anotherReviewActive ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
-                    border: 'none',
-                    color: anotherReviewActive ? 'var(--fg-muted)' : '#000',
-                    borderRadius: 4, cursor: anotherReviewActive ? 'default' : 'pointer',
-                    fontFamily: 'var(--font-serif)',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {reviewSteps.length > 1 ? 'Start review' : 'Preview edit'}
-                </button>
               )}
             </div>
           )}
@@ -1972,6 +2077,12 @@ export default function ChatSidebar() {
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
         : false;
+      const hasPendingAction = !!action && action.type !== 'none';
+      const nextActionStatus = markerAction
+        ? 'completed'
+        : hasPendingAction
+          ? 'pending'
+          : undefined;
 
       if (markerAction && action && !markerActionPreviouslyApplied) {
         applyStoredAction(action);
@@ -1986,7 +2097,7 @@ export default function ChatSidebar() {
         action: action ?? undefined,
         visualSearch: visualSearch ?? undefined,
         autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
-        actionStatus: markerAction ? 'completed' : undefined,
+        actionStatus: nextActionStatus,
         actionResult: markerAction && action
           ? markerActionPreviouslyApplied
             ? 'Already applied.'
