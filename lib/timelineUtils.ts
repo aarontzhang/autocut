@@ -377,6 +377,22 @@ export function getTimelineDuration(clips: VideoClip[]): number {
   return clips.reduce((total, clip) => total + clip.sourceDuration / clip.speed, 0);
 }
 
+function collectTimelineClipBoundaries(clips: VideoClip[]): number[] {
+  const boundaries: number[] = [];
+  let cursor = 0;
+
+  for (const clip of clips) {
+    const clipDuration = clip.sourceDuration / clip.speed;
+    if (cursor > 1e-3) {
+      boundaries.push(cursor);
+    }
+    cursor += clipDuration;
+    boundaries.push(cursor);
+  }
+
+  return boundaries;
+}
+
 function mergeTimelineSpeechSegments(segments: TimelineSpeechSegment[]): TimelineSpeechSegment[] {
   if (segments.length === 0) return [];
 
@@ -442,6 +458,7 @@ export function buildTimelineSilenceCandidates(
 ): SilenceCandidate[] {
   const timelineDuration = getTimelineDuration(clips);
   if (timelineDuration <= 0) return [];
+  const clipBoundaries = collectTimelineClipBoundaries(clips);
 
   const speechSegments = buildTimelineSpeechSegments(clips, rawCaptions);
   const paddingSeconds = Math.max(0, settings.paddingSeconds);
@@ -479,12 +496,15 @@ export function buildTimelineSilenceCandidates(
 
     const touchesTimelineStart = gap.gapStart <= 1e-3;
     const touchesTimelineEnd = gap.gapEnd >= timelineDuration - 1e-3;
+    const touchesClipBoundaryStart = clipBoundaries.some((boundary) => Math.abs(gap.gapStart - boundary) <= 1e-3);
+    const touchesClipBoundaryEnd = clipBoundaries.some((boundary) => Math.abs(gap.gapEnd - boundary) <= 1e-3);
     // Only preserve padding next to speech. If silence reaches the timeline edge,
-    // cut all the way to that edge instead of leaving a silent tail/head behind.
-    const deleteStart = touchesTimelineStart
+    // or a hard clip boundary, cut all the way to that edge instead of leaving
+    // a tiny silent tail/head clip behind.
+    const deleteStart = touchesTimelineStart || touchesClipBoundaryStart
       ? gap.gapStart
       : Math.min(gap.gapEnd, gap.gapStart + paddingSeconds);
-    const deleteEnd = touchesTimelineEnd
+    const deleteEnd = touchesTimelineEnd || touchesClipBoundaryEnd
       ? gap.gapEnd
       : Math.max(deleteStart, gap.gapEnd - paddingSeconds);
     const duration = deleteEnd - deleteStart;
