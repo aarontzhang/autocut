@@ -85,12 +85,12 @@ export default function StorageQuotaBanner({
           <p style={{ margin: '4px 0 0', fontSize: compact ? 11 : 12, color: colors.subtext }}>
             {loading && !quota
               ? 'Loading storage usage...'
-              : shouldShowUsageSummary
+              : shouldShowUsageSummary && quota
               ? `${formatStorageBytes(quota.usedBytes)} of ${formatStorageBytes(quota.limitBytes)} used`
               : resolvedMessage}
           </p>
         </div>
-        {shouldShowUsageSummary && (
+        {shouldShowUsageSummary && quota && (
           <p style={{ margin: 0, fontSize: compact ? 11 : 12, color: colors.subtext }}>
             {Math.round(quota.usageRatio * 100)}%
           </p>

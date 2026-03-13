@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceRangeRef, VisualSearchSession } from '@/lib/types';
+import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, SourceRangeRef, VisualSearchSession } from '@/lib/types';
 import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceRangeToTimelineRanges, sourceTimeToTimelineOccurrences, subtractSourceRanges } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -14,8 +14,8 @@ import AutocutMark from '@/components/branding/AutocutMark';
 import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 20;
-const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 6;
-const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 6;
+const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 3;
+const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
@@ -369,7 +369,7 @@ function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: s
 
 function buildSilenceCandidatePayload(): SilenceCandidate[] {
   const state = useEditorStore.getState();
-  const rawCaptions = state.rawTranscriptCaptions;
+  const rawCaptions = state.sourceTranscriptCaptions;
   if (!rawCaptions || rawCaptions.length === 0) return [];
 
   return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
@@ -427,6 +427,15 @@ function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType
         ...frame,
         projectedTimelineTime: frame.timelineTime,
         visibleOnTimeline: true,
+      };
+    }
+
+    if (frame.projectedTimelineTime !== undefined || frame.visibleOnTimeline !== undefined) {
+      return {
+        ...frame,
+        image: undefined,
+        projectedTimelineTime: frame.projectedTimelineTime ?? frame.timelineTime,
+        visibleOnTimeline: frame.visibleOnTimeline ?? true,
       };
     }
 
@@ -1025,6 +1034,56 @@ type TimelineFrameSample = {
   sourceId: string;
 };
 
+type SourceFrameSample = {
+  index: number;
+  sourceTime: number;
+};
+
+async function extractSourceOverviewFrames(
+  input: {
+    sourceId: string;
+    source: Uint8Array | File | string;
+    duration: number;
+    overviewIntervalSeconds: number;
+    maxOverviewFrames: number;
+    onProgress?: (progress: { completed: number; total: number }) => void;
+  },
+): Promise<SourceIndexedFrame[]> {
+  if (input.duration <= 0) return [];
+
+  const preferredInterval = Math.max(0.1, input.overviewIntervalSeconds);
+  const frameTarget = getOverviewFrameTarget(input.duration, preferredInterval, input.maxOverviewFrames);
+  const interval = input.duration <= preferredInterval * input.maxOverviewFrames
+    ? preferredInterval
+    : input.duration / input.maxOverviewFrames;
+  const sampleEnd = Math.max(input.duration - 0.05, 0);
+  const samples: SourceFrameSample[] = [];
+  for (let t = 0; t < sampleEnd; t += interval) {
+    samples.push({ index: samples.length, sourceTime: t });
+  }
+  if (samples.length === 0 || samples[samples.length - 1].sourceTime < sampleEnd) {
+    samples.push({ index: samples.length, sourceTime: sampleEnd });
+  }
+  if (samples.length === 0) return [];
+
+  const images = await extractVideoFrames(
+    input.source,
+    samples.map((sample) => sample.sourceTime),
+    {
+      concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
+      onProgress: ({ completed, total }) => {
+        input.onProgress?.({ completed, total });
+      },
+    },
+  );
+
+  return samples.slice(0, frameTarget).map((sample, index) => ({
+    sourceId: input.sourceId,
+    sourceTime: sample.sourceTime,
+    image: images[index],
+  }));
+}
+
 async function extractTimelineFramesFromSources(
   input: {
     clips: ReturnType<typeof useEditorStore.getState>['clips'];
@@ -1221,7 +1280,7 @@ function AssistantMessage({
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
-  const existingRawTranscriptCaptions = useEditorStore(s => s.rawTranscriptCaptions);
+  const existingSourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const addMessage = useEditorStore(s => s.addMessage);
 
   const action = msg.action;
@@ -1443,7 +1502,7 @@ function AssistantMessage({
         rawCaptions.push(...captionsForSource);
       }
 
-      const mergedCaptions = dedupeCaptionEntries([...(existingRawTranscriptCaptions ?? []), ...rawCaptions]);
+      const mergedCaptions = dedupeCaptionEntries([...(existingSourceTranscriptCaptions ?? []), ...rawCaptions]);
       const transcriptText = buildTranscriptContext(clips, mergedCaptions);
       setBackgroundTranscript(transcriptText, 'done', mergedCaptions);
       addMessage({
@@ -1458,7 +1517,7 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, existingRawTranscriptCaptions, mediaLibrary, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, existingSourceTranscriptCaptions, mediaLibrary, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -1848,7 +1907,7 @@ export default function ChatSidebar() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
-  const frameDescriptionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
+  const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const syncingTaggedMarkersRef = useRef(false);
   const previousTaggedMarkerIdsRef = useRef<string[]>([]);
@@ -1873,9 +1932,10 @@ export default function ChatSidebar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
-  const videoFrames = useEditorStore(s => s.videoFrames);
-  const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
-  const setVideoFrames = useEditorStore(s => s.setVideoFrames);
+  const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
+  const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
+  const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
+  const playbackActive = useEditorStore(s => s.playbackActive);
   const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
@@ -1886,6 +1946,19 @@ export default function ChatSidebar() {
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const reviewLocked = previewOwnerId !== null;
   const mainTimelineDuration = useMemo(() => getTimelineDuration(clips), [clips]);
+  const availableSources = useMemo(() => (
+    resolveMainTrackSources({
+      clips,
+      mediaLibrary,
+      videoData,
+      videoFile,
+      videoUrl,
+      videoDuration,
+    }).filter((entry) => entry.source && entry.duration > 0)
+  ), [clips, mediaLibrary, videoData, videoDuration, videoFile, videoUrl]);
+  const missingOverviewSources = useMemo(() => (
+    availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
+  ), [availableSources, sourceIndexFreshBySourceId]);
 
   // Build selected clip context for the API
   const selectedClipContext = (() => {
@@ -1974,100 +2047,101 @@ export default function ChatSidebar() {
     return () => window.removeEventListener('mousedown', handlePointerDown);
   }, [isAgentMenuOpen]);
 
-  // Extract frames on first load, and re-extract in background when stale after edits
+  // Source overview indexing runs only when a source is missing canonical frame data.
   useEffect(() => {
     if ((!videoFile && !videoUrl && !videoData) || videoDuration <= 0) return;
-    if (videoFrames === null || !videoFramesFresh) {
+    if (document.hidden || playbackActive || missingOverviewSources.length === 0) return;
+    if (projectedOverviewFrames === null || missingOverviewSources.length > 0) {
       void (async () => {
         try {
-          const frames = await ensureFramesExtracted(!videoFramesFresh);
-          await ensureFrameDescriptions(frames, !videoFramesFresh);
+          await ensureFramesExtracted(missingOverviewSources.length > 0);
         } catch {
           // Keep the editor usable even if background indexing fails.
         }
       })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoData, videoDuration, videoFile, videoFramesFresh, videoUrl]);
+  }, [missingOverviewSources, playbackActive, projectedOverviewFrames, videoData, videoDuration, videoFile, videoUrl]);
 
   const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
-    if (videoFrames !== null && !force) return videoFrames;
     const state = useEditorStore.getState();
-    const currentClips = state.clips;
-    const currentDuration = getTimelineDuration(currentClips);
-    if (currentDuration <= 0) return videoFrames ?? [];
+    const sourcesToIndex = availableSources.filter((entry) => (
+      force
+        ? !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
+        : !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
+    ));
+    if (sourcesToIndex.length === 0) {
+      return state.projectedOverviewFrames ?? [];
+    }
+    if (document.hidden || state.playbackActive) {
+      return state.projectedOverviewFrames ?? [];
+    }
     try {
       const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
-      const preferredInterval = Math.max(0.1, overviewIntervalSeconds);
-      const frameTarget = getOverviewFrameTarget(currentDuration, preferredInterval, maxOverviewFrames);
-      const interval = currentDuration <= preferredInterval * maxOverviewFrames
-        ? preferredInterval
-        : currentDuration / maxOverviewFrames;
-      const sampleEnd = Math.max(currentDuration - 0.05, 0);
-      const sourceTimestamps: number[] = [];
-      for (let t = 0; t < sampleEnd; t += interval) sourceTimestamps.push(t);
-      if (sourceTimestamps.length === 0 || sourceTimestamps[sourceTimestamps.length - 1] < sampleEnd) {
-        sourceTimestamps.push(sampleEnd);
-      }
+      const totalTargetFrames = sourcesToIndex.reduce((count, entry) => (
+        count + getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames)
+      ), 0);
       const extractionStartedAt = performance.now();
-      const extractionFallbackPerFrame = estimateFrameExtractionSeconds(sourceTimestamps.length) / Math.max(sourceTimestamps.length, 1);
+      const extractionFallbackPerFrame = estimateFrameExtractionSeconds(totalTargetFrames) / Math.max(totalTargetFrames, 1);
       let lastProgressPaintAt = 0;
       setFrameIndexingProgress({
         stage: 'extracting_frames',
         completed: 0,
-        total: Math.max(sourceTimestamps.length, 1),
-        label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
-        etaSeconds: estimateFrameExtractionSeconds(sourceTimestamps.length),
+        total: Math.max(totalTargetFrames, 1),
+        label: `Sampling source frames`,
+        etaSeconds: estimateFrameExtractionSeconds(totalTargetFrames),
       });
-      const frames = await extractTimelineFramesFromSources({
-        clips: currentClips,
-        mediaLibrary,
-        videoData,
-        videoFile,
-        videoUrl,
-        videoDuration: state.videoDuration,
-        timelineTimestamps: sourceTimestamps,
-        kind: 'overview',
-        onProgress: ({ completed, total }) => {
-          const now = performance.now();
-          if (completed < total && now - lastProgressPaintAt < 120) return;
-          lastProgressPaintAt = now;
-          setFrameIndexingProgress({
-            stage: 'extracting_frames',
-            completed,
-            total: Math.max(total, 1),
-            label: `Sampling frames ${completed}/${total}`,
-            etaSeconds: estimateRemainingSecondsFromObservedRate(
-              extractionStartedAt,
-              completed,
-              total,
-              extractionFallbackPerFrame,
-            ),
-          });
-        },
-      });
-      setVideoFrames(frames);
+      let completedFrames = 0;
+      for (const entry of sourcesToIndex) {
+        const frames = await extractSourceOverviewFrames({
+          sourceId: entry.sourceId,
+          source: entry.source!,
+          duration: entry.duration,
+          overviewIntervalSeconds,
+          maxOverviewFrames,
+          onProgress: ({ completed, total }) => {
+            const now = performance.now();
+            if (completed < total && now - lastProgressPaintAt < 120) return;
+            lastProgressPaintAt = now;
+            setFrameIndexingProgress({
+              stage: 'extracting_frames',
+              completed: completedFrames + completed,
+              total: Math.max(totalTargetFrames, 1),
+              label: `Sampling frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
+              etaSeconds: estimateRemainingSecondsFromObservedRate(
+                extractionStartedAt,
+                completedFrames + completed,
+                totalTargetFrames,
+                extractionFallbackPerFrame,
+              ),
+            });
+          },
+        });
+        const describedFrames = await ensureFrameDescriptions(frames, true);
+        setSourceOverviewFrames(entry.sourceId, describedFrames, { fresh: true });
+        completedFrames += frames.length;
+      }
+      const refreshedState = useEditorStore.getState();
       setFrameIndexingProgress({
         stage: 'extracting_frames',
-        completed: frames.length,
-        total: Math.max(frames.length, 1),
-        label: `Sampled ${frames.length} frame${frames.length === 1 ? '' : 's'}`,
+        completed: totalTargetFrames,
+        total: Math.max(totalTargetFrames, 1),
+        label: `Sampled source frames`,
         etaSeconds: 0,
       });
-      return frames;
+      return refreshedState.projectedOverviewFrames ?? [];
     } catch {
       setFrameIndexingProgress(null);
-      return videoFrames ?? [];
+      return useEditorStore.getState().projectedOverviewFrames ?? [];
     }
-  }, [mediaLibrary, videoData, videoFile, videoFrames, videoUrl, setVideoFrames]);
+  }, [availableSources, setSourceOverviewFrames]);
 
-  const ensureFrameDescriptions = useCallback(async (
-    frames: IndexedVideoFrame[],
+  async function ensureFrameDescriptions(
+    frames: SourceIndexedFrame[],
     force = false,
-  ): Promise<IndexedVideoFrame[]> => {
-    const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
-    if (overviewFrames.length === 0) return frames;
-    if (!force && overviewFrames.every((frame) => frame.description && frame.description.trim().length > 0)) {
+  ): Promise<SourceIndexedFrame[]> {
+    if (frames.length === 0) return frames;
+    if (!force && frames.every((frame) => frame.description && frame.description.trim().length > 0)) {
       return frames;
     }
     if (frameDescriptionPromiseRef.current && !force) {
@@ -2076,10 +2150,8 @@ export default function ChatSidebar() {
 
     const promise = (async () => {
       let nextFrames = [...frames];
-      const totalOverviewFrames = nextFrames.filter((frame) => frame.kind === 'overview').length;
-      const initialCompleted = nextFrames.filter((frame) => (
-        frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
-      )).length;
+      const totalOverviewFrames = nextFrames.length;
+      const initialCompleted = nextFrames.filter((frame) => !!frame.description && frame.description.trim().length > 0).length;
       const descriptionStartedAt = performance.now();
       const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
       setFrameIndexingProgress({
@@ -2092,18 +2164,16 @@ export default function ChatSidebar() {
       const batches: FrameDescriptionBatch[] = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
         const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
-        const shouldDescribeBatch = force || batch.some((frame) => (
-          frame.kind === 'overview' && (!frame.description || frame.description.trim().length === 0)
-        ));
+        const shouldDescribeBatch = force || batch.some((frame) => (!frame.description || frame.description.trim().length === 0));
         if (!shouldDescribeBatch) continue;
 
         const batchFrames = batch
-          .filter((frame): frame is IndexedVideoFrame & { image: string } => (
-            frame.kind === 'overview' && typeof frame.image === 'string' && frame.image.length > 0
+          .filter((frame): frame is SourceIndexedFrame & { image: string } => (
+            typeof frame.image === 'string' && frame.image.length > 0
           ))
           .map((frame) => ({
             image: frame.image,
-            timelineTime: frame.timelineTime,
+            timelineTime: frame.sourceTime,
             sourceTime: frame.sourceTime,
           }));
         if (batchFrames.length === 0) continue;
@@ -2111,11 +2181,24 @@ export default function ChatSidebar() {
       }
 
       await runFrameDescriptionBatches(batches, (result) => {
-        nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
-        setVideoFrames(nextFrames);
-        const completed = nextFrames.filter((frame) => (
-          frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
-        )).length;
+        nextFrames = mergeFrameDescriptions(
+          nextFrames.map((frame) => ({
+            timelineTime: frame.sourceTime,
+            sourceTime: frame.sourceTime,
+            sourceId: frame.sourceId,
+            kind: 'overview' as const,
+            image: frame.image,
+            description: frame.description,
+          })),
+          result.start,
+          result.data.descriptions ?? [],
+        ).map((frame) => ({
+          sourceId: frame.sourceId ?? MAIN_SOURCE_ID,
+          sourceTime: frame.sourceTime,
+          image: frame.image,
+          description: frame.description,
+        }));
+        const completed = nextFrames.filter((frame) => !!frame.description && frame.description.trim().length > 0).length;
         const remaining = Math.max(totalOverviewFrames - completed, 0);
         setFrameIndexingProgress({
           stage: 'describing_frames',
@@ -2146,18 +2229,16 @@ export default function ChatSidebar() {
         frameDescriptionPromiseRef.current = null;
       }
     }
-  }, [setVideoFrames]);
+  }
 
   const frameDescriptionsReady = useMemo(() => {
-    if (videoFrames === null) return false;
-    return videoFrames
-      .filter((frame) => frame.kind === 'overview')
-      .every((frame) => !!frame.description && frame.description.trim().length > 0);
-  }, [videoFrames]);
+    if (projectedOverviewFrames === null) return false;
+    return projectedOverviewFrames.every((frame) => !!frame.description && frame.description.trim().length > 0);
+  }, [projectedOverviewFrames]);
 
   const buildCurrentTranscript = useCallback(() => {
     const freshState = useEditorStore.getState();
-    const rawCaptions = freshState.rawTranscriptCaptions;
+    const rawCaptions = freshState.sourceTranscriptCaptions;
     if (rawCaptions && rawCaptions.length > 0) {
       return buildTranscriptContext(freshState.clips, rawCaptions);
     }
@@ -2171,9 +2252,6 @@ export default function ChatSidebar() {
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
     const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(latestUserInput) && !!useEditorStore.getState().currentProjectId;
     let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
-    if (!preferSourceVisualRetrieval) {
-      currentFrames = await ensureFrameDescriptions(currentFrames);
-    }
     let producedVisibleResponse = false;
 
     for (let round = 0; round < 2; round++) {
@@ -2305,7 +2383,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFrameDescriptions, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -2397,10 +2475,10 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
-  const framesReady = videoFrames !== null && frameDescriptionsReady;
+  const framesReady = projectedOverviewFrames !== null && frameDescriptionsReady;
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
-  const isReindexingFrames = videoFrames !== null && !videoFramesFresh;
+  const isReindexingFrames = projectedOverviewFrames !== null && missingOverviewSources.length > 0;
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
     ? estimatedTranscriptEta * Math.max(0, transcriptProgress.total - transcriptProgress.completed) / transcriptProgress.total
@@ -2419,11 +2497,11 @@ export default function ChatSidebar() {
       ? null
       : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
-    ? (transcriptStatus === 'loading' && videoFrames === null)
+    ? (transcriptStatus === 'loading' && projectedOverviewFrames === null)
       ? 'Transcribing audio and sampling frames…'
       : transcriptStatus === 'loading'
         ? 'Transcribing audio…'
-        : videoFrames === null
+        : projectedOverviewFrames === null
           ? 'Sampling video frames…'
           : !frameDescriptionsReady
             ? 'Analyzing sampled frames…'
@@ -2436,7 +2514,7 @@ export default function ChatSidebar() {
   const canSendDespiteIndexing = pendingVisualQuery;
   const isAnalyzingSampledFrames = hasVideoSource
     && (transcriptStatus === 'done' || transcriptFailed)
-    && videoFrames !== null
+    && projectedOverviewFrames !== null
     && !frameDescriptionsReady;
   const mediaPreparationBlockingSend = hasVideoSource
     && !agentContextReady

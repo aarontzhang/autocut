@@ -3,7 +3,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import type { CaptionEntry } from '@/lib/types';
-import { buildTranscriptContext } from '@/lib/timelineUtils';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import TopBar from './TopBar';
@@ -105,8 +104,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
+  const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
+  const playbackActive = useEditorStore(s => s.playbackActive);
   const aiSettings = useEditorStore(s => s.aiSettings);
   const loadProject = useEditorStore(s => s.loadProject);
+  const hydrateSourceIndex = useEditorStore(s => s.hydrateSourceIndex);
   const resetEditor = useEditorStore(s => s.resetEditor);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
@@ -311,14 +313,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       videoUrl,
       videoDuration,
     }).filter((entry) => entry.source && entry.duration > 0);
-    if (sources.length === 0 || transcriptStatus !== 'idle') return;
-    setBackgroundTranscript(null, 'loading');
-    setTranscriptProgress({ completed: 0, total: sources.length });
+    const missingSources = sources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
+    if (missingSources.length === 0 || transcriptStatus === 'loading' || document.hidden || playbackActive) return;
+    setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'loading');
+    setTranscriptProgress({ completed: 0, total: missingSources.length });
     (async () => {
       try {
-        const rawWords: CaptionEntry[] = [];
-        for (let index = 0; index < sources.length; index += 1) {
-          const entry = sources[index];
+        const rawWords: CaptionEntry[] = [...(useEditorStore.getState().sourceTranscriptCaptions ?? [])];
+        for (let index = 0; index < missingSources.length; index += 1) {
+          const entry = missingSources[index];
           const nextWords = await transcribeSourceRanges(
             entry.source!,
             buildOverlappingRanges(0, entry.duration),
@@ -326,16 +329,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             { sourceId: entry.sourceId },
           );
           rawWords.push(...nextWords);
-          setTranscriptProgress({ completed: index + 1, total: sources.length });
+          setTranscriptProgress({ completed: index + 1, total: missingSources.length });
         }
-        const text = buildTranscriptContext(useEditorStore.getState().clips, rawWords);
-        setBackgroundTranscript(text, 'done', rawWords);
+        setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'done', rawWords);
       } catch (error) {
         console.warn('Background transcription failed:', error);
         setBackgroundTranscript(null, 'error');
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, clips, mediaLibrary, transcriptStatus, setBackgroundTranscript, setTranscriptProgress, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, clips, mediaLibrary, playbackActive, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   // Load project from URL param
   useEffect(() => {
@@ -363,6 +365,25 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           signedUrls: data.signedUrls ?? {},
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
+        try {
+          const sourceIndexRes = await fetch(`/api/projects/${projectId}/source-index`);
+          if (sourceIndexRes.ok) {
+            const sourceIndexData = await sourceIndexRes.json();
+            if (projectLoadSequenceRef.current === loadSequence) {
+              hydrateSourceIndex({
+                sourceTranscriptCaptions: Array.isArray(sourceIndexData?.sourceTranscriptCaptions)
+                  ? sourceIndexData.sourceTranscriptCaptions
+                  : null,
+                sourceOverviewFrames: Array.isArray(sourceIndexData?.sourceOverviewFrames)
+                  ? sourceIndexData.sourceOverviewFrames
+                  : null,
+                sourceIndexFreshBySourceId: sourceIndexData?.sourceIndexFreshBySourceId ?? undefined,
+              });
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to hydrate source index:', error);
+        }
         void cacheProjectMediaLocally(projectId);
         lastSignedMediaRefreshAtRef.current = Date.now();
       } catch (e) {
@@ -373,7 +394,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         }
       }
     })();
-  }, [cacheProjectMediaLocally, loadProject, projectId, releaseCachedMediaUrls, resetEditor]);
+  }, [cacheProjectMediaLocally, hydrateSourceIndex, loadProject, projectId, releaseCachedMediaUrls, resetEditor]);
 
   useEffect(() => (
     () => {

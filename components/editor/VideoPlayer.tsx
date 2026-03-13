@@ -60,6 +60,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
+  const setPlaybackActive = useEditorStore(s => s.setPlaybackActive);
   const requestedSeekTime = useEditorStore(s => s.requestedSeekTime);
   const clearRequestedSeek = useEditorStore(s => s.clearRequestedSeek);
   const videoUrl = useEditorStore(s => s.videoUrl);
@@ -84,6 +85,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
     video.currentTime = Math.max(0, sourceTime);
   }, [clips, videoRef]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const syncPlaybackState = () => setPlaybackActive(!video.paused && !video.ended);
+    syncPlaybackState();
+    video.addEventListener('play', syncPlaybackState);
+    video.addEventListener('pause', syncPlaybackState);
+    video.addEventListener('ended', syncPlaybackState);
+    return () => {
+      video.removeEventListener('play', syncPlaybackState);
+      video.removeEventListener('pause', syncPlaybackState);
+      video.removeEventListener('ended', syncPlaybackState);
+      setPlaybackActive(false);
+    };
+  }, [setPlaybackActive, videoRef]);
 
   const sourceVideoMapRef = useRef<Map<string, Array<HTMLVideoElement | null>>>(new Map());
   const activePlaybackRef = useRef<PlaybackTarget | null>(null);
@@ -175,7 +192,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     return { ready: sourceEl.readyState >= 2, slot: selected.slot };
   }, []);
 
-  const applyClipEffects = useCallback((sourceTime: number) => {
+  const applyClipEffects = useCallback(() => {
     const currentClips = clipsRef.current;
     const video = videoRef.current;
     if (!video) return;
@@ -201,7 +218,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (gainNodeRef.current && audioCtxRef.current) {
       gainNodeRef.current.gain.setTargetAtTime(activeClip.volume, audioCtxRef.current.currentTime, 0.05);
     }
-  }, [videoRef, videoUrl]);
+  }, [videoRef]);
 
   const uniqueSourceUrls = useMemo(() => {
     const urls = new Set<string>();
@@ -311,7 +328,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       return;
     }
 
-    applyClipEffects(sourceTime);
+    applyClipEffects();
 
     const currentSource = activePlaybackRef.current?.sourceUrl || videoUrl;
     const currentSlot = activePlaybackRef.current?.slot ?? 0;
@@ -509,7 +526,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current = timelineTime;
       setCurrentTime(timelineTime);
     }
-    applyClipEffects(sourceTime);
+    applyClipEffects();
     if (switchingSource && shouldResumePlayback) {
       playbackIntentRef.current = true;
       if (targetReady) {

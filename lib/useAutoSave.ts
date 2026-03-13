@@ -3,19 +3,21 @@
 import { useEffect, useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 
-function persistOverviewFrame(frame: {
-  timelineTime: number;
+function persistSourceOverviewFrame(frame: {
   sourceTime: number;
-  sourceId?: string;
-  kind: string;
+  sourceId: string;
   description?: string;
+  image?: string;
+  assetId?: string | null;
+  indexedAt?: string | null;
 }) {
   return {
-    timelineTime: frame.timelineTime,
     sourceTime: frame.sourceTime,
-    ...(frame.sourceId ? { sourceId: frame.sourceId } : {}),
-    kind: frame.kind,
+    sourceId: frame.sourceId,
     description: frame.description ?? '',
+    ...(frame.image ? { image: frame.image } : {}),
+    ...(frame.assetId ? { assetId: frame.assetId } : {}),
+    ...(frame.indexedAt ? { indexedAt: frame.indexedAt } : {}),
   };
 }
 
@@ -50,9 +52,9 @@ export function useAutoSave() {
   const aiSettings = useEditorStore(s => s.aiSettings);
   const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
-  const rawTranscriptCaptions = useEditorStore(s => s.rawTranscriptCaptions);
-  const videoFrames = useEditorStore(s => s.videoFrames);
-  const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
+  const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
+  const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
+  const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
@@ -84,12 +86,11 @@ export function useAutoSave() {
           aiSettings: state.aiSettings,
           backgroundTranscript: state.backgroundTranscript,
           transcriptStatus: state.transcriptStatus,
-          rawTranscriptCaptions: state.rawTranscriptCaptions,
-          videoFrames: state.videoFramesFresh
-            ? (state.videoFrames ?? [])
-                .filter(frame => frame.kind === 'overview' && !!frame.description?.trim())
-                .map(persistOverviewFrame)
-            : null,
+          sourceTranscriptCaptions: state.sourceTranscriptCaptions,
+          sourceOverviewFrames: (state.sourceOverviewFrames ?? [])
+            .filter(frame => !!frame.description?.trim() || !!frame.image)
+            .map(persistSourceOverviewFrame),
+          sourceIndexFreshBySourceId: state.sourceIndexFreshBySourceId,
           mediaLibrary: state.mediaLibrary
             .filter(item => item.sourcePath)
             .map(persistMediaLibraryItem),
@@ -112,5 +113,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, rawTranscriptCaptions, videoFrames, videoFramesFresh, currentProjectId, mediaLibrary, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, sourceTranscriptCaptions, sourceOverviewFrames, sourceIndexFreshBySourceId, currentProjectId, mediaLibrary, setSaveStatus]);
 }
