@@ -27,7 +27,7 @@ import {
   splitClipsAtTime,
 } from './editActionUtils';
 import { buildClipSchedule } from './playbackEngine';
-import { buildTranscriptContext } from './timelineUtils';
+import { buildTranscriptContext, formatTimePrecise } from './timelineUtils';
 import { createImportedSourceId, MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 
 export type { EditSnapshot } from './editActionUtils';
@@ -448,6 +448,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (newClips === clips) return;
 
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const action: EditAction = {
+      type: 'split_clip',
+      splitTime: timelineTime,
+      message: `Split clip at ${formatTimePrecise(timelineTime)}`,
+    };
 
     set(state => ({
       history: [...state.history, snap],
@@ -457,6 +462,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
       videoFramesFresh: false,
+      appliedActions: [
+        ...state.appliedActions.slice(-24),
+        { id: uuidv4(), timestamp: Date.now(), action, summary: action.message },
+      ],
     }));
   },
 

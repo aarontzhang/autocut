@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { exportClips } from '@/lib/ffmpegClient';
+import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
@@ -10,8 +11,11 @@ import AutocutMark from '@/components/branding/AutocutMark';
 export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
+  const videoUrl = useEditorStore(s => s.videoUrl);
+  const videoDuration = useEditorStore(s => s.videoDuration);
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
-  const clips = useEditorStore(s => s.clips);
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
@@ -19,15 +23,28 @@ export default function TopBar() {
   const canRedo = useEditorStore(s => s.future.length > 0);
   const { user } = useAuth();
 
+  const exportSources = resolveMainTrackSources({
+    clips,
+    mediaLibrary,
+    videoData,
+    videoFile,
+    videoUrl,
+    videoDuration,
+  }).filter((entry) => entry.source !== null);
+  const exportInputs = exportSources.map((entry) => ({
+    sourceId: entry.sourceId,
+    fileUrl: entry.source!,
+  }));
+
   const outputReady = ffmpegJob.status === 'done';
-  const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && !!videoFile;
+  const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && exportInputs.length > 0;
 
   const handleExport = useCallback(async () => {
-    if (!videoFile || clips.length === 0) return;
+    if (clips.length === 0 || exportInputs.length === 0) return;
     setFFmpegJob({ status: 'running', progress: 0, stage: 'Initializing…' });
     try {
       const outputUrl = await exportClips({
-        fileUrl: videoData ?? videoFile,
+        sources: exportInputs,
         clips,
         onStage: stage => setFFmpegJob({ status: 'running', progress: 0, stage }),
         onProgress: progress => setFFmpegJob({ status: 'running', progress, stage: 'Processing…' }),
@@ -37,7 +54,7 @@ export default function TopBar() {
       const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
       setFFmpegJob({ status: 'error', message: msg || 'Unknown error' });
     }
-  }, [clips, setFFmpegJob, videoData, videoFile]);
+  }, [clips, exportInputs, setFFmpegJob]);
 
   return (
     <div

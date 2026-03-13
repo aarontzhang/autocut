@@ -2,6 +2,7 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
+import { getClipSourceId } from './sourceUtils';
 import { invertSegments } from './timelineUtils';
 import { VideoClip } from './types';
 
@@ -42,20 +43,23 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
   return ffmpegInstance;
 }
 
+async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Uint8Array> {
+  if (fileOrUrl instanceof Uint8Array) {
+    return fileOrUrl;
+  }
+  if (fileOrUrl instanceof File) {
+    return new Uint8Array(await fileOrUrl.arrayBuffer() as ArrayBuffer);
+  }
+  return new Uint8Array(await fetch(fileOrUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
+}
+
 export async function extractAudioSegment(
   fileOrUrl: Uint8Array | File | string,
   startTime: number,
   endTime: number,
 ): Promise<Blob> {
   const ffmpeg = await getFFmpeg();
-  let inputBytes: Uint8Array;
-  if (fileOrUrl instanceof Uint8Array) {
-    inputBytes = fileOrUrl;
-  } else if (fileOrUrl instanceof File) {
-    inputBytes = new Uint8Array(await fileOrUrl.arrayBuffer() as ArrayBuffer);
-  } else {
-    inputBytes = new Uint8Array(await fetch(fileOrUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
-  }
+  const inputBytes = await readMediaInput(fileOrUrl);
   try { await ffmpeg.deleteFile('input_audio'); } catch { /* doesn't exist, fine */ }
   try { await ffmpeg.deleteFile('audio_out.mp3'); } catch { /* doesn't exist, fine */ }
   await ffmpeg.writeFile('input_audio', inputBytes);
@@ -102,14 +106,7 @@ export async function cutSegments({
   // Write input file
   onStage?.('Reading file…');
   const inputName = 'input.mp4';
-  let inputData: Uint8Array;
-  if (fileUrl instanceof Uint8Array) {
-    inputData = fileUrl;
-  } else if (fileUrl instanceof File) {
-    inputData = new Uint8Array(await fileUrl.arrayBuffer() as ArrayBuffer);
-  } else {
-    inputData = new Uint8Array(await fetch(fileUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
-  }
+  const inputData = await readMediaInput(fileUrl);
   await ffmpeg.writeFile(inputName, inputData);
 
   // Compute keep segments by inverting cuts
@@ -168,34 +165,36 @@ export async function cutSegments({
 }
 
 export interface ExportClipsOptions {
-  fileUrl: Uint8Array | File | string;
+  sources: Array<{
+    sourceId: string;
+    fileUrl: Uint8Array | File | string;
+  }>;
   clips: VideoClip[];
   onStage?: (stage: string) => void;
   onProgress?: (progress: number) => void;
 }
 
 export async function exportClips({
-  fileUrl,
+  sources,
   clips,
   onStage,
   onProgress,
 }: ExportClipsOptions): Promise<string> {
   if (clips.length === 0) throw new Error('No clips to export');
+  if (sources.length === 0) throw new Error('No media sources available for export');
 
   onStage?.('Loading FFmpeg…');
   const ffmpeg = await getFFmpeg(onProgress);
 
-  onStage?.('Reading file…');
-  const inputName = 'input_export.mp4';
-  let inputData: Uint8Array;
-  if (fileUrl instanceof Uint8Array) {
-    inputData = fileUrl;
-  } else if (fileUrl instanceof File) {
-    inputData = new Uint8Array(await fileUrl.arrayBuffer() as ArrayBuffer);
-  } else {
-    inputData = new Uint8Array(await fetch(fileUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
+  onStage?.('Reading source media…');
+  const sourceFileNames = new Map<string, string>();
+  for (let index = 0; index < sources.length; index += 1) {
+    const source = sources[index];
+    const inputName = `input_export_${index}.mp4`;
+    const inputData = await readMediaInput(source.fileUrl);
+    await ffmpeg.writeFile(inputName, inputData);
+    sourceFileNames.set(source.sourceId, inputName);
   }
-  await ffmpeg.writeFile(inputName, inputData);
 
   onStage?.('Processing clips…');
   const segFiles: string[] = [];
@@ -203,6 +202,11 @@ export async function exportClips({
   for (let i = 0; i < clips.length; i++) {
     const clip = clips[i];
     const segName = `export_seg${i}.mp4`;
+    const sourceId = getClipSourceId(clip);
+    const inputName = sourceFileNames.get(sourceId);
+    if (!inputName) {
+      throw new Error(`Missing media source for export (${sourceId}).`);
+    }
 
     // Build video filter chain
     const vFilters: string[] = [];
