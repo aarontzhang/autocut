@@ -9,7 +9,7 @@ import { uploadVideoToSupabase } from '@/lib/uploadVideo';
 import AutocutMark from '@/components/branding/AutocutMark';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
-import { STORAGE_FILE_LIMIT_BYTES, getFileSizeErrorMessage } from '@/lib/storageQuota';
+import { STORAGE_FILE_LIMIT_BYTES, STORAGE_QUOTA_BYTES, formatStorageBytes, getFileSizeErrorMessage } from '@/lib/storageQuota';
 
 export default function UploadScreen() {
   const setVideoCloud = useEditorStore(s => s.setVideoCloud);
@@ -147,7 +147,7 @@ export default function UploadScreen() {
             Drag & drop or click to browse
           </p>
           <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8 }}>
-            Up to 1 GB per video
+            Up to {formatStorageBytes(STORAGE_FILE_LIMIT_BYTES)} per video
           </p>
         </div>
 
@@ -195,7 +195,7 @@ export default function UploadScreen() {
 
       {/* Bottom hint */}
       <p style={{ marginTop: 28, fontSize: 12, color: 'var(--fg-muted)' }}>
-        Powered by Claude AI · 1 GB per video · 10 GB total storage per account
+        Powered by Claude AI · {formatStorageBytes(STORAGE_FILE_LIMIT_BYTES)} per video · {formatStorageBytes(STORAGE_QUOTA_BYTES)} total storage per account
       </p>
     </div>
   );

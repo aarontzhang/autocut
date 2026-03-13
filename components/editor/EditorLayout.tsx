@@ -469,6 +469,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             title="Storage status"
             message={storageNotice}
             compact
+            showUsageSummary={!storageNotice}
           />
         </div>
       )}

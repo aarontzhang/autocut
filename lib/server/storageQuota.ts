@@ -2,6 +2,7 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import {
   STORAGE_BUCKET,
   STORAGE_QUOTA_BYTES,
+  type ManagedUploadKind,
   buildStorageQuotaSnapshot,
   projectStorageQuotaSnapshot,
 } from '@/lib/storageQuota';
@@ -13,6 +14,10 @@ type StorageObjectRow = {
 
 type ProjectSizeRow = {
   video_size: unknown;
+};
+
+type StorageUploadRow = {
+  size_bytes: unknown;
 };
 
 const STORAGE_QUERY_PAGE_SIZE = 1000;
@@ -103,6 +108,16 @@ async function getProjectStorageUsageBytes(userId: string) {
   return ((data ?? []) as ProjectSizeRow[]).reduce((total, row) => total + readStoredByteCount(row.video_size), 0);
 }
 
+async function getTrackedStorageUsageBytes(userId: string) {
+  const { data, error } = await getSupabaseAdmin()
+    .from('storage_uploads')
+    .select('size_bytes')
+    .eq('user_id', userId);
+
+  if (error) throw error;
+  return ((data ?? []) as StorageUploadRow[]).reduce((total, row) => total + readStoredByteCount(row.size_bytes), 0);
+}
+
 export async function getStorageObjectSize(storagePath: string) {
   try {
     const { data, error } = await getStorageObjectsTable()
@@ -125,9 +140,26 @@ export async function getStorageObjectSize(storagePath: string) {
 }
 
 export async function getUserStorageUsageBytes(userId: string) {
+  let projectUsage = 0;
+  try {
+    projectUsage = await getProjectStorageUsageBytes(userId);
+  } catch (error) {
+    projectUsage = 0;
+    if (!isRecoverableStorageQueryError(error)) throw error;
+  }
+
+  let trackedUsage = 0;
+  try {
+    trackedUsage = await getTrackedStorageUsageBytes(userId);
+  } catch (error) {
+    if (!isRecoverableStorageQueryError(error)) throw error;
+    trackedUsage = 0;
+  }
+
   try {
     const rows = await listObjectsByPrefix(`${userId}/`);
-    return rows.reduce((total, row) => total + readObjectSize(row.metadata), 0);
+    const objectUsage = rows.reduce((total, row) => total + readObjectSize(row.metadata), 0);
+    return Math.max(objectUsage, trackedUsage, projectUsage);
   } catch (error) {
     if (!isRecoverableStorageQueryError(error)) throw error;
     console.warn('[storageQuota] falling back to project metadata for quota calculation', {
@@ -135,7 +167,7 @@ export async function getUserStorageUsageBytes(userId: string) {
       code: getErrorCode(error),
       message: getErrorMessage(error),
     });
-    return getProjectStorageUsageBytes(userId);
+    return Math.max(trackedUsage, projectUsage);
   }
 }
 
@@ -162,6 +194,58 @@ export async function removeStorageObjects(paths: string[]) {
     const { error } = await admin.storage.from(STORAGE_BUCKET).remove(chunk);
     if (error) throw error;
   }
+}
+
+export async function upsertTrackedStorageUpload(input: {
+  userId: string;
+  projectId: string;
+  storagePath: string;
+  kind: ManagedUploadKind;
+  sizeBytes: number;
+}) {
+  const { error } = await getSupabaseAdmin()
+    .from('storage_uploads')
+    .upsert({
+      storage_path: input.storagePath,
+      user_id: input.userId,
+      project_id: input.projectId,
+      upload_kind: input.kind,
+      size_bytes: Math.max(0, input.sizeBytes),
+    }, {
+      onConflict: 'storage_path',
+    });
+
+  if (!error) return;
+  if (isRecoverableStorageQueryError(error)) {
+    console.warn('[storageQuota] skipping tracked upload upsert', {
+      storagePath: input.storagePath,
+      code: getErrorCode(error),
+      message: getErrorMessage(error),
+    });
+    return;
+  }
+  throw error;
+}
+
+export async function removeTrackedStorageUploads(paths: string[]) {
+  const uniquePaths = Array.from(new Set(paths.filter(Boolean)));
+  if (uniquePaths.length === 0) return;
+
+  const { error } = await getSupabaseAdmin()
+    .from('storage_uploads')
+    .delete()
+    .in('storage_path', uniquePaths);
+
+  if (!error) return;
+  if (isRecoverableStorageQueryError(error)) {
+    console.warn('[storageQuota] skipping tracked upload removal', {
+      paths: uniquePaths,
+      code: getErrorCode(error),
+      message: getErrorMessage(error),
+    });
+    return;
+  }
+  throw error;
 }
 
 export async function removeProjectStorageObjects(userId: string, projectId: string) {

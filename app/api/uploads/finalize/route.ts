@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
-import { getStorageObjectSize, getUserStorageQuotaSnapshot, removeStorageObjects } from '@/lib/server/storageQuota';
+import {
+  getStorageObjectSize,
+  getUserStorageQuotaSnapshot,
+  removeStorageObjects,
+  removeTrackedStorageUploads,
+  upsertTrackedStorageUpload,
+} from '@/lib/server/storageQuota';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { STORAGE_QUOTA_BYTES, getQuotaErrorMessage, type ManagedUploadKind } from '@/lib/storageQuota';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
@@ -63,9 +69,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Uploaded file not found' }, { status: 404 });
   }
 
+  await upsertTrackedStorageUpload({
+    userId: user.id,
+    projectId,
+    storagePath,
+    kind,
+    sizeBytes: uploadedSize,
+  });
+
   const quota = await getUserStorageQuotaSnapshot(user.id);
   if (quota.usedBytes > STORAGE_QUOTA_BYTES) {
     await removeStorageObjects([storagePath]);
+    await removeTrackedStorageUploads([storagePath]);
 
     if (kind === 'project-main') {
       await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
@@ -85,7 +100,7 @@ export async function POST(request: NextRequest) {
       .update({
         video_path: storagePath,
         video_filename: fileName,
-        video_size: fileSize ?? uploadedSize,
+        video_size: uploadedSize,
       })
       .eq('id', projectId)
       .eq('user_id', user.id);

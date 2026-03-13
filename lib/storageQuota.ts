@@ -1,6 +1,6 @@
 export const STORAGE_BUCKET = 'videos';
-export const STORAGE_QUOTA_BYTES = 10_000_000_000;
-export const STORAGE_FILE_LIMIT_BYTES = 1_000_000_000;
+export const STORAGE_QUOTA_BYTES = 20_000_000_000;
+export const STORAGE_FILE_LIMIT_BYTES = 4_000_000_000;
 export const STORAGE_WARNING_RATIO = 0.8;
 export const STORAGE_CRITICAL_RATIO = 0.95;
 
@@ -79,11 +79,12 @@ export function getFileSizeErrorMessage(limitBytes = STORAGE_FILE_LIMIT_BYTES) {
 }
 
 export function getQuotaWarningMessage(snapshot: StorageQuotaSnapshot) {
+  const limitLabel = formatStorageBytes(snapshot.limitBytes);
   if (snapshot.warningLevel === 'critical') {
-    return `Storage is almost full. ${formatStorageBytes(snapshot.remainingBytes)} remaining before the 10 GB cap.`;
+    return `Storage is almost full. ${formatStorageBytes(snapshot.remainingBytes)} remaining before the ${limitLabel} cap.`;
   }
   if (snapshot.warningLevel === 'warning') {
-    return `Storage is above 80%. ${formatStorageBytes(snapshot.remainingBytes)} remaining before uploads are blocked.`;
+    return `Storage is above ${Math.round(STORAGE_WARNING_RATIO * 100)}%. ${formatStorageBytes(snapshot.remainingBytes)} remaining before uploads are blocked.`;
   }
   if (snapshot.warningLevel === 'limit') {
     return getQuotaErrorMessage(snapshot);

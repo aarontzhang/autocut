@@ -12,6 +12,7 @@ interface StorageQuotaBannerProps {
   title?: string;
   message?: string | null;
   compact?: boolean;
+  showUsageSummary?: boolean;
 }
 
 function getColors(warningLevel: StorageQuotaSnapshot['warningLevel'] | undefined) {
@@ -57,11 +58,13 @@ export default function StorageQuotaBanner({
   title = 'Storage',
   message = null,
   compact = false,
+  showUsageSummary = true,
 }: StorageQuotaBannerProps) {
   if (!quota && !message) return null;
 
   const colors = getColors(quota?.warningLevel);
   const resolvedMessage = message ?? (quota ? getQuotaWarningMessage(quota) : '');
+  const shouldShowUsageSummary = Boolean(quota) && showUsageSummary;
   const progressWidth = quota ? `${quota.usedBytes > 0 ? Math.max(4, quota.usageRatio * 100) : 0}%` : '0%';
   const padding = compact ? '10px 12px' : '14px 16px';
 
@@ -82,19 +85,19 @@ export default function StorageQuotaBanner({
           <p style={{ margin: '4px 0 0', fontSize: compact ? 11 : 12, color: colors.subtext }}>
             {loading && !quota
               ? 'Loading storage usage...'
-              : quota
+              : shouldShowUsageSummary
               ? `${formatStorageBytes(quota.usedBytes)} of ${formatStorageBytes(quota.limitBytes)} used`
               : resolvedMessage}
           </p>
         </div>
-        {quota && (
+        {shouldShowUsageSummary && (
           <p style={{ margin: 0, fontSize: compact ? 11 : 12, color: colors.subtext }}>
             {Math.round(quota.usageRatio * 100)}%
           </p>
         )}
       </div>
 
-      {quota && (
+      {shouldShowUsageSummary && quota && (
         <>
           <div
             style={{
