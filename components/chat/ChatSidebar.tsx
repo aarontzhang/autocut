@@ -1876,6 +1876,7 @@ export default function ChatSidebar() {
   const videoFrames = useEditorStore(s => s.videoFrames);
   const videoFramesFresh = useEditorStore(s => s.videoFramesFresh);
   const setVideoFrames = useEditorStore(s => s.setVideoFrames);
+  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
