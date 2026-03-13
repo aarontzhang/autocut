@@ -11,9 +11,10 @@ import { buildClipSchedule } from '@/lib/playbackEngine';
 import AutocutMark from '@/components/branding/AutocutMark';
 import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
-const FRAME_DESCRIPTION_BATCH_SIZE = 12;
-const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 4;
-const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 45000;
+const FRAME_DESCRIPTION_BATCH_SIZE = 20;
+const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 6;
+const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 6;
+const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
@@ -297,13 +298,34 @@ function estimateTranscriptSeconds(duration: number): number {
 }
 
 function estimateFrameExtractionSeconds(frameCount: number): number {
-  return Math.max(6, Math.min(30, frameCount * 0.035));
+  return Math.max(8, Math.min(240, frameCount * 0.12));
 }
 
 function estimateFrameDescriptionSeconds(frameCount: number): number {
   const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
   const waves = Math.ceil(batches / MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS);
-  return Math.max(4, waves * 3.5);
+  return Math.max(6, waves * 5);
+}
+
+function estimateRemainingSecondsFromObservedRate(
+  startedAtMs: number,
+  completed: number,
+  total: number,
+  fallbackUnitSeconds: number,
+): number {
+  const remaining = Math.max(total - completed, 0);
+  if (remaining <= 0) return 0;
+  if (completed < Math.min(6, total)) {
+    return Math.max(remaining * fallbackUnitSeconds, fallbackUnitSeconds);
+  }
+
+  const elapsedSeconds = Math.max((performance.now() - startedAtMs) / 1000, 0.001);
+  const unitsPerSecond = completed / elapsedSeconds;
+  if (!Number.isFinite(unitsPerSecond) || unitsPerSecond <= 0) {
+    return Math.max(remaining * fallbackUnitSeconds, fallbackUnitSeconds);
+  }
+
+  return remaining / unitsPerSecond;
 }
 
 function serializeActionForComparison(value: unknown): string {
@@ -1853,19 +1875,41 @@ export default function ChatSidebar() {
         ? preferredInterval
         : currentDuration / maxOverviewFrames;
       const sampleEnd = Math.max(currentDuration - 0.05, 0);
-      setFrameIndexingProgress({
-        stage: 'extracting_frames',
-        completed: 0,
-        total: Math.max(frameTarget, 1),
-        label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
-        etaSeconds: estimateFrameExtractionSeconds(frameTarget),
-      });
       const sourceTimestamps: number[] = [];
       for (let t = 0; t < sampleEnd; t += interval) sourceTimestamps.push(t);
       if (sourceTimestamps.length === 0 || sourceTimestamps[sourceTimestamps.length - 1] < sampleEnd) {
         sourceTimestamps.push(sampleEnd);
       }
-      const images = await extractVideoFrames(source, sourceTimestamps);
+      const extractionStartedAt = performance.now();
+      const extractionFallbackPerFrame = estimateFrameExtractionSeconds(sourceTimestamps.length) / Math.max(sourceTimestamps.length, 1);
+      let lastProgressPaintAt = 0;
+      setFrameIndexingProgress({
+        stage: 'extracting_frames',
+        completed: 0,
+        total: Math.max(sourceTimestamps.length, 1),
+        label: `Sampling ${frameTarget} frame${frameTarget === 1 ? '' : 's'}`,
+        etaSeconds: estimateFrameExtractionSeconds(sourceTimestamps.length),
+      });
+      const images = await extractVideoFrames(source, sourceTimestamps, {
+        concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
+        onProgress: ({ completed, total }) => {
+          const now = performance.now();
+          if (completed < total && now - lastProgressPaintAt < 120) return;
+          lastProgressPaintAt = now;
+          setFrameIndexingProgress({
+            stage: 'extracting_frames',
+            completed,
+            total: Math.max(total, 1),
+            label: `Sampling frames ${completed}/${total}`,
+            etaSeconds: estimateRemainingSecondsFromObservedRate(
+              extractionStartedAt,
+              completed,
+              total,
+              extractionFallbackPerFrame,
+            ),
+          });
+        },
+      });
       const frames = images.map((image, index) => ({
         image,
         timelineTime: sourceTimestamps[index],
@@ -1906,6 +1950,8 @@ export default function ChatSidebar() {
       const initialCompleted = nextFrames.filter((frame) => (
         frame.kind === 'overview' && !!frame.description && frame.description.trim().length > 0
       )).length;
+      const descriptionStartedAt = performance.now();
+      const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
       setFrameIndexingProgress({
         stage: 'describing_frames',
         completed: initialCompleted,
@@ -1946,7 +1992,14 @@ export default function ChatSidebar() {
           completed,
           total: Math.max(totalOverviewFrames, 1),
           label: `Analyzing visuals ${completed}/${totalOverviewFrames}`,
-          etaSeconds: remaining > 0 ? estimateFrameDescriptionSeconds(remaining) : 0,
+          etaSeconds: remaining > 0
+            ? estimateRemainingSecondsFromObservedRate(
+              descriptionStartedAt,
+              completed,
+              totalOverviewFrames,
+              descriptionFallbackPerFrame,
+            )
+            : 0,
         });
       });
       return nextFrames;

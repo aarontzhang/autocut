@@ -295,8 +295,14 @@ export async function exportClips({
 export async function extractVideoFrames(
   fileOrUrl: Uint8Array | File | string,
   timestamps: number[],
+  options: {
+    concurrency?: number;
+    onProgress?: (progress: { completed: number; total: number }) => void;
+  } = {},
 ): Promise<string[]> {
-  // Use browser-native video + Canvas — avoids loading the file into WASM memory entirely
+  if (timestamps.length === 0) return [];
+
+  // Use browser-native video + Canvas — avoids loading the file into WASM memory entirely.
   let objectUrl: string | null = null;
   let fallbackObjectUrl: string | null = null;
   let srcUrl: string;
@@ -314,18 +320,7 @@ export async function extractVideoFrames(
     srcUrl = fileOrUrl;
   }
 
-  const video = document.createElement('video');
-  video.muted = true;
-  video.preload = 'auto';
-  video.playsInline = true;
-  video.crossOrigin = 'anonymous';
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 320;
-  canvas.height = 180;
-  const ctx = canvas.getContext('2d')!;
-
-  const loadMetadata = async (url: string) => {
+  const loadMetadata = async (video: HTMLVideoElement, url: string) => {
     await new Promise<void>((resolve, reject) => {
       const handleLoadedMetadata = () => {
         cleanup();
@@ -347,39 +342,115 @@ export async function extractVideoFrames(
     });
   };
 
+  const createWorker = async (url: string) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.preload = 'auto';
+    video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 180;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Canvas context unavailable for frame extraction');
+    }
+
+    await loadMetadata(video, url);
+    const maxSeekTime = Math.max(video.duration - 0.05, 0);
+
+    return {
+      maxSeekTime,
+      async extractFrame(time: number) {
+        await new Promise<void>((resolve, reject) => {
+          const handleSeeked = () => {
+            cleanup();
+            resolve();
+          };
+          const handleError = () => {
+            cleanup();
+            reject(new Error(`Seek failed at ${time}s`));
+          };
+          const cleanup = () => {
+            clearTimeout(timeoutId);
+            video.removeEventListener('seeked', handleSeeked);
+            video.removeEventListener('error', handleError);
+          };
+          const timeoutId = window.setTimeout(() => {
+            cleanup();
+            reject(new Error(`Seek timeout at ${time}s`));
+          }, 8000);
+
+          video.addEventListener('seeked', handleSeeked, { once: true });
+          video.addEventListener('error', handleError, { once: true });
+          video.currentTime = Math.max(0, Math.min(time, maxSeekTime));
+        });
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+      },
+      dispose() {
+        video.src = '';
+        video.load();
+      },
+    };
+  };
+
+  let workers: Array<{
+    extractFrame: (time: number) => Promise<string>;
+    dispose: () => void;
+  }> = [];
+
   try {
+    const probeVideo = document.createElement('video');
+    probeVideo.muted = true;
+    probeVideo.preload = 'metadata';
+    probeVideo.playsInline = true;
+    probeVideo.crossOrigin = 'anonymous';
+
     try {
-      await loadMetadata(srcUrl);
+      await loadMetadata(probeVideo, srcUrl);
     } catch (error) {
       if (typeof fileOrUrl !== 'string') throw error;
       const response = await fetch(fileOrUrl);
-      if (!response.ok) {
-        throw error;
-      }
+      if (!response.ok) throw error;
       const blob = await response.blob();
       fallbackObjectUrl = URL.createObjectURL(blob);
       srcUrl = fallbackObjectUrl;
-      await loadMetadata(srcUrl);
+      await loadMetadata(probeVideo, srcUrl);
+    } finally {
+      probeVideo.src = '';
+      probeVideo.load();
     }
 
-    const frames: string[] = [];
-    const maxSeekTime = Math.max(video.duration - 0.05, 0);
-    for (const t of timestamps) {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`Seek timeout at ${t}s`)), 8000);
-        video.onseeked = () => {
-          clearTimeout(timeout);
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          frames.push(canvas.toDataURL('image/jpeg', 0.7).split(',')[1]);
-          resolve();
-        };
-        video.currentTime = Math.max(0, Math.min(t, maxSeekTime));
-      });
-    }
+    const hardwareConcurrency = typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
+      ? navigator.hardwareConcurrency
+      : 4;
+    const defaultConcurrency = Math.max(2, Math.min(8, Math.floor(hardwareConcurrency / 2) || 4));
+    const workerCount = Math.min(
+      timestamps.length,
+      Math.max(1, Math.floor(options.concurrency ?? defaultConcurrency)),
+    );
+
+    workers = await Promise.all(Array.from({ length: workerCount }, () => createWorker(srcUrl)));
+    const frames = new Array<string>(timestamps.length);
+    let nextIndex = 0;
+    let completed = 0;
+
+    await Promise.all(workers.map(async (worker) => {
+      for (;;) {
+        const currentIndex = nextIndex;
+        if (currentIndex >= timestamps.length) return;
+        nextIndex += 1;
+        frames[currentIndex] = await worker.extractFrame(timestamps[currentIndex]);
+        completed += 1;
+        options.onProgress?.({ completed, total: timestamps.length });
+      }
+    }));
     return frames;
   } finally {
-    video.src = '';
-    video.load();
+    workers.forEach((worker) => worker.dispose());
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     if (fallbackObjectUrl) URL.revokeObjectURL(fallbackObjectUrl);
   }

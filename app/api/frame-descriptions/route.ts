@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
 
     const rateLimitError = enforceRateLimit({
       key: `frame-descriptions:${getRateLimitIdentity(req.headers, user.id)}`,
-      limit: 20,
+      limit: 120,
       windowMs: 60_000,
     });
     if (rateLimitError) return rateLimitError;
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
     const requestedBatchSize = Number(body?.batchSize);
     const batchSize = Number.isFinite(requestedBatchSize)
       ? Math.max(1, Math.min(20, Math.floor(requestedBatchSize)))
-      : 12;
+      : 20;
 
     if (frames.length === 0) {
       return NextResponse.json({ descriptions: [] });
@@ -106,7 +106,7 @@ export async function POST(req: NextRequest) {
 
     const response = await client.messages.create({
       model: FRAME_DESCRIPTION_MODEL,
-      max_tokens: 1400,
+      max_tokens: 1800,
       temperature: 0,
       messages: [{ role: 'user', content }],
     });
