@@ -103,6 +103,7 @@ export default function Timeline({
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     if (videoFiles.length === 0) return;
     let filesToInsert = videoFiles;
+    let initializedMainInThisCall = false;
 
     if (!useEditorStore.getState().videoUrl) {
       const [firstFile, ...remainingFiles] = videoFiles;
@@ -112,14 +113,21 @@ export default function Timeline({
       await onImportFile(firstFile);
       if (remainingFiles.length === 0) return;
       filesToInsert = remainingFiles;
+      initializedMainInThisCall = true;
     }
 
     const initialSchedule = buildClipSchedule(useEditorStore.getState().clips);
-    let nextInsertTime = initialDropTime ?? (
+    let nextInsertTime = initializedMainInThisCall
+      ? (
+        initialSchedule.length > 0
+          ? initialSchedule[initialSchedule.length - 1].timelineEnd
+          : useEditorStore.getState().videoDuration
+      )
+      : initialDropTime ?? (
       initialSchedule.length > 0
         ? initialSchedule[initialSchedule.length - 1].timelineEnd
         : useEditorStore.getState().videoDuration
-    );
+      );
     for (const file of filesToInsert) {
       const sourceUrl = URL.createObjectURL(file);
       const duration = await readVideoDuration(sourceUrl);
