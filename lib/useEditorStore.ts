@@ -919,6 +919,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   loadProject: (editState, project) => {
     const { videoUrl, storagePath, projectId, videoFilename, duration } = project;
+    const existingState = get();
+    const canReuseLocalVideo = (
+      existingState.currentProjectId === projectId
+      && existingState.videoFile !== null
+      && (
+        !storagePath
+        || !existingState.storagePath
+        || existingState.storagePath === storagePath
+      )
+    );
+    const resolvedVideoFile = canReuseLocalVideo ? existingState.videoFile : null;
+    const resolvedVideoUrl = canReuseLocalVideo && existingState.videoUrl
+      ? existingState.videoUrl
+      : videoUrl;
+    const resolvedVideoName = canReuseLocalVideo && existingState.videoFile
+      ? existingState.videoFile.name
+      : videoFilename?.trim() || 'Main video';
     const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
     const clips = sanitizeTimelineClips(rawClips
       .map((clip) => normalizeLoadedClip(clip as Partial<VideoClip> & { sourcePath?: unknown }, storagePath))
@@ -984,8 +1001,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     set({
       ...buildBaseEditorState({
-        videoUrl,
-        videoName: videoFilename?.trim() || 'Main video',
+        videoFile: resolvedVideoFile,
+        videoUrl: resolvedVideoUrl,
+        videoName: resolvedVideoName,
         currentProjectId: projectId,
         storagePath,
       }),

@@ -9,6 +9,7 @@ let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<void> | null = null;
 let progressHandler: ((progress: number) => void) | null = null;
 let activeJobCancel: (() => void) | null = null;
+const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
 
 function createAbortError() {
   return new DOMException('Export canceled.', 'AbortError');
@@ -56,7 +57,27 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
   if (fileOrUrl instanceof File) {
     return new Uint8Array(await fileOrUrl.arrayBuffer() as ArrayBuffer);
   }
-  return new Uint8Array(await fetch(fileOrUrl).then(r => r.arrayBuffer()) as ArrayBuffer);
+  const cached = remoteMediaInputCache.get(fileOrUrl);
+  if (cached) {
+    return cached;
+  }
+
+  const pendingBytes = (async () => {
+    const response = await fetch(fileOrUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to load media source (${response.status}).`);
+    }
+    return new Uint8Array(await response.arrayBuffer() as ArrayBuffer);
+  })();
+
+  remoteMediaInputCache.set(fileOrUrl, pendingBytes);
+
+  try {
+    return await pendingBytes;
+  } catch (error) {
+    remoteMediaInputCache.delete(fileOrUrl);
+    throw error;
+  }
 }
 
 async function probeMediaInput(fileOrUrl: Uint8Array | File | string): Promise<{

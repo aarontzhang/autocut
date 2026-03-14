@@ -1788,10 +1788,12 @@ function ProgressStatusCard({
   title,
   progress,
   detail,
+  secondaryLabel,
 }: {
   title: string;
   progress: IndexingProgress | null;
   detail?: string | null;
+  secondaryLabel?: string | null;
 }) {
   const targetProgress = getProgressValue(progress);
   const etaLabel = formatEtaLabel(progress?.etaSeconds);
@@ -1857,6 +1859,11 @@ function ProgressStatusCard({
           )}
         </div>
       )}
+      {secondaryLabel && (
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.48)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
+          {secondaryLabel}
+        </span>
+      )}
       {detail && (
         <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.38)', fontFamily: 'var(--font-serif)', lineHeight: 1.5 }}>
           {detail}
@@ -1914,18 +1921,19 @@ function EmptyState({
   isIndexing,
   indexingReason,
   indexingProgress,
+  indexingSecondaryLabel,
+  indexingDetail,
   statusNotice,
   errorNotice,
 }: {
   isIndexing: boolean;
   indexingReason: string | null;
   indexingProgress: IndexingProgress | null;
+  indexingSecondaryLabel?: string | null;
+  indexingDetail?: string | null;
   statusNotice?: string | null;
   errorNotice?: string | null;
 }) {
-  const indexingDetail = indexingReason?.includes('take a while')
-    ? null
-    : 'Deep indexing can take a while on longer videos.';
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
@@ -1944,6 +1952,7 @@ function EmptyState({
             title={getIndexingStageTitle(indexingProgress, indexingReason)}
             progress={indexingProgress}
             detail={indexingDetail}
+            secondaryLabel={indexingSecondaryLabel}
           />
         </div>
       )}
@@ -2584,7 +2593,7 @@ export default function ChatSidebar() {
       : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && projectedOverviewFrames === null)
-      ? 'Transcribing audio and sampling frames…'
+      ? 'Preparing media in parallel…'
       : transcriptStatus === 'loading'
         ? 'Transcribing audio…'
         : projectedOverviewFrames === null
@@ -2610,6 +2619,18 @@ export default function ChatSidebar() {
     && !agentContextReady
     && !canSendDespiteIndexing
     && !isAnalyzingSampledFrames;
+  const indexingSecondaryLabel = transcriptStatus === 'loading' && !framesReady
+    ? frameIndexingProgress?.label
+      ? `${frameIndexingProgress.label} in parallel`
+      : projectedOverviewFrames === null
+        ? 'Frame sampling is also running in parallel.'
+        : !frameDescriptionsReady
+          ? 'Frame analysis is also running in parallel.'
+          : null
+    : null;
+  const indexingDetail = transcriptStatus === 'loading' && !framesReady
+    ? 'Audio transcription and visual indexing run concurrently, so progress can advance in bursts as each chunk completes.'
+    : 'Deep indexing can take a while on longer videos.';
   const composerInputDisabled = isChatLoading || reviewLocked;
   const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
   const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
@@ -2844,6 +2865,8 @@ export default function ChatSidebar() {
             isIndexing={hasVideoSource && !agentContextReady}
             indexingReason={agentNotReadyReason}
             indexingProgress={indexingProgress}
+            indexingSecondaryLabel={indexingSecondaryLabel}
+            indexingDetail={indexingDetail}
             statusNotice={transcriptUnavailableNotice}
             errorNotice={frameAnalysisErrorNotice}
           />
@@ -2870,7 +2893,8 @@ export default function ChatSidebar() {
               <ProgressStatusCard
                 title={getIndexingStageTitle(indexingProgress, agentNotReadyReason)}
                 progress={indexingProgress}
-                detail="Deep indexing can take a while on longer videos."
+                detail={indexingDetail}
+                secondaryLabel={indexingSecondaryLabel}
               />
             )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}

@@ -208,17 +208,22 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || document.hidden || playbackActive) {
       return;
     }
+    const ranges = buildOverlappingRanges(0, videoDuration);
     setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'loading');
-    setTranscriptProgress({ completed: 0, total: 1 });
+    setTranscriptProgress({ completed: 0, total: Math.max(ranges.length, 1) });
     (async () => {
       try {
         const rawWords: CaptionEntry[] = await transcribeSourceRanges(
           source,
-          buildOverlappingRanges(0, videoDuration),
+          ranges,
           aiSettings.captions.wordsPerCaption,
-          { sourceId: MAIN_SOURCE_ID },
+          {
+            sourceId: MAIN_SOURCE_ID,
+            onProgress: (progress) => {
+              setTranscriptProgress(progress);
+            },
+          },
         );
-        setTranscriptProgress({ completed: 1, total: 1 });
         setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'done', rawWords);
       } catch (error) {
         console.warn('Background transcription failed:', error);
