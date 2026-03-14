@@ -21,10 +21,10 @@ const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const AGENT_MENU_ITEMS = [
-  { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
-  { id: 'highlights', label: 'Highlights Assistant', status: 'coming_soon' as const },
-  { id: 'story', label: 'Story Assistant', status: 'coming_soon' as const },
-  { id: 'sound', label: 'Sound Assistant', status: 'coming_soon' as const },
+  { id: 'cut', label: 'Cut Agent', status: 'active' as const },
+  { id: 'highlights', label: 'Highlights Agent', status: 'coming_soon' as const },
+  { id: 'story', label: 'Story Agent', status: 'coming_soon' as const },
+  { id: 'sound', label: 'Sound Agent', status: 'coming_soon' as const },
 ];
 
 type FrameDescriptionResponse = {
@@ -2672,7 +2672,7 @@ export default function ChatSidebar() {
           <AutocutMark size={18} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-              Cut Assistant
+              Cut Agent
             </span>
             <div ref={agentMenuRef} style={{ position: 'relative' }}>
               <button

@@ -1505,8 +1505,8 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     if (isCaptionRequest(effectiveLatestUserMessage) || isCaptionCapabilityQuestion(effectiveLatestUserMessage)) {
       return NextResponse.json({
-        message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
-        action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
+        message: 'Cut Agent is focused on finding moments and reviewing cuts right now. Captioning is not available in this agent yet.',
+        action: { type: 'none', message: 'Captioning is not available in Cut Agent yet.' },
       });
     }
 
