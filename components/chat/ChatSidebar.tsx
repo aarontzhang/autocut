@@ -1943,7 +1943,8 @@ function EmptyState({
   isIndexing,
   indexingReason,
   indexingProgress,
-  indexingSecondaryLabel,
+  secondaryProgress,
+  secondaryProgressTitle,
   indexingDetail,
   statusNotice,
   errorNotice,
@@ -1951,7 +1952,8 @@ function EmptyState({
   isIndexing: boolean;
   indexingReason: string | null;
   indexingProgress: IndexingProgress | null;
-  indexingSecondaryLabel?: string | null;
+  secondaryProgress?: IndexingProgress | null;
+  secondaryProgressTitle?: string | null;
   indexingDetail?: string | null;
   statusNotice?: string | null;
   errorNotice?: string | null;
@@ -1974,7 +1976,15 @@ function EmptyState({
             title={getIndexingStageTitle(indexingProgress, indexingReason)}
             progress={indexingProgress}
             detail={indexingDetail}
-            secondaryLabel={indexingSecondaryLabel}
+          />
+        </div>
+      )}
+      {secondaryProgress && (
+        <div style={{ width: '100%', maxWidth: 290, marginTop: 6 }}>
+          <ProgressStatusCard
+            title={secondaryProgressTitle ?? getIndexingStageTitle(secondaryProgress, null)}
+            progress={secondaryProgress}
+            detail={null}
           />
         </div>
       )}
@@ -2314,7 +2324,12 @@ export default function ChatSidebar() {
               totalBatches: Math.max(totalBatches, 1),
               activeBatches: activeBatchCount,
             }),
-            etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - completedBeforeRequests, 0)),
+            etaSeconds: estimateRemainingSecondsFromObservedRate(
+              descriptionStartedAt,
+              completed,
+              totalOverviewFrames,
+              descriptionFallbackPerFrame,
+            ),
           });
         },
         onBatchComplete: (result) => {
@@ -2702,18 +2717,12 @@ export default function ChatSidebar() {
     && !agentContextReady
     && !canSendDespiteIndexing
     && !isAnalyzingSampledFrames;
-  const indexingSecondaryLabel = transcriptStatus === 'loading' && !framesReady
-    ? frameIndexingProgress?.label
-      ? `${frameIndexingProgress.label} in parallel`
-      : projectedOverviewFrames === null
-        ? 'Frame sampling is also running in parallel.'
-        : !frameDescriptionsReady
-          ? 'Frame analysis is also running in parallel.'
-          : null
+  const secondaryIndexingProgress: IndexingProgress | null = (transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
+    ? frameIndexingProgress
     : null;
-  const indexingDetail = transcriptStatus === 'loading' && !framesReady
-    ? 'Audio transcription and visual indexing run concurrently, so progress can advance in bursts as each chunk completes.'
-    : 'Deep indexing can take a while on longer videos.';
+  const indexingDetail = (!framesReady && !secondaryIndexingProgress)
+    ? 'Deep indexing can take a while on longer videos.'
+    : null;
   const composerInputDisabled = isChatLoading || reviewLocked;
   const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
   const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
@@ -2722,7 +2731,7 @@ export default function ChatSidebar() {
     const ta = textareaRef.current;
     if (ta) {
       ta.style.height = 'auto';
-      ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`;
+      ta.style.height = `${Math.min(ta.scrollHeight, 300)}px`;
     }
   }, []);
 
@@ -2948,7 +2957,8 @@ export default function ChatSidebar() {
             isIndexing={hasVideoSource && !agentContextReady}
             indexingReason={agentNotReadyReason}
             indexingProgress={indexingProgress}
-            indexingSecondaryLabel={indexingSecondaryLabel}
+            secondaryProgress={secondaryIndexingProgress}
+            secondaryProgressTitle={secondaryIndexingProgress ? getIndexingStageTitle(secondaryIndexingProgress, null) : null}
             indexingDetail={indexingDetail}
             statusNotice={transcriptUnavailableNotice}
             errorNotice={frameAnalysisErrorNotice}
@@ -2973,12 +2983,20 @@ export default function ChatSidebar() {
               />
             )}
             {!isChatLoading && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
-              <ProgressStatusCard
-                title={getIndexingStageTitle(indexingProgress, agentNotReadyReason)}
-                progress={indexingProgress}
-                detail={indexingDetail}
-                secondaryLabel={indexingSecondaryLabel}
-              />
+              <>
+                <ProgressStatusCard
+                  title={getIndexingStageTitle(indexingProgress, agentNotReadyReason)}
+                  progress={indexingProgress}
+                  detail={indexingDetail}
+                />
+                {secondaryIndexingProgress && (
+                  <ProgressStatusCard
+                    title={getIndexingStageTitle(secondaryIndexingProgress, null)}
+                    progress={secondaryIndexingProgress}
+                    detail={null}
+                  />
+                )}
+              </>
             )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>
@@ -3138,7 +3156,7 @@ export default function ChatSidebar() {
               fontSize: 13,
               lineHeight: 1.55,
               minHeight: 20,
-              maxHeight: 140,
+              maxHeight: 300,
               width: '100%',
               fontFamily: 'var(--font-serif)',
             }}

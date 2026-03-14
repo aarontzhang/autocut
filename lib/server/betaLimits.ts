@@ -89,7 +89,15 @@ export async function consumeBetaUsage(
     p_limit: limit,
   });
 
-  if (error) throw error;
+  if (error) {
+    console.warn('[betaLimits] consume_beta_usage RPC failed, allowing request through:', error.message);
+    return {
+      allowed: true,
+      usedAmount: 0,
+      limitAmount: limit <= 0 ? null : limit,
+      remainingAmount: limit <= 0 ? null : limit,
+    };
+  }
 
   const row = (Array.isArray(data) ? data[0] : data) as ConsumeBetaUsageRow | null;
   if (!row) {
