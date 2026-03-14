@@ -62,7 +62,7 @@ export default function MediaPanel({
                 {videoName || 'Source video'}
               </p>
               <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
-                Single-source mode is active for this temporary MVP.
+                {notice}
               </p>
             </div>
           </div>
@@ -80,7 +80,7 @@ export default function MediaPanel({
               No source video loaded
             </p>
             <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
-              Start with one video, then use Cut Assistant, manual cuts, and markers to shape the timeline.
+              Start with one video, then cut and add markers to shape the timeline.
             </p>
           </div>
         )}
@@ -95,7 +95,7 @@ export default function MediaPanel({
           gap: 8,
         }}>
           <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg-primary)' }}>
-            Temporary MVP
+            Source limit
           </p>
           <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.55 }}>
             {notice}
@@ -123,7 +123,7 @@ export default function MediaPanel({
             <line x1="12" y1="5" x2="12" y2="19"/>
             <line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          {canImport ? 'Import source video' : 'Source video already loaded'}
+          {canImport ? 'Import video' : 'Capped out, one video for now'}
         </button>
         <input
           ref={inputRef}

@@ -18,7 +18,7 @@ import { useStorageQuota } from '@/lib/useStorageQuota';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
-const SINGLE_SOURCE_NOTICE = 'This temporary MVP supports one source video only. Cut Assistant is live now, while Highlights Assistant, Story Assistant, and Sound Assistant are still in progress.';
+const SINGLE_SOURCE_NOTICE = 'Capped out at one video for now. Multi-file support coming soon.';
 const BLOB_URL_PREFIX = 'blob:';
 
 function isBlobUrl(url: string | undefined | null) {
@@ -534,7 +534,7 @@ function EmptyDropZone({
         </div>
         <div style={{ textAlign: 'center' }}>
           <p style={{ fontSize: 15, fontWeight: 500, color: 'var(--fg-primary)', marginBottom: 5 }}>
-            {isDragging ? 'Drop your source video' : 'Import one source video'}
+            {isDragging ? 'Drop your video' : 'Import video'}
           </p>
           <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>Drag & drop or click to browse</p>
           <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>

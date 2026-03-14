@@ -11,7 +11,6 @@ import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
-import HoverPillIconButton from '@/components/ui/HoverPillIconButton';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 20;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 3;
@@ -2719,30 +2718,21 @@ export default function ChatSidebar() {
                       </div>
                     );
                   })}
-                  <div style={{
-                    marginTop: 4,
-                    padding: '8px 10px 6px',
-                    fontSize: 10,
-                    lineHeight: 1.45,
-                    color: 'rgba(255,255,255,0.46)',
-                    fontFamily: 'var(--font-serif)',
-                  }}>
-                    This temporary build is focused on Cut Assistant and a single source video workflow.
-                  </div>
                 </div>
               )}
             </div>
-            <HoverPillIconButton
-              label="Clear chat"
+            <button
+              type="button"
               onClick={handleClearChat}
               disabled={isChatLoading || reviewLocked || messages.length === 0}
-              buttonStyle={{
-                width: 28,
-                height: 28,
+              aria-label="Clear chat"
+              title="Clear chat"
+              style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
+                gap: 6,
+                padding: '0 10px',
+                height: 28,
                 background: 'rgba(255,255,255,0.04)',
                 border: '1px solid rgba(255,255,255,0.08)',
                 borderRadius: 999,
@@ -2758,7 +2748,8 @@ export default function ChatSidebar() {
                 <path d="M10 11v5" />
                 <path d="M14 11v5" />
               </svg>
-            </HoverPillIconButton>
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)' }}>Clear chat</span>
+            </button>
           </div>
         </div>
 
@@ -2768,7 +2759,7 @@ export default function ChatSidebar() {
           fontFamily: 'var(--font-serif)',
           marginLeft: 28,
         }}>
-          Single-source editing is active in this MVP.
+          Capped out at one video for now.
         </span>
       </div>
 

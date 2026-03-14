@@ -271,12 +271,12 @@ export default function Timeline({
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <TimelineActionButton
-              label="Cut at playhead"
+              label="Cut"
               onClick={() => splitClipAtTime(useEditorStore.getState().currentTime)}
               icon={<CutToolIcon />}
             />
             <TimelineActionButton
-              label="Add marker at playhead"
+              label="Add marker"
               onClick={() => createMarkerAtTime(useEditorStore.getState().currentTime, { createdBy: 'human' })}
               icon={<MarkerToolIcon />}
             />
@@ -293,7 +293,7 @@ export default function Timeline({
             }}
             title={singleSourceNotice}
           >
-            One source video only for now. Use zoom, playhead scrubbing, cuts, and markers.
+            {singleSourceNotice}
           </span>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

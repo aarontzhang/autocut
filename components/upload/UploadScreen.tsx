@@ -23,7 +23,7 @@ export default function UploadScreen() {
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   const explainMultipleFiles = useCallback(() => {
-    setUploadError('This temporary MVP supports one source video only. Cut Assistant is live now, while Highlights Assistant, Story Assistant, and Sound Assistant are still in progress.');
+    setUploadError('Capped out at one video for now. Multi-file support coming soon.');
     setUploadProgress(null);
   }, [setUploadProgress]);
 
@@ -150,7 +150,7 @@ export default function UploadScreen() {
             Up to {formatStorageBytes(STORAGE_FILE_LIMIT_BYTES)} per video
           </p>
           <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>
-            Cut Assistant is ready now. Highlights Assistant, Story Assistant, and Sound Assistant are still on the way.
+            Capped out at one video for now. Multi-file support coming soon.
           </p>
         </div>
 
