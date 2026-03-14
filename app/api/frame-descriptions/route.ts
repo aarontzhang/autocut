@@ -118,13 +118,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not parse frame descriptions from model output.' }, { status: 502 });
     }
 
-    const descriptions = frames.map((_, index) => {
+    const descriptions: FrameDescription[] = [];
+    for (let index = 0; index < frames.length; index += 1) {
       const match = parsed.find((entry) => entry.index === index);
-      return {
+      const description = match?.description?.trim() ?? '';
+      if (!description) {
+        return NextResponse.json({ error: 'Incomplete frame descriptions from model output.' }, { status: 502 });
+      }
+      descriptions.push({
         index,
-        description: match?.description ?? 'Visual summary unavailable.',
-      };
-    });
+        description,
+      });
+    }
 
     return NextResponse.json({ descriptions });
   } catch (err) {

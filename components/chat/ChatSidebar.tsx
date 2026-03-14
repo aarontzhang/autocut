@@ -222,13 +222,20 @@ async function requestFrameDescriptions(batchFrames: Array<{
   throw lastError ?? new Error('Failed to describe video frames.');
 }
 
-function buildFallbackFrameDescriptions(frameCount: number): FrameDescriptionResponse {
-  return {
-    descriptions: Array.from({ length: frameCount }, (_, index) => ({
-      index,
-      description: 'Visual summary unavailable.',
-    })),
-  };
+const FRAME_DESCRIPTION_UNAVAILABLE = 'Visual summary unavailable.';
+
+function hasUsableFrameDescription(description?: string | null): boolean {
+  if (typeof description !== 'string') return false;
+  const normalized = description.trim();
+  return normalized.length > 0 && normalized !== FRAME_DESCRIPTION_UNAVAILABLE;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    return message.length > 0 ? message : fallback;
+  }
+  return fallback;
 }
 
 function clampProgress(value: number): number {
@@ -432,58 +439,62 @@ function mergeFrameDescriptions(
 async function runFrameDescriptionBatches(
   batches: FrameDescriptionBatch[],
   onBatchComplete: (result: { start: number; data: FrameDescriptionResponse }) => void,
-): Promise<void> {
-  if (batches.length === 0) return;
+): Promise<Error[]> {
+  if (batches.length === 0) return [];
 
   let nextBatchIndex = 0;
   const workerCount = Math.min(MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS, batches.length);
+  const errors: Error[] = [];
 
   const runWorker = async () => {
     while (nextBatchIndex < batches.length) {
       const batchIndex = nextBatchIndex;
       nextBatchIndex += 1;
       const batch = batches[batchIndex];
-      let data: FrameDescriptionResponse;
       try {
-        data = await requestFrameDescriptions(batch.batchFrames);
+        const data = await requestFrameDescriptions(batch.batchFrames);
+        onBatchComplete({ start: batch.start, data });
       } catch (error) {
-        console.warn('Failed to describe a frame batch; using fallback summaries.', error);
-        data = buildFallbackFrameDescriptions(batch.batchFrames.length);
+        const nextError = error instanceof Error ? error : new Error('Failed to describe video frames.');
+        console.warn('Failed to describe a frame batch.', nextError);
+        errors.push(nextError);
       }
-      onBatchComplete({ start: batch.start, data });
     }
   };
 
   await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return errors;
 }
 
 function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType<typeof useEditorStore.getState>['clips']): IndexedVideoFrame[] {
-  return frames.map((frame) => {
-    if (frame.kind === 'dense') {
-      return {
-        ...frame,
-        projectedTimelineTime: frame.timelineTime,
-        visibleOnTimeline: true,
-      };
-    }
+  return frames
+    .filter((frame) => frame.kind === 'dense' || hasUsableFrameDescription(frame.description))
+    .map((frame) => {
+      if (frame.kind === 'dense') {
+        return {
+          ...frame,
+          projectedTimelineTime: frame.timelineTime,
+          visibleOnTimeline: true,
+        };
+      }
 
-    if (frame.projectedTimelineTime !== undefined || frame.visibleOnTimeline !== undefined) {
+      if (frame.projectedTimelineTime !== undefined || frame.visibleOnTimeline !== undefined) {
+        return {
+          ...frame,
+          image: undefined,
+          projectedTimelineTime: frame.projectedTimelineTime ?? frame.timelineTime,
+          visibleOnTimeline: frame.visibleOnTimeline ?? true,
+        };
+      }
+
+      const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId);
       return {
         ...frame,
         image: undefined,
-        projectedTimelineTime: frame.projectedTimelineTime ?? frame.timelineTime,
-        visibleOnTimeline: frame.visibleOnTimeline ?? true,
+        projectedTimelineTime: timelineOccurrences[0] ?? null,
+        visibleOnTimeline: timelineOccurrences.length > 0,
       };
-    }
-
-    const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId);
-    return {
-      ...frame,
-      image: undefined,
-      projectedTimelineTime: timelineOccurrences[0] ?? null,
-      visibleOnTimeline: timelineOccurrences.length > 0,
-    };
-  });
+    });
 }
 
 function getAssistantFallbackMessage(action?: EditAction | null): string {
@@ -1855,17 +1866,62 @@ function ProgressStatusCard({
   );
 }
 
+function StatusNoticeCard({
+  title,
+  detail,
+  tone = 'info',
+}: {
+  title: string;
+  detail: string;
+  tone?: 'info' | 'error';
+}) {
+  const isError = tone === 'error';
+
+  return (
+    <div style={{
+      marginLeft: 22,
+      padding: '12px 13px',
+      borderRadius: 10,
+      border: isError ? '1px solid rgba(248,113,113,0.28)' : '1px solid rgba(255,255,255,0.08)',
+      background: isError
+        ? 'linear-gradient(180deg, rgba(127,29,29,0.22), rgba(69,10,10,0.14))'
+        : 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+    }}>
+      <span style={{
+        fontSize: 11,
+        color: isError ? '#fca5a5' : 'var(--fg-secondary)',
+        fontFamily: 'var(--font-serif)',
+      }}>
+        {title}
+      </span>
+      <span style={{
+        fontSize: 10,
+        color: isError ? 'rgba(254,202,202,0.9)' : 'rgba(255,255,255,0.38)',
+        fontFamily: 'var(--font-serif)',
+        lineHeight: 1.5,
+      }}>
+        {detail}
+      </span>
+    </div>
+  );
+}
+
 // ─── Empty state ───────────────────────────────────────────────────────────────
 function EmptyState({
   isIndexing,
   indexingReason,
   indexingProgress,
   statusNotice,
+  errorNotice,
 }: {
   isIndexing: boolean;
   indexingReason: string | null;
   indexingProgress: IndexingProgress | null;
   statusNotice?: string | null;
+  errorNotice?: string | null;
 }) {
   const indexingDetail = indexingReason?.includes('take a while')
     ? null
@@ -1892,18 +1948,20 @@ function EmptyState({
         </div>
       )}
       {statusNotice && (
-        <div style={{
-          width: '100%',
-          maxWidth: 290,
-          marginTop: isIndexing ? 0 : 10,
-          padding: '12px 14px',
-          borderRadius: 14,
-          background: 'rgba(255,255,255,0.03)',
-          border: '1px solid rgba(255,255,255,0.08)',
-        }}>
-          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.6, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
-            {statusNotice}
-          </p>
+        <div style={{ width: '100%', maxWidth: 290, marginTop: isIndexing ? 0 : 10 }}>
+          <StatusNoticeCard
+            title="Transcript unavailable"
+            detail={statusNotice}
+          />
+        </div>
+      )}
+      {errorNotice && (
+        <div style={{ width: '100%', maxWidth: 290 }}>
+          <StatusNoticeCard
+            title="Visual analysis error"
+            detail={errorNotice}
+            tone="error"
+          />
         </div>
       )}
     </div>
@@ -1940,6 +1998,7 @@ export default function ChatSidebar() {
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
+  const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
@@ -1969,6 +2028,10 @@ export default function ChatSidebar() {
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
   ), [availableSources, sourceIndexFreshBySourceId]);
+
+  useEffect(() => {
+    setFrameAnalysisError(null);
+  }, [currentProjectId]);
 
   // Build selected clip context for the API
   const selectedClipContext = (() => {
@@ -2087,6 +2150,7 @@ export default function ChatSidebar() {
       return state.projectedOverviewFrames ?? [];
     }
     try {
+      setFrameAnalysisError(null);
       const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
       const totalTargetFrames = sourcesToIndex.reduce((count, entry) => (
         count + getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames)
@@ -2128,7 +2192,9 @@ export default function ChatSidebar() {
           },
         });
         const describedFrames = await ensureFrameDescriptions(frames, true);
-        setSourceOverviewFrames(entry.sourceId, describedFrames, { fresh: true });
+        setSourceOverviewFrames(entry.sourceId, describedFrames, {
+          fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
+        });
         completedFrames += frames.length;
       }
       const refreshedState = useEditorStore.getState();
@@ -2140,7 +2206,8 @@ export default function ChatSidebar() {
         etaSeconds: 0,
       });
       return refreshedState.projectedOverviewFrames ?? [];
-    } catch {
+    } catch (error) {
+      setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
       setFrameIndexingProgress(null);
       return useEditorStore.getState().projectedOverviewFrames ?? [];
     }
@@ -2151,7 +2218,7 @@ export default function ChatSidebar() {
     force = false,
   ): Promise<SourceIndexedFrame[]> {
     if (frames.length === 0) return frames;
-    if (!force && frames.every((frame) => frame.description && frame.description.trim().length > 0)) {
+    if (!force && frames.every((frame) => hasUsableFrameDescription(frame.description))) {
       return frames;
     }
     if (frameDescriptionPromiseRef.current && !force) {
@@ -2161,7 +2228,7 @@ export default function ChatSidebar() {
     const promise = (async () => {
       let nextFrames = [...frames];
       const totalOverviewFrames = nextFrames.length;
-      const initialCompleted = nextFrames.filter((frame) => !!frame.description && frame.description.trim().length > 0).length;
+      const initialCompleted = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
       const descriptionStartedAt = performance.now();
       const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
       setFrameIndexingProgress({
@@ -2174,7 +2241,7 @@ export default function ChatSidebar() {
       const batches: FrameDescriptionBatch[] = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
         const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
-        const shouldDescribeBatch = force || batch.some((frame) => (!frame.description || frame.description.trim().length === 0));
+        const shouldDescribeBatch = force || batch.some((frame) => !hasUsableFrameDescription(frame.description));
         if (!shouldDescribeBatch) continue;
 
         const batchFrames = batch
@@ -2190,7 +2257,7 @@ export default function ChatSidebar() {
         batches.push({ start, batchFrames });
       }
 
-      await runFrameDescriptionBatches(batches, (result) => {
+      const errors = await runFrameDescriptionBatches(batches, (result) => {
         nextFrames = mergeFrameDescriptions(
           nextFrames.map((frame) => ({
             timelineTime: frame.sourceTime,
@@ -2208,7 +2275,7 @@ export default function ChatSidebar() {
           image: frame.image,
           description: frame.description,
         }));
-        const completed = nextFrames.filter((frame) => !!frame.description && frame.description.trim().length > 0).length;
+        const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
         const remaining = Math.max(totalOverviewFrames - completed, 0);
         setFrameIndexingProgress({
           stage: 'describing_frames',
@@ -2225,13 +2292,24 @@ export default function ChatSidebar() {
             : 0,
         });
       });
+      if (errors.length > 0) {
+        const firstError = getErrorMessage(errors[0], 'Failed to analyze sampled video frames.');
+        setFrameAnalysisError(
+          errors.length === 1
+            ? firstError
+            : `${firstError} (${errors.length} frame-description requests failed.)`
+        );
+      } else {
+        setFrameAnalysisError(null);
+      }
       return nextFrames;
     })();
 
     frameDescriptionPromiseRef.current = promise;
     try {
       return await promise;
-    } catch {
+    } catch (error) {
+      setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
       setFrameIndexingProgress(null);
       return frames;
     } finally {
@@ -2243,7 +2321,7 @@ export default function ChatSidebar() {
 
   const frameDescriptionsReady = useMemo(() => {
     if (projectedOverviewFrames === null) return false;
-    return projectedOverviewFrames.every((frame) => !!frame.description && frame.description.trim().length > 0);
+    return projectedOverviewFrames.every((frame) => hasUsableFrameDescription(frame.description));
   }, [projectedOverviewFrames]);
 
   const buildCurrentTranscript = useCallback(() => {
@@ -2484,7 +2562,7 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
-  const framesReady = projectedOverviewFrames !== null && frameDescriptionsReady;
+  const framesReady = frameAnalysisError !== null || (projectedOverviewFrames !== null && frameDescriptionsReady);
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
@@ -2518,11 +2596,15 @@ export default function ChatSidebar() {
   const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
     ? 'Audio transcription did not finish, but the assistant is ready to work from the video and visual analysis.'
     : null;
+  const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
+    ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`
+    : null;
   const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
   const canSendDespiteIndexing = pendingVisualQuery;
   const isAnalyzingSampledFrames = hasVideoSource
     && (transcriptStatus === 'done' || transcriptFailed)
     && projectedOverviewFrames !== null
+    && frameAnalysisError === null
     && !frameDescriptionsReady;
   const mediaPreparationBlockingSend = hasVideoSource
     && !agentContextReady
@@ -2763,6 +2845,7 @@ export default function ChatSidebar() {
             indexingReason={agentNotReadyReason}
             indexingProgress={indexingProgress}
             statusNotice={transcriptUnavailableNotice}
+            errorNotice={frameAnalysisErrorNotice}
           />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -2771,10 +2854,16 @@ export default function ChatSidebar() {
               : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
             )}
             {transcriptUnavailableNotice && (
-              <ProgressStatusCard
+              <StatusNoticeCard
                 title="Transcript unavailable"
-                progress={null}
                 detail={transcriptUnavailableNotice}
+              />
+            )}
+            {frameAnalysisErrorNotice && (
+              <StatusNoticeCard
+                title="Visual analysis error"
+                detail={frameAnalysisErrorNotice}
+                tone="error"
               />
             )}
             {!isChatLoading && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
