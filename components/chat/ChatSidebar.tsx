@@ -340,7 +340,7 @@ function getOverviewFrameTarget(duration: number, preferredInterval: number, max
 }
 
 function estimateTranscriptSeconds(duration: number): number {
-  return Math.max(12, Math.min(90, duration * 0.16));
+  return Math.max(12, Math.min(600, duration * 0.16));
 }
 
 function estimateFrameExtractionSeconds(frameCount: number): number {
@@ -2045,6 +2045,7 @@ export default function ChatSidebar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
+  const transcriptStartedAtRef = useRef<number | null>(null);
   const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
@@ -2073,6 +2074,14 @@ export default function ChatSidebar() {
   useEffect(() => {
     setFrameAnalysisError(null);
   }, [currentProjectId]);
+
+  useEffect(() => {
+    if (transcriptStatus === 'loading' && (transcriptProgress === null || transcriptProgress.completed === 0)) {
+      transcriptStartedAtRef.current = performance.now();
+    } else if (transcriptStatus !== 'loading') {
+      transcriptStartedAtRef.current = null;
+    }
+  }, [transcriptStatus, transcriptProgress]);
 
   // Build selected clip context for the API
   const selectedClipContext = (() => {
@@ -2673,9 +2682,15 @@ export default function ChatSidebar() {
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
-  const estimatedTranscriptRemainingEta = transcriptProgress && transcriptProgress.total > 0
-    ? estimatedTranscriptEta * Math.max(0, transcriptProgress.total - transcriptProgress.completed) / transcriptProgress.total
-    : estimatedTranscriptEta;
+  const estimatedTranscriptRemainingEta =
+    transcriptProgress && transcriptProgress.total > 0 && transcriptStartedAtRef.current !== null
+      ? estimateRemainingSecondsFromObservedRate(
+          transcriptStartedAtRef.current,
+          transcriptProgress.completed,
+          transcriptProgress.total,
+          estimatedTranscriptEta / Math.max(transcriptProgress.total, 1),
+        )
+      : estimatedTranscriptEta;
   const indexingProgress = transcriptStatus === 'loading'
     ? {
         stage: 'transcribing' as const,

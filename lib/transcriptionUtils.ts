@@ -154,8 +154,6 @@ export async function transcribeSourceRanges(
   const rawEntries: CaptionEntry[] = [];
   const total = ranges.length;
 
-  options.onProgress?.({ completed: 0, total });
-
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index];
     const audioBlob = await extractAudioSegment(source, range.startTime, range.endTime);

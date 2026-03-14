@@ -695,7 +695,7 @@ export async function extractVideoFrames(
           const timeoutId = window.setTimeout(() => {
             cleanup();
             reject(new Error(`Seek timeout at ${time}s`));
-          }, 8000);
+          }, 30000);
 
           video.addEventListener('seeked', handleSeeked, { once: true });
           video.addEventListener('error', handleError, { once: true });
@@ -742,7 +742,7 @@ export async function extractVideoFrames(
     const hardwareConcurrency = typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
       ? navigator.hardwareConcurrency
       : 4;
-    const defaultConcurrency = Math.max(2, Math.min(8, Math.floor(hardwareConcurrency / 2) || 4));
+    const defaultConcurrency = Math.max(1, Math.min(4, Math.floor(hardwareConcurrency / 4) || 2));
     const workerCount = Math.min(
       timestamps.length,
       Math.max(1, Math.floor(options.concurrency ?? defaultConcurrency)),
@@ -761,6 +761,8 @@ export async function extractVideoFrames(
         frames[currentIndex] = await worker.extractFrame(timestamps[currentIndex]);
         completed += 1;
         options.onProgress?.({ completed, total: timestamps.length });
+        // Yield to the event loop so the browser can process other tasks
+        await new Promise<void>((r) => setTimeout(r, 0));
       }
     }));
     return frames;
