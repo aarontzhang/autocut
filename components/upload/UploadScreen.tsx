@@ -23,7 +23,7 @@ export default function UploadScreen() {
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   const explainMultipleFiles = useCallback(() => {
-    setUploadError('Start with one main video. After the project opens, import additional clips from the Media panel.');
+    setUploadError('This temporary MVP supports one source video only. Cut Assistant is live now, while Highlights Assistant, Story Assistant, and Sound Assistant are still in progress.');
     setUploadProgress(null);
   }, [setUploadProgress]);
 
@@ -144,10 +144,13 @@ export default function UploadScreen() {
             {isDragging ? 'Drop to import' : 'Import video'}
           </p>
           <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>
-            Drag & drop or click to browse
+            Drag & drop or click to browse one source video
           </p>
           <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8 }}>
             Up to {formatStorageBytes(STORAGE_FILE_LIMIT_BYTES)} per video
+          </p>
+          <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>
+            Cut Assistant is ready now. Highlights Assistant, Story Assistant, and Sound Assistant are still on the way.
           </p>
         </div>
 

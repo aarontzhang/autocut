@@ -1,53 +1,22 @@
 'use client';
 
-import { useRef, useCallback } from 'react';
+import { useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { formatTimeShort } from '@/lib/timelineUtils';
 
 export default function MediaPanel({
   onImportMainFile,
-  onImportLibraryFile,
-  onImportFiles,
+  canImport,
+  notice,
 }: {
-  onImportMainFile?: (file: File) => void;
-  onImportLibraryFile?: (file: File) => Promise<void>;
-  onImportFiles?: (files: File[]) => void | Promise<void>;
+  onImportMainFile?: (file: File) => void | Promise<void>;
+  canImport: boolean;
+  notice: string;
 }) {
-  const videoUrl = useEditorStore(s => s.videoUrl);
-  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
-  const setVideoFile = useEditorStore(s => s.setVideoFile);
-  const addToMediaLibrary = useEditorStore(s => s.addToMediaLibrary);
-  const appendVideoToTimeline = useEditorStore(s => s.appendVideoToTimeline);
   const inputRef = useRef<HTMLInputElement>(null);
-  const canAppendToTimeline = Boolean(videoUrl);
-
-  const handleImport = useCallback(async (file: File) => {
-    if (!file.type.startsWith('video/')) return;
-    if (!videoUrl) {
-      if (onImportMainFile) onImportMainFile(file);
-      else setVideoFile(file);
-    } else {
-      if (onImportLibraryFile) await onImportLibraryFile(file);
-      else await addToMediaLibrary(file);
-    }
-  }, [videoUrl, setVideoFile, addToMediaLibrary, onImportMainFile, onImportLibraryFile]);
-
-  const handleImportFiles = useCallback(async (files: File[]) => {
-    if (files.length === 0) return;
-    if (onImportFiles) {
-      await onImportFiles(files);
-      return;
-    }
-
-    for (const file of files) {
-      await handleImport(file);
-    }
-  }, [handleImport, onImportFiles]);
-
-  const handleAppendItem = useCallback((index: number, item: typeof mediaLibrary[number]) => {
-    if (!canAppendToTimeline || index === 0 || item.duration <= 0) return;
-    appendVideoToTimeline(item.url, item.name, item.duration, item.sourcePath, item.sourceId);
-  }, [appendVideoToTimeline, canAppendToTimeline]);
+  const videoUrl = useEditorStore(s => s.videoUrl);
+  const videoDuration = useEditorStore(s => s.videoDuration);
+  const videoName = useEditorStore(s => s.videoName);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: 'var(--bg-panel)' }}>
@@ -56,112 +25,116 @@ export default function MediaPanel({
         padding: '0 12px', borderBottom: '1px solid var(--border)', flexShrink: 0,
       }}>
         <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-serif)' }}>
-          Media
+          Source
         </span>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {mediaLibrary.map((item, idx) => (
+        {videoUrl ? (
           <div
-            key={item.id}
             style={{
-              flexShrink: 0,
-              borderRadius: 7,
+              borderRadius: 10,
               overflow: 'hidden',
               border: '1px solid var(--border-mid)',
               background: 'var(--bg-elevated)',
-              padding: 0,
-              textAlign: 'left',
             }}
           >
             <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', position: 'relative', overflow: 'hidden' }}>
               <video
-                src={item.url}
+                src={videoUrl}
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 muted
-                preload="none"
+                preload="metadata"
                 playsInline
               />
-              {item.duration > 0 && (
+              {videoDuration > 0 && (
                 <div style={{
-                  position: 'absolute', bottom: 5, right: 6,
+                  position: 'absolute', bottom: 8, right: 8,
                   fontSize: 10, fontFamily: 'var(--font-serif)', color: '#fff',
-                  background: 'rgba(0,0,0,0.7)', padding: '2px 5px', borderRadius: 3,
+                  background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: 4,
                 }}>
-                  {formatTimeShort(item.duration)}
+                  {formatTimeShort(videoDuration)}
                 </div>
               )}
-              {idx > 0 && canAppendToTimeline && item.duration > 0 && (
-                <button
-                  type="button"
-                  aria-label={`Add ${item.name} to timeline`}
-                  title="Add to timeline"
-                  onClick={() => handleAppendItem(idx, item)}
-                  style={{
-                    position: 'absolute',
-                    top: 6,
-                    right: 6,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    width: 24,
-                    height: 24,
-                    padding: 0,
-                    borderRadius: 999,
-                    background: 'rgba(0,0,0,0.64)',
-                    border: '1px solid rgba(255,255,255,0.14)',
-                    color: '#fff',
-                    fontSize: 16,
-                    lineHeight: 1,
-                    cursor: 'pointer',
-                  }}
-                >
-                  +
-                </button>
-              )}
             </div>
-            <div style={{ padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ fontSize: 11, fontWeight: 500, color: 'var(--fg-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 1 }}>
-                  {item.name}
-                </p>
-                <p style={{ fontSize: 10, color: 'var(--fg-muted)' }}>
-                  {item.duration > 0 ? formatTimeShort(item.duration) : '—'}{idx === 0 ? ' · main' : ''}
-                </p>
-              </div>
+            <div style={{ padding: '10px 11px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg-primary)', lineHeight: 1.4 }}>
+                {videoName || 'Source video'}
+              </p>
+              <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
+                Single-source mode is active for this temporary MVP.
+              </p>
             </div>
           </div>
-        ))}
+        ) : (
+          <div style={{
+            borderRadius: 10,
+            border: '1px dashed rgba(255,255,255,0.12)',
+            background: 'rgba(255,255,255,0.02)',
+            padding: '14px 12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 7,
+          }}>
+            <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg-primary)' }}>
+              No source video loaded
+            </p>
+            <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
+              Start with one video, then use Cut Assistant, manual cuts, and markers to shape the timeline.
+            </p>
+          </div>
+        )}
+
+        <div style={{
+          borderRadius: 10,
+          border: '1px solid rgba(255,255,255,0.08)',
+          background: 'rgba(255,255,255,0.025)',
+          padding: '12px 11px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}>
+          <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg-primary)' }}>
+            Temporary MVP
+          </p>
+          <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.55 }}>
+            {notice}
+          </p>
+        </div>
 
         <button
-          onClick={() => inputRef.current?.click()}
+          type="button"
+          onClick={() => canImport && inputRef.current?.click()}
+          disabled={!canImport}
           style={{
             flexShrink: 0,
             display: 'flex', alignItems: 'center', gap: 7,
-            width: '100%', padding: '7px 10px',
-            background: 'rgba(255,255,255,0.03)',
-            border: '1px dashed rgba(255,255,255,0.12)',
-            borderRadius: 6, cursor: 'pointer',
-            fontSize: 12, color: 'var(--fg-secondary)',
+            width: '100%', padding: '9px 10px',
+            background: canImport ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.02)',
+            border: `1px dashed ${canImport ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: 6,
+            cursor: canImport ? 'pointer' : 'default',
+            fontSize: 12,
+            color: canImport ? 'var(--fg-secondary)' : 'var(--fg-muted)',
             transition: 'background 0.15s, border-color 0.15s',
           }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.2)'; }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'; }}
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="12" y1="5" x2="12" y2="19"/>
             <line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          Import video
+          {canImport ? 'Import source video' : 'Source video already loaded'}
         </button>
         <input
           ref={inputRef}
           type="file"
           accept="video/*"
-          multiple
           className="hidden"
           onChange={e => {
-            void handleImportFiles(Array.from(e.target.files ?? []));
+            const file = e.target.files?.[0];
+            if (file && onImportMainFile) {
+              void onImportMainFile(file);
+            }
             e.target.value = '';
           }}
         />

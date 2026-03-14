@@ -2,7 +2,6 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
-import { getClipSourceId } from './sourceUtils';
 import { invertSegments } from './timelineUtils';
 import { VideoClip } from './types';
 
@@ -144,12 +143,9 @@ function mergeAdjacentCopyClips(clips: VideoClip[]): VideoClip[] {
 
   for (const clip of clips) {
     const last = merged[merged.length - 1];
-    const lastSourceId = last ? getClipSourceId(last) : null;
-    const clipSourceId = getClipSourceId(clip);
 
     if (
       last
-      && lastSourceId === clipSourceId
       && isPlainCutClip(last)
       && isPlainCutClip(clip)
       && Math.abs((last.sourceStart + last.sourceDuration) - clip.sourceStart) < 0.001
@@ -162,61 +158,6 @@ function mergeAdjacentCopyClips(clips: VideoClip[]): VideoClip[] {
   }
 
   return merged;
-}
-
-function samePhysicalSource(
-  left: Uint8Array | File | string,
-  right: Uint8Array | File | string,
-): boolean {
-  if (left === right) {
-    return true;
-  }
-
-  if (typeof left === 'string' && typeof right === 'string') {
-    return left === right;
-  }
-
-  if (left instanceof File && right instanceof File) {
-    return (
-      left.name === right.name
-      && left.size === right.size
-      && left.lastModified === right.lastModified
-    );
-  }
-
-  if (left instanceof Uint8Array && right instanceof Uint8Array) {
-    return left.byteLength === right.byteLength;
-  }
-
-  return false;
-}
-
-function getFastCopySource(
-  clips: VideoClip[],
-  sources: Array<{ sourceId: string; fileUrl: Uint8Array | File | string }>,
-) {
-  if (clips.length === 0 || sources.length === 0) {
-    return null;
-  }
-
-  const sourceById = new Map(sources.map((source) => [source.sourceId, source]));
-  const firstSource = sourceById.get(getClipSourceId(clips[0]));
-  if (!firstSource) {
-    return null;
-  }
-
-  for (const clip of clips) {
-    if (!isPlainCutClip(clip)) {
-      return null;
-    }
-
-    const clipSource = sourceById.get(getClipSourceId(clip));
-    if (!clipSource || !samePhysicalSource(firstSource.fileUrl, clipSource.fileUrl)) {
-      return null;
-    }
-  }
-
-  return firstSource;
 }
 
 function createOverallProgressReporter(onProgress?: (progress: number) => void) {
@@ -404,10 +345,7 @@ export async function cutSegments({
 }
 
 export interface ExportClipsOptions {
-  sources: Array<{
-    sourceId: string;
-    fileUrl: Uint8Array | File | string;
-  }>;
+  source: Uint8Array | File | string;
   clips: VideoClip[];
   signal?: AbortSignal;
   onStage?: (stage: string) => void;
@@ -415,14 +353,13 @@ export interface ExportClipsOptions {
 }
 
 export async function exportClips({
-  sources,
+  source,
   clips,
   signal,
   onStage,
   onProgress,
 }: ExportClipsOptions): Promise<string> {
   if (clips.length === 0) throw new Error('No clips to export');
-  if (sources.length === 0) throw new Error('No media sources available for export');
 
   const job = createFFmpegJobHandle(signal);
   const reportOverallProgress = createOverallProgressReporter(onProgress);
@@ -437,13 +374,12 @@ export async function exportClips({
     job.throwIfCancelled();
     reportOverallProgress(5);
 
-    const fastCopySource = getFastCopySource(clips, sources);
-    if (fastCopySource) {
+    if (clips.every(isPlainCutClip)) {
       const mergedClips = mergeAdjacentCopyClips(clips);
       const inputName = 'input_export_fast.mp4';
 
       onStage?.('Reading source media…');
-      const inputData = await readMediaInput(fastCopySource.fileUrl);
+      const inputData = await readMediaInput(source);
       job.throwIfCancelled();
       await ffmpeg.writeFile(inputName, inputData);
       reportOverallProgress(15);
@@ -503,28 +439,17 @@ export async function exportClips({
     }
 
     onStage?.('Reading source media…');
-    const sourceFileNames = new Map<string, string>();
-    const sourceDimensions = new Map<string, { width: number; height: number }>();
-    for (let index = 0; index < sources.length; index += 1) {
-      job.throwIfCancelled();
-      const source = sources[index];
-      const inputName = `input_export_${index}.mp4`;
-      const [inputData, dimensions] = await Promise.all([
-        readMediaInput(source.fileUrl),
-        probeMediaInput(source.fileUrl).catch(() => ({ width: 0, height: 0 })),
-      ]);
-      job.throwIfCancelled();
-      await ffmpeg.writeFile(inputName, inputData);
-      sourceFileNames.set(source.sourceId, inputName);
-      sourceDimensions.set(source.sourceId, dimensions);
-      reportOverallProgress(5 + (((index + 1) / sources.length) * 10));
-    }
+    const inputName = 'input_export.mp4';
+    const [inputData, dimensions] = await Promise.all([
+      readMediaInput(source),
+      probeMediaInput(source).catch(() => ({ width: 0, height: 0 })),
+    ]);
+    job.throwIfCancelled();
+    await ffmpeg.writeFile(inputName, inputData);
+    reportOverallProgress(15);
 
-    const firstClipSourceId = getClipSourceId(clips[0]);
-    const firstClipDimensions = sourceDimensions.get(firstClipSourceId);
-    const fallbackDimensions = [...sourceDimensions.values()].find((dims) => dims.width > 0 && dims.height > 0);
-    const targetWidth = toEvenDimension(firstClipDimensions?.width ?? fallbackDimensions?.width ?? 1280, 1280);
-    const targetHeight = toEvenDimension(firstClipDimensions?.height ?? fallbackDimensions?.height ?? 720, 720);
+    const targetWidth = toEvenDimension(dimensions.width || 1280, 1280);
+    const targetHeight = toEvenDimension(dimensions.height || 720, 720);
 
     onStage?.('Processing clips…');
     const segFiles: string[] = [];
@@ -535,11 +460,6 @@ export async function exportClips({
       const clip = clips[i];
       const clipState = getClipExportState(clip);
       const segName = `export_seg${i}.mp4`;
-      const sourceId = getClipSourceId(clip);
-      const inputName = sourceFileNames.get(sourceId);
-      if (!inputName) {
-        throw new Error(`Missing media source for export (${sourceId}).`);
-      }
 
       const vFilters: string[] = [];
       const aFilters: string[] = [];

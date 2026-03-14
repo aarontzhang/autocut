@@ -21,26 +21,6 @@ function persistSourceOverviewFrame(frame: {
   };
 }
 
-function stripSourceUrl<T extends { sourceUrl?: string }>(item: T): Omit<T, 'sourceUrl'> {
-  const copy = { ...item };
-  delete copy.sourceUrl;
-  return copy;
-}
-
-function persistMediaLibraryItem(item: {
-  name: string;
-  duration: number;
-  sourceId?: string;
-  sourcePath?: string;
-}) {
-  return {
-    name: item.name,
-    duration: item.duration,
-    ...(item.sourceId ? { sourceId: item.sourceId } : {}),
-    ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}),
-  };
-}
-
 export function useAutoSave() {
   const clips = useEditorStore(s => s.clips);
   const captions = useEditorStore(s => s.captions);
@@ -56,7 +36,6 @@ export function useAutoSave() {
   const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
-  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const setSaveStatus = useEditorStore(s => s.setSaveStatus);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -76,7 +55,7 @@ export function useAutoSave() {
       try {
         const state = useEditorStore.getState();
         const editState = {
-          clips: state.clips.map(stripSourceUrl),
+          clips: state.clips,
           captions: state.captions,
           transitions: state.transitions,
           markers: state.markers,
@@ -91,9 +70,6 @@ export function useAutoSave() {
             .filter(frame => !!frame.description?.trim() || !!frame.image)
             .map(persistSourceOverviewFrame),
           sourceIndexFreshBySourceId: state.sourceIndexFreshBySourceId,
-          mediaLibrary: state.mediaLibrary
-            .filter(item => item.sourcePath)
-            .map(persistMediaLibraryItem),
         };
         const res = await fetch(`/api/projects/${currentProjectId}`, {
           method: 'PATCH',
@@ -113,5 +89,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, sourceTranscriptCaptions, sourceOverviewFrames, sourceIndexFreshBySourceId, currentProjectId, mediaLibrary, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, sourceTranscriptCaptions, sourceOverviewFrames, sourceIndexFreshBySourceId, currentProjectId, setSaveStatus]);
 }

@@ -21,10 +21,10 @@ const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const AGENT_MENU_ITEMS = [
-  { id: 'cut', label: 'Cut Agent', status: 'active' as const },
-  { id: 'highlights', label: 'Highlights Agent', status: 'coming_soon' as const },
-  { id: 'story', label: 'Story Agent', status: 'coming_soon' as const },
-  { id: 'sound', label: 'Sound Agent', status: 'coming_soon' as const },
+  { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
+  { id: 'highlights', label: 'Highlights Assistant', status: 'coming_soon' as const },
+  { id: 'story', label: 'Story Assistant', status: 'coming_soon' as const },
+  { id: 'sound', label: 'Sound Assistant', status: 'coming_soon' as const },
 ];
 
 type FrameDescriptionResponse = {
@@ -1125,7 +1125,6 @@ async function extractSourceOverviewFrames(
 async function extractTimelineFramesFromSources(
   input: {
     clips: ReturnType<typeof useEditorStore.getState>['clips'];
-    mediaLibrary: ReturnType<typeof useEditorStore.getState>['mediaLibrary'];
     videoData: Uint8Array | null;
     videoFile: File | null;
     videoUrl: string;
@@ -1153,57 +1152,38 @@ async function extractTimelineFramesFromSources(
 
   if (samples.length === 0) return [];
 
-  const availableSources = resolveMainTrackSources({
-    clips: input.clips,
-    mediaLibrary: input.mediaLibrary,
+  const sourceEntry = resolveMainTrackSources({
     videoData: input.videoData,
     videoFile: input.videoFile,
     videoUrl: input.videoUrl,
     videoDuration: input.videoDuration,
-  });
-  const sourceMap = new Map(availableSources.map((entry) => [entry.sourceId, entry]));
-  const samplesBySource = new Map<string, TimelineFrameSample[]>();
-
-  for (const sample of samples) {
-    const group = samplesBySource.get(sample.sourceId) ?? [];
-    group.push(sample);
-    samplesBySource.set(sample.sourceId, group);
+  })[0];
+  if (!sourceEntry?.source) {
+    throw new Error('Missing source video for frame extraction.');
   }
 
   const frames = new Array<IndexedVideoFrame | null>(samples.length).fill(null);
-  let completed = 0;
   input.onProgress?.({ completed: 0, total: samples.length });
-
-  for (const [sourceId, sourceSamples] of samplesBySource) {
-    const sourceEntry = sourceMap.get(sourceId);
-    if (!sourceEntry?.source) {
-      throw new Error(`Missing media source for frame extraction (${sourceId}).`);
-    }
-
-    const images = await extractVideoFrames(
-      sourceEntry.source,
-      sourceSamples.map((sample) => sample.sourceTime),
-      {
-        concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
-        onProgress: ({ completed: sourceCompleted }) => {
-          input.onProgress?.({ completed: completed + sourceCompleted, total: samples.length });
-        },
+  const images = await extractVideoFrames(
+    sourceEntry.source,
+    samples.map((sample) => sample.sourceTime),
+    {
+      concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
+      onProgress: ({ completed }) => {
+        input.onProgress?.({ completed, total: samples.length });
       },
-    );
+    },
+  );
 
-    sourceSamples.forEach((sample, imageIndex) => {
-      frames[sample.index] = {
-        image: images[imageIndex],
-        timelineTime: sample.timelineTime,
-        sourceTime: sample.sourceTime,
-        sourceId: sample.sourceId,
-        kind: input.kind,
-      };
-    });
-
-    completed += sourceSamples.length;
-    input.onProgress?.({ completed, total: samples.length });
-  }
+  samples.forEach((sample, imageIndex) => {
+    frames[sample.index] = {
+      image: images[imageIndex],
+      timelineTime: sample.timelineTime,
+      sourceTime: sample.sourceTime,
+      sourceId: MAIN_SOURCE_ID,
+      kind: input.kind,
+    };
+  });
 
   return frames.filter((frame): frame is IndexedVideoFrame => !!frame);
 }
@@ -1294,7 +1274,6 @@ function AssistantMessage({
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
-  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
   const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
   const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
@@ -1499,14 +1478,12 @@ function AssistantMessage({
       if (sourceSegs.length === 0) throw new Error('No source segments found for requested range');
 
       const state = useEditorStore.getState();
-      const availableSources = resolveMainTrackSources({
-        clips,
-        mediaLibrary,
+      const sourceEntry = resolveMainTrackSources({
         videoData,
         videoFile,
         videoUrl,
         videoDuration: state.videoDuration,
-      });
+      })[0];
       const rangesBySource = new Map<string, Array<{ startTime: number; endTime: number }>>();
       sourceSegs.forEach((sourceSeg) => {
         const ranges = buildOverlappingRanges(sourceSeg.sourceStart, sourceSeg.sourceStart + sourceSeg.sourceDuration);
@@ -1521,7 +1498,6 @@ function AssistantMessage({
       setTranscriptProgress({ completed: 0, total: totalChunks });
 
       for (const [sourceId, ranges] of rangesBySource) {
-        const sourceEntry = availableSources.find((entry) => entry.sourceId === sourceId);
         if (!sourceEntry?.source) {
           throw new Error(`Missing media source for transcript request (${sourceId}).`);
         }
@@ -1555,7 +1531,7 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, existingSourceTranscriptCaptions, mediaLibrary, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, existingSourceTranscriptCaptions, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -1974,7 +1950,6 @@ export default function ChatSidebar() {
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
-  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
@@ -1986,14 +1961,12 @@ export default function ChatSidebar() {
   const mainTimelineDuration = useMemo(() => getTimelineDuration(clips), [clips]);
   const availableSources = useMemo(() => (
     resolveMainTrackSources({
-      clips,
-      mediaLibrary,
       videoData,
       videoFile,
       videoUrl,
       videoDuration,
     }).filter((entry) => entry.source && entry.duration > 0)
-  ), [clips, mediaLibrary, videoData, videoDuration, videoFile, videoUrl]);
+  ), [videoData, videoDuration, videoFile, videoUrl]);
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
   ), [availableSources, sourceIndexFreshBySourceId]);
@@ -2363,7 +2336,6 @@ export default function ChatSidebar() {
         const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
         currentFrames = (await extractTimelineFramesFromSources({
           clips: currentClips,
-          mediaLibrary: freshState.mediaLibrary,
           videoData: freshState.videoData,
           videoFile: freshState.videoFile,
           videoUrl: freshState.videoUrl,
@@ -2742,11 +2714,21 @@ export default function ChatSidebar() {
                           fontFamily: 'var(--font-serif)',
                           color: active ? 'var(--accent-strong)' : 'rgba(255,255,255,0.34)',
                         }}>
-                          {active ? 'Live' : 'Coming soon'}
+                          {active ? 'Available now' : 'In progress'}
                         </span>
                       </div>
                     );
                   })}
+                  <div style={{
+                    marginTop: 4,
+                    padding: '8px 10px 6px',
+                    fontSize: 10,
+                    lineHeight: 1.45,
+                    color: 'rgba(255,255,255,0.46)',
+                    fontFamily: 'var(--font-serif)',
+                  }}>
+                    This temporary build is focused on Cut Assistant and a single source video workflow.
+                  </div>
                 </div>
               )}
             </div>
@@ -2780,6 +2762,14 @@ export default function ChatSidebar() {
           </div>
         </div>
 
+        <span style={{
+          fontSize: 10,
+          color: 'var(--fg-muted)',
+          fontFamily: 'var(--font-serif)',
+          marginLeft: 28,
+        }}>
+          Single-source editing is active in this MVP.
+        </span>
       </div>
 
       {/* Messages */}

@@ -4,32 +4,6 @@ import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
-function extractSignedMediaPaths(editState: unknown, mainVideoPath: string | null): string[] {
-  const paths = new Set<string>();
-  if (mainVideoPath) paths.add(mainVideoPath);
-
-  if (!editState || typeof editState !== 'object') {
-    return [...paths];
-  }
-
-  const candidateCollections = [
-    (editState as { mediaLibrary?: unknown }).mediaLibrary,
-    (editState as { clips?: unknown }).clips,
-  ];
-
-  for (const collection of candidateCollections) {
-    if (!Array.isArray(collection)) continue;
-    for (const entry of collection) {
-      const sourcePath = typeof (entry as { sourcePath?: unknown })?.sourcePath === 'string'
-        ? (entry as { sourcePath: string }).sourcePath
-        : '';
-      if (sourcePath) paths.add(sourcePath);
-    }
-  }
-
-  return [...paths];
-}
-
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const supabase = await getSupabaseServer();
@@ -45,25 +19,16 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   if (error || !project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  const signedUrls: Record<string, string> = {};
-  const signedMediaPaths = extractSignedMediaPaths(project.edit_state, project.video_path);
-  if (signedMediaPaths.length > 0) {
-    const { data: signed } = await supabase.storage
-      .from('videos')
-      .createSignedUrls(signedMediaPaths, 3600);
-    if (signed) {
-      for (const entry of signed) {
-        if (entry.path && entry.signedUrl) {
-          signedUrls[entry.path] = entry.signedUrl;
-        }
-      }
-    }
-  }
+  const signedUrl = project.video_path
+    ? await supabase.storage
+        .from('videos')
+        .createSignedUrl(project.video_path, 3600)
+        .then((result) => result.data?.signedUrl ?? null)
+    : null;
 
   return NextResponse.json({
     ...project,
-    signedUrl: project.video_path ? (signedUrls[project.video_path] ?? null) : null,
-    signedUrls,
+    signedUrl,
   });
 }
 

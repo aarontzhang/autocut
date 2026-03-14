@@ -9,10 +9,6 @@ export interface VideoClip {
   filter: ColorFilter | null;
   fadeIn: number;        // seconds
   fadeOut: number;       // seconds
-  // Multi-source support
-  sourceUrl?: string;    // blob URL for this clip's source (undefined = main videoUrl from store)
-  sourcePath?: string;   // Supabase Storage path for persisted secondary sources
-  sourceName?: string;   // display name for the clip
 }
 
 export interface ClipScheduleEntry {
@@ -83,28 +79,6 @@ export interface TextOverlayEntry {
 export interface ColorFilter {
   type: 'cinematic' | 'vintage' | 'warm' | 'cool' | 'bw' | 'none';
   intensity: number; // 0.0 to 1.0
-}
-
-/** A clip positioned at an explicit timeline time on an extra track */
-export interface TrackClip {
-  id: string;
-  sourceUrl: string;
-  sourcePath?: string; // Supabase Storage path — set after background upload, used to re-hydrate on load
-  sourceName: string;
-  sourceStart: number;
-  sourceDuration: number;
-  timelineStart: number; // seconds in the output timeline
-  speed: number;
-  volume: number;
-  linkedClipId?: string; // ID of the paired clip on another track (video↔audio pair)
-}
-
-/** An extra video or audio track (beyond the main track 0) */
-export interface MediaTrack {
-  id: string;
-  type: 'video' | 'audio';
-  label: string;
-  clips: TrackClip[];
 }
 
 export interface ChatMessage {

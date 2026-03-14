@@ -9,9 +9,7 @@ interface ClipBlockProps {
   width: number;   // px width
   height: number;
   isSelected: boolean;
-  isDragging?: boolean;
   onSelect: (e: React.MouseEvent) => void;
-  onDragStart: (e: React.MouseEvent) => void;
   index: number;
 }
 
@@ -22,8 +20,8 @@ const CLIP_COLOR = {
 };
 
 export default function ClipBlock({
-  clip, left, width, height, isSelected, isDragging = false,
-  onSelect, onDragStart, index
+  clip, left, width, height, isSelected,
+  onSelect, index
 }: ClipBlockProps) {
   void index;
   const color = CLIP_COLOR;
@@ -47,14 +45,10 @@ export default function ClipBlock({
         outlineOffset: isSelected ? '1px' : undefined,
         boxSizing: 'border-box',
         overflow: 'hidden',
-        cursor: isDragging ? 'grabbing' : 'grab',
+        cursor: 'pointer',
         userSelect: 'none',
-        opacity: isDragging ? 0.34 : 1,
-        transform: isDragging ? 'scale(0.992)' : undefined,
-        transition: isDragging ? 'opacity 120ms ease, transform 120ms ease' : undefined,
       }}
       onClick={onSelect}
-      onMouseDown={onDragStart}
     >
       {/* Label */}
       <div style={{

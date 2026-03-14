@@ -4,7 +4,6 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import type { CaptionEntry } from '@/lib/types';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
-import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
 import MediaPanel from './MediaPanel';
@@ -16,8 +15,10 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+const SINGLE_SOURCE_NOTICE = 'This temporary MVP supports one source video only. Cut Assistant is live now, while Highlights Assistant, Story Assistant, and Sound Assistant are still in progress.';
 const BLOB_URL_PREFIX = 'blob:';
 
 function isBlobUrl(url: string | undefined | null) {
@@ -28,13 +29,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
   const lastSignedMediaRefreshAtRef = useRef(0);
-  const cachedMediaUrlsRef = useRef<Map<string, string>>(new Map());
   const projectLoadSequenceRef = useRef(0);
 
-  // Resizable panel sizes
   const [chatWidth, setChatWidth] = useState(340);
   const [timelineHeight, setTimelineHeight] = useState(300);
-  const [mediaPanelWidth, setMediaPanelWidth] = useState(200);
+  const [mediaPanelWidth, setMediaPanelWidth] = useState(240);
   const [isProjectLoading, setIsProjectLoading] = useState(false);
   const [storageNotice, setStorageNotice] = useState<string | null>(null);
 
@@ -79,7 +78,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const startX = e.clientX;
     const startW = mediaPanelWidth;
     const onMove = (ev: MouseEvent) => {
-      const newW = Math.max(140, Math.min(380, startW + (ev.clientX - startX)));
+      const newW = Math.max(200, Math.min(380, startW + (ev.clientX - startX)));
       setMediaPanelWidth(newW);
     };
     const onUp = () => {
@@ -91,6 +90,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     document.addEventListener('mouseup', onUp);
     document.body.style.cursor = 'ew-resize';
   }, [mediaPanelWidth]);
+
   const currentTime = useEditorStore(s => s.currentTime);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const videoFile = useEditorStore(s => s.videoFile);
@@ -112,15 +112,14 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const resetEditor = useEditorStore(s => s.resetEditor);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
-  const addMediaLibraryItem = useEditorStore(s => s.addMediaLibraryItem);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
-  const mediaLibrary = useEditorStore(s => s.mediaLibrary);
-  const clips = useEditorStore(s => s.clips);
   const storagePath = useEditorStore(s => s.storagePath);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
   useAutoSave();
+
+  const hasMainMedia = Boolean(videoFile || videoUrl || storagePath);
 
   const handleStorageUploadSuccess = useCallback(() => {
     setStorageNotice(null);
@@ -132,126 +131,27 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     setStorageNotice(message);
   }, []);
 
-  const releaseCachedMediaUrls = useCallback(() => {
-    cachedMediaUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    cachedMediaUrlsRef.current.clear();
+  const showSingleSourceNotice = useCallback(() => {
+    setStorageNotice(SINGLE_SOURCE_NOTICE);
   }, []);
 
-  const applyCachedMediaUrl = useCallback((targetProjectId: string, sourcePath: string, objectUrl: string) => {
+  const refreshSignedMediaUrl = useCallback(async (targetProjectId: string) => {
+    const state = useEditorStore.getState();
+    if (state.currentProjectId !== targetProjectId || !state.storagePath) return;
+    const signedPaths = await createSignedUrls([state.storagePath]);
+    const nextUrl = signedPaths.get(state.storagePath);
+    if (!nextUrl) return;
+
     useEditorStore.setState((currentState) => {
-      if (currentState.currentProjectId !== targetProjectId) return currentState;
-
-      const nextVideoUrl = currentState.storagePath === sourcePath ? objectUrl : currentState.videoUrl;
-      let mediaLibraryChanged = false;
-      const nextMediaLibrary = currentState.mediaLibrary.map((item) => {
-        if (item.sourcePath !== sourcePath || item.url === objectUrl) return item;
-        mediaLibraryChanged = true;
-        return { ...item, url: objectUrl };
-      });
-      let clipsChanged = false;
-      const nextClips = currentState.clips.map((clip) => {
-        if (clip.sourcePath !== sourcePath || clip.sourceUrl === objectUrl) return clip;
-        clipsChanged = true;
-        return { ...clip, sourceUrl: objectUrl };
-      });
-
-      if (nextVideoUrl === currentState.videoUrl && !mediaLibraryChanged && !clipsChanged) {
+      if (currentState.currentProjectId !== targetProjectId || isBlobUrl(currentState.videoUrl)) {
         return currentState;
       }
-
       return {
-        videoUrl: nextVideoUrl,
-        mediaLibrary: nextMediaLibrary,
-        clips: nextClips,
+        videoUrl: nextUrl,
       };
     });
-  }, []);
-
-  const cacheProjectMediaLocally = useCallback(async (targetProjectId: string) => {
-    const state = useEditorStore.getState();
-    if (state.currentProjectId !== targetProjectId) return;
-
-    const entriesByPath = new Map<string, string>();
-    if (state.storagePath && state.videoUrl && !isBlobUrl(state.videoUrl)) {
-      entriesByPath.set(state.storagePath, state.videoUrl);
-    }
-    state.mediaLibrary.forEach((item) => {
-      if (item.sourcePath && item.url && !isBlobUrl(item.url) && !entriesByPath.has(item.sourcePath)) {
-        entriesByPath.set(item.sourcePath, item.url);
-      }
-    });
-    state.clips.forEach((clip) => {
-      if (clip.sourcePath && clip.sourceUrl && !isBlobUrl(clip.sourceUrl) && !entriesByPath.has(clip.sourcePath)) {
-        entriesByPath.set(clip.sourcePath, clip.sourceUrl);
-      }
-    });
-
-    for (const [sourcePath, sourceUrl] of entriesByPath) {
-      if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
-      const cachedUrl = cachedMediaUrlsRef.current.get(sourcePath);
-      if (cachedUrl) {
-        applyCachedMediaUrl(targetProjectId, sourcePath, cachedUrl);
-        continue;
-      }
-
-      try {
-        const response = await fetch(sourceUrl);
-        if (!response.ok) continue;
-        const blob = await response.blob();
-        if (useEditorStore.getState().currentProjectId !== targetProjectId) return;
-        const objectUrl = URL.createObjectURL(blob);
-        cachedMediaUrlsRef.current.set(sourcePath, objectUrl);
-        applyCachedMediaUrl(targetProjectId, sourcePath, objectUrl);
-      } catch (error) {
-        console.warn('Failed to cache media locally:', error);
-      }
-    }
-  }, [applyCachedMediaUrl]);
-
-  const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
-    const state = useEditorStore.getState();
-    if (state.currentProjectId !== targetProjectId) return;
-
-    const paths = new Set<string>();
-    if (state.storagePath) paths.add(state.storagePath);
-    state.mediaLibrary.forEach((item) => {
-      if (item.sourcePath) paths.add(item.sourcePath);
-    });
-    state.clips.forEach((clip) => {
-      if (clip.sourcePath) paths.add(clip.sourcePath);
-    });
-    if (paths.size === 0) return;
-
-    const signedPaths = await createSignedUrls([...paths]);
-    if (signedPaths.size === 0 || useEditorStore.getState().currentProjectId !== targetProjectId) return;
-
-    useEditorStore.setState((currentState) => ({
-      videoUrl: isBlobUrl(currentState.videoUrl)
-        ? currentState.videoUrl
-        : (
-          currentState.storagePath && signedPaths.get(currentState.storagePath)
-            ? signedPaths.get(currentState.storagePath)!
-            : currentState.videoUrl
-        ),
-      mediaLibrary: currentState.mediaLibrary.map((item, index) => {
-        if (isBlobUrl(item.url)) return item;
-        if (item.sourcePath && signedPaths.get(item.sourcePath)) {
-          return { ...item, url: signedPaths.get(item.sourcePath)! };
-        }
-        if (index === 0 && currentState.storagePath && signedPaths.get(currentState.storagePath)) {
-          return { ...item, url: signedPaths.get(currentState.storagePath)! };
-        }
-        return item;
-      }),
-      clips: currentState.clips.map((clip) => (
-        clip.sourcePath && signedPaths.get(clip.sourcePath) && !isBlobUrl(clip.sourceUrl)
-          ? { ...clip, sourceUrl: signedPaths.get(clip.sourcePath)! }
-          : clip
-      )),
-    }));
-    void cacheProjectMediaLocally(targetProjectId);
     lastSignedMediaRefreshAtRef.current = Date.now();
-  }, [cacheProjectMediaLocally]);
+  }, []);
 
   const readVideoDuration = useCallback((sourceUrl: string) => (
     new Promise<number>((resolve) => {
@@ -265,7 +165,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Allow Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo) even when a text input is focused
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
         e.preventDefault();
         if (e.shiftKey) redo(); else undo();
@@ -301,51 +200,38 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [currentTime, setCurrentTime, undo, redo, deleteSelectedItem]);
+  }, [currentTime, deleteSelectedItem, redo, setCurrentTime, undo]);
 
-  // Background auto-transcription on video load
   useEffect(() => {
-    const sources = resolveMainTrackSources({
-      clips,
-      mediaLibrary,
-      videoData,
-      videoFile,
-      videoUrl,
-      videoDuration,
-    }).filter((entry) => entry.source && entry.duration > 0);
-    const missingSources = sources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
-    if (missingSources.length === 0 || transcriptStatus === 'loading' || document.hidden || playbackActive) return;
+    const source = videoData ?? videoFile ?? videoUrl;
+    const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
+    if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || document.hidden || playbackActive) {
+      return;
+    }
     setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'loading');
-    setTranscriptProgress({ completed: 0, total: missingSources.length });
+    setTranscriptProgress({ completed: 0, total: 1 });
     (async () => {
       try {
-        const rawWords: CaptionEntry[] = [...(useEditorStore.getState().sourceTranscriptCaptions ?? [])];
-        for (let index = 0; index < missingSources.length; index += 1) {
-          const entry = missingSources[index];
-          const nextWords = await transcribeSourceRanges(
-            entry.source!,
-            buildOverlappingRanges(0, entry.duration),
-            aiSettings.captions.wordsPerCaption,
-            { sourceId: entry.sourceId },
-          );
-          rawWords.push(...nextWords);
-          setTranscriptProgress({ completed: index + 1, total: missingSources.length });
-        }
+        const rawWords: CaptionEntry[] = await transcribeSourceRanges(
+          source,
+          buildOverlappingRanges(0, videoDuration),
+          aiSettings.captions.wordsPerCaption,
+          { sourceId: MAIN_SOURCE_ID },
+        );
+        setTranscriptProgress({ completed: 1, total: 1 });
         setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'done', rawWords);
       } catch (error) {
         console.warn('Background transcription failed:', error);
         setBackgroundTranscript(null, 'error');
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, clips, mediaLibrary, playbackActive, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, playbackActive, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
-  // Load project from URL param
   useEffect(() => {
     if (!projectId) return;
     if (useEditorStore.getState().currentProjectId !== projectId) {
       resetEditor();
     }
-    releaseCachedMediaUrls();
     lastSignedMediaRefreshAtRef.current = 0;
     const loadSequence = projectLoadSequenceRef.current + 1;
     projectLoadSequenceRef.current = loadSequence;
@@ -362,7 +248,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           storagePath: data.video_path ?? null,
           videoFilename: data.video_filename ?? null,
           duration: typeof data.duration === 'number' ? data.duration : undefined,
-          signedUrls: data.signedUrls ?? {},
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
         try {
@@ -384,7 +269,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         } catch (error) {
           console.warn('Failed to hydrate source index:', error);
         }
-        void cacheProjectMediaLocally(projectId);
         lastSignedMediaRefreshAtRef.current = Date.now();
       } catch (e) {
         console.error('Failed to load project', e);
@@ -394,13 +278,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         }
       }
     })();
-  }, [cacheProjectMediaLocally, hydrateSourceIndex, loadProject, projectId, releaseCachedMediaUrls, resetEditor]);
-
-  useEffect(() => (
-    () => {
-      releaseCachedMediaUrls();
-    }
-  ), [releaseCachedMediaUrls]);
+  }, [hydrateSourceIndex, loadProject, projectId, resetEditor]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -413,8 +291,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       ) {
         return;
       }
-      void refreshSignedMediaUrls(projectId).catch((error) => {
-        console.warn('Failed to refresh signed media URLs:', error);
+      void refreshSignedMediaUrl(projectId).catch((error) => {
+        console.warn('Failed to refresh signed media URL:', error);
       });
     };
 
@@ -427,10 +305,14 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       window.removeEventListener('focus', maybeRefresh);
       document.removeEventListener('visibilitychange', maybeRefresh);
     };
-  }, [projectId, refreshSignedMediaUrls]);
+  }, [projectId, refreshSignedMediaUrl]);
 
   const importMainFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('video/')) return;
+    if (hasMainMedia) {
+      showSingleSourceNotice();
+      return;
+    }
     const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
     if (!targetProjectId) return;
 
@@ -443,9 +325,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       setVideoDuration(duration);
     }
 
-    // Background upload to storage so the project persists on reload
-    const { currentProjectId, storagePath } = useEditorStore.getState();
-    if (!currentProjectId || !user || storagePath) return; // skip if already uploaded
+    const { currentProjectId, storagePath: currentStoragePath } = useEditorStore.getState();
+    if (!currentProjectId || !user || currentStoragePath) return;
     uploadProjectMedia(file, currentProjectId, 'main').then((path) => {
       setStoragePath(path);
       handleStorageUploadSuccess();
@@ -453,55 +334,35 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       console.warn('Background upload failed:', error.message);
       handleStorageUploadError(error);
     });
-  }, [projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setVideoDuration, user, handleStorageUploadError, handleStorageUploadSuccess]);
-
-  const importLibraryFile = useCallback(async (file: File) => {
-    if (!file.type.startsWith('video/')) return;
-    const { currentProjectId } = useEditorStore.getState();
-    const blobUrl = URL.createObjectURL(file);
-    const duration = await readVideoDuration(blobUrl);
-
-    let sourcePath: string | undefined;
-    if (user && currentProjectId) {
-      try {
-        sourcePath = await uploadProjectMedia(file, currentProjectId, 'sources');
-        handleStorageUploadSuccess();
-      } catch (error) {
-        console.warn('Library upload failed:', error);
-        handleStorageUploadError(error);
-      }
-    }
-
-    addMediaLibraryItem({ url: blobUrl, name: file.name, duration, sourcePath });
-  }, [addMediaLibraryItem, readVideoDuration, user, handleStorageUploadError, handleStorageUploadSuccess]);
+  }, [handleStorageUploadError, handleStorageUploadSuccess, hasMainMedia, projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setVideoDuration, showSingleSourceNotice, user]);
 
   const importFiles = useCallback(async (files: File[]) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     if (videoFiles.length === 0) return;
-
-    const hasMainMedia = Boolean(videoFile || videoUrl || storagePath || mediaLibrary.length > 0);
-    if (!hasMainMedia) {
-      const [mainFile, ...libraryFiles] = videoFiles;
-      if (mainFile) importMainFile(mainFile);
-      for (const file of libraryFiles) {
-        await importLibraryFile(file);
-      }
+    if (hasMainMedia) {
+      showSingleSourceNotice();
       return;
     }
-
-    for (const file of videoFiles) {
-      await importLibraryFile(file);
+    await importMainFile(videoFiles[0]);
+    if (videoFiles.length > 1) {
+      showSingleSourceNotice();
     }
-  }, [importLibraryFile, importMainFile, mediaLibrary.length, storagePath, videoFile, videoUrl]);
+  }, [hasMainMedia, importMainFile, showSingleSourceNotice]);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleRootDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    if (hasMainMedia) {
+      showSingleSourceNotice();
+      return;
+    }
     void importFiles(Array.from(e.dataTransfer.files));
-  }, [importFiles]);
+  }, [hasMainMedia, importFiles, showSingleSourceNotice]);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-  }, []);
+  const handleRootDragOver = useCallback((e: React.DragEvent) => {
+    if (!hasMainMedia) {
+      e.preventDefault();
+    }
+  }, [hasMainMedia]);
 
   const isActiveProjectReady = currentProjectId === projectId;
   const shouldShowProjectLoading = Boolean(projectId) && (isProjectLoading || !isActiveProjectReady);
@@ -509,10 +370,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   return (
     <div
       style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)', overflow: 'hidden' }}
-      onDrop={handleDrop}
-      onDragOver={handleDragOver}
+      onDrop={!hasMainMedia ? handleRootDrop : undefined}
+      onDragOver={!hasMainMedia ? handleRootDragOver : undefined}
     >
-      {/* ── Top bar ── */}
       <TopBar />
       {(storageNotice || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (
         <div style={{ padding: '10px 14px 0', flexShrink: 0 }}>
@@ -527,18 +387,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         </div>
       )}
 
-      {/* ── Main area below topbar ── */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-
-        {/* Left: media panel + video + timeline stacked */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
-
-          {/* Media panel + video preview side by side */}
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-            {/* Media panel */}
             <div style={{ width: mediaPanelWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-              <MediaPanel onImportMainFile={importMainFile} onImportLibraryFile={importLibraryFile} onImportFiles={importFiles} />
-              {/* Media panel resize handle */}
+              <MediaPanel
+                onImportMainFile={importMainFile}
+                canImport={!hasMainMedia}
+                notice={SINGLE_SOURCE_NOTICE}
+              />
               <div
                 onMouseDown={startMediaResize}
                 style={{
@@ -551,18 +408,16 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               />
             </div>
 
-            {/* Video preview */}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
               {shouldShowProjectLoading
                 ? <ProjectLoadingState />
-                : (videoFile || videoUrl)
-                ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
-                : <EmptyDropZone importFiles={importFiles} />
+                : hasMainMedia
+                  ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
+                  : <EmptyDropZone importFiles={importFiles} notice={SINGLE_SOURCE_NOTICE} />
               }
             </div>
           </div>
 
-          {/* Timeline resize handle + timeline */}
           <div style={{ flexShrink: 0, position: 'relative' }}>
             <div
               onMouseDown={startTimelineResize}
@@ -578,15 +433,12 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               <Timeline
                 videoRef={videoRef}
                 playerRef={playerRef}
-                onImportFile={importMainFile}
-                onStorageUploadError={handleStorageUploadError}
-                onStorageUploadSuccess={handleStorageUploadSuccess}
+                singleSourceNotice={SINGLE_SOURCE_NOTICE}
               />
             </div>
           </div>
         </div>
 
-        {/* Chat resize handle + sidebar */}
         <div style={{ display: 'flex', flexShrink: 0, overflow: 'hidden' }}>
           <div
             onMouseDown={startChatResize}
@@ -629,7 +481,13 @@ function ProjectLoadingState() {
   );
 }
 
-function EmptyDropZone({ importFiles }: { importFiles: (files: File[]) => void | Promise<void> }) {
+function EmptyDropZone({
+  importFiles,
+  notice,
+}: {
+  importFiles: (files: File[]) => void | Promise<void>;
+  notice: string;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -639,17 +497,25 @@ function EmptyDropZone({ importFiles }: { importFiles: (files: File[]) => void |
         onDragOver={e => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={e => {
-          e.preventDefault(); e.stopPropagation(); setIsDragging(false);
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragging(false);
           void importFiles(Array.from(e.dataTransfer.files));
         }}
         onClick={() => inputRef.current?.click()}
         style={{
-          width: 420,
+          width: 460,
+          maxWidth: 'calc(100% - 32px)',
           border: `1.5px dashed ${isDragging ? 'var(--accent)' : 'rgba(255,255,255,0.12)'}`,
-          borderRadius: 10, padding: '48px 32px',
+          borderRadius: 10,
+          padding: '48px 32px',
           background: isDragging ? 'var(--accent-dim)' : 'rgba(255,255,255,0.015)',
-          cursor: 'pointer', transition: 'all 0.2s ease',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+          cursor: 'pointer',
+          transition: 'all 0.2s ease',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 14,
         }}
       >
         <div style={{
@@ -668,9 +534,12 @@ function EmptyDropZone({ importFiles }: { importFiles: (files: File[]) => void |
         </div>
         <div style={{ textAlign: 'center' }}>
           <p style={{ fontSize: 15, fontWeight: 500, color: 'var(--fg-primary)', marginBottom: 5 }}>
-            {isDragging ? 'Drop to import' : 'Drag & drop your clip'}
+            {isDragging ? 'Drop your source video' : 'Import one source video'}
           </p>
-          <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>or click to browse</p>
+          <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>Drag & drop or click to browse</p>
+          <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>
+            {notice}
+          </p>
         </div>
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
           {['MP4', 'MOV', 'AVI', 'WEBM', 'MKV'].map(fmt => (
@@ -687,7 +556,6 @@ function EmptyDropZone({ importFiles }: { importFiles: (files: File[]) => void |
           ref={inputRef}
           type="file"
           accept="video/*"
-          multiple
           style={{ display: 'none' }}
           onChange={e => {
             void importFiles(Array.from(e.target.files ?? []));
