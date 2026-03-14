@@ -2640,7 +2640,7 @@ export default function ChatSidebar() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <AutocutMark size={18} />
+          <AutocutMark size={24} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
               Cut Agent
@@ -2753,14 +2753,6 @@ export default function ChatSidebar() {
           </div>
         </div>
 
-        <span style={{
-          fontSize: 10,
-          color: 'var(--fg-muted)',
-          fontFamily: 'var(--font-serif)',
-          marginLeft: 28,
-        }}>
-          Capped out at one video for now.
-        </span>
       </div>
 
       {/* Messages */}

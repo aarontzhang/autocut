@@ -7,11 +7,9 @@ import { formatTimeShort } from '@/lib/timelineUtils';
 export default function MediaPanel({
   onImportMainFile,
   canImport,
-  notice,
 }: {
   onImportMainFile?: (file: File) => void | Promise<void>;
   canImport: boolean;
-  notice: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
@@ -30,7 +28,7 @@ export default function MediaPanel({
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {videoUrl ? (
+        {videoUrl && (
           <div
             style={{
               borderRadius: 10,
@@ -61,70 +59,34 @@ export default function MediaPanel({
               <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg-primary)', lineHeight: 1.4 }}>
                 {videoName || 'Source video'}
               </p>
-              <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
-                {notice}
-              </p>
             </div>
-          </div>
-        ) : (
-          <div style={{
-            borderRadius: 10,
-            border: '1px dashed rgba(255,255,255,0.12)',
-            background: 'rgba(255,255,255,0.02)',
-            padding: '14px 12px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 7,
-          }}>
-            <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg-primary)' }}>
-              No source video loaded
-            </p>
-            <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.5 }}>
-              Start with one video, then cut and add markers to shape the timeline.
-            </p>
           </div>
         )}
 
-        <div style={{
-          borderRadius: 10,
-          border: '1px solid rgba(255,255,255,0.08)',
-          background: 'rgba(255,255,255,0.025)',
-          padding: '12px 11px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}>
-          <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg-primary)' }}>
-            Source limit
-          </p>
-          <p style={{ fontSize: 11, color: 'var(--fg-secondary)', lineHeight: 1.55 }}>
-            {notice}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => canImport && inputRef.current?.click()}
-          disabled={!canImport}
-          style={{
-            flexShrink: 0,
-            display: 'flex', alignItems: 'center', gap: 7,
-            width: '100%', padding: '9px 10px',
-            background: canImport ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.02)',
-            border: `1px dashed ${canImport ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.08)'}`,
-            borderRadius: 6,
-            cursor: canImport ? 'pointer' : 'default',
-            fontSize: 12,
-            color: canImport ? 'var(--fg-secondary)' : 'var(--fg-muted)',
-            transition: 'background 0.15s, border-color 0.15s',
-          }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="12" y1="5" x2="12" y2="19"/>
-            <line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          {canImport ? 'Import video' : 'Capped out, one video for now'}
-        </button>
+        {canImport && (
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            style={{
+              flexShrink: 0,
+              display: 'flex', alignItems: 'center', gap: 7,
+              width: '100%', padding: '9px 10px',
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px dashed rgba(255,255,255,0.12)',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontSize: 12,
+              color: 'var(--fg-secondary)',
+              transition: 'background 0.15s, border-color 0.15s',
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            Import video
+          </button>
+        )}
         <input
           ref={inputRef}
           type="file"

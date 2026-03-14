@@ -21,13 +21,11 @@ type PlayheadDragInfo = {
 interface TimelineProps {
   videoRef: RefObject<HTMLVideoElement | null>;
   playerRef?: RefObject<VideoPlayerHandle | null>;
-  singleSourceNotice: string;
 }
 
 export default function Timeline({
   videoRef,
   playerRef,
-  singleSourceNotice,
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<{ startX: number; startScrollLeft: number; moved: boolean } | null>(null);
@@ -284,18 +282,6 @@ export default function Timeline({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginLeft: 'auto' }}>
-          <span
-            style={{
-              fontSize: 10,
-              color: 'var(--fg-muted)',
-              fontFamily: 'var(--font-serif)',
-              maxWidth: 420,
-            }}
-            title={singleSourceNotice}
-          >
-            {singleSourceNotice}
-          </span>
-
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <button
               onClick={() => setZoom(Math.round((zoom / 1.25) * 100) / 100)}

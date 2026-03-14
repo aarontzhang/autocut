@@ -149,9 +149,6 @@ export default function UploadScreen() {
           <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8 }}>
             Up to {formatStorageBytes(STORAGE_FILE_LIMIT_BYTES)} per video
           </p>
-          <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>
-            Capped out at one video for now. Multi-file support coming soon.
-          </p>
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>

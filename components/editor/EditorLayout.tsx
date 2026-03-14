@@ -18,7 +18,7 @@ import { useStorageQuota } from '@/lib/useStorageQuota';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
-const SINGLE_SOURCE_NOTICE = 'Capped out at one video for now. Multi-file support coming soon.';
+const MULTI_FILE_NOTICE = 'Capped out at one video for now. Multi-file support coming soon.';
 const BLOB_URL_PREFIX = 'blob:';
 
 function isBlobUrl(url: string | undefined | null) {
@@ -132,7 +132,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   }, []);
 
   const showSingleSourceNotice = useCallback(() => {
-    setStorageNotice(SINGLE_SOURCE_NOTICE);
+    setStorageNotice(MULTI_FILE_NOTICE);
   }, []);
 
   const refreshSignedMediaUrl = useCallback(async (targetProjectId: string) => {
@@ -394,7 +394,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               <MediaPanel
                 onImportMainFile={importMainFile}
                 canImport={!hasMainMedia}
-                notice={SINGLE_SOURCE_NOTICE}
               />
               <div
                 onMouseDown={startMediaResize}
@@ -413,7 +412,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
                 ? <ProjectLoadingState />
                 : hasMainMedia
                   ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
-                  : <EmptyDropZone importFiles={importFiles} notice={SINGLE_SOURCE_NOTICE} />
+                  : <EmptyDropZone importFiles={importFiles} />
               }
             </div>
           </div>
@@ -433,7 +432,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               <Timeline
                 videoRef={videoRef}
                 playerRef={playerRef}
-                singleSourceNotice={SINGLE_SOURCE_NOTICE}
               />
             </div>
           </div>
@@ -483,10 +481,8 @@ function ProjectLoadingState() {
 
 function EmptyDropZone({
   importFiles,
-  notice,
 }: {
   importFiles: (files: File[]) => void | Promise<void>;
-  notice: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -537,9 +533,6 @@ function EmptyDropZone({
             {isDragging ? 'Drop your video' : 'Import video'}
           </p>
           <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>Drag & drop or click to browse</p>
-          <p style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, maxWidth: 340, lineHeight: 1.5 }}>
-            {notice}
-          </p>
         </div>
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
           {['MP4', 'MOV', 'AVI', 'WEBM', 'MKV'].map(fmt => (
