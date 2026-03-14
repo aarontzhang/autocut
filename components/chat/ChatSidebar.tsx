@@ -12,7 +12,7 @@ import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
 
-const FRAME_DESCRIPTION_BATCH_SIZE = 20;
+const FRAME_DESCRIPTION_BATCH_SIZE = 8;
 const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 3;
 const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
@@ -438,7 +438,11 @@ function mergeFrameDescriptions(
 
 async function runFrameDescriptionBatches(
   batches: FrameDescriptionBatch[],
-  onBatchComplete: (result: { start: number; data: FrameDescriptionResponse }) => void,
+  callbacks: {
+    onBatchStart?: (batch: FrameDescriptionBatch) => void;
+    onBatchComplete: (result: { start: number; data: FrameDescriptionResponse }) => void;
+    onBatchSettled?: (batch: FrameDescriptionBatch) => void;
+  },
 ): Promise<Error[]> {
   if (batches.length === 0) return [];
 
@@ -451,13 +455,16 @@ async function runFrameDescriptionBatches(
       const batchIndex = nextBatchIndex;
       nextBatchIndex += 1;
       const batch = batches[batchIndex];
+      callbacks.onBatchStart?.(batch);
       try {
         const data = await requestFrameDescriptions(batch.batchFrames);
-        onBatchComplete({ start: batch.start, data });
+        callbacks.onBatchComplete({ start: batch.start, data });
       } catch (error) {
         const nextError = error instanceof Error ? error : new Error('Failed to describe video frames.');
         console.warn('Failed to describe a frame batch.', nextError);
         errors.push(nextError);
+      } finally {
+        callbacks.onBatchSettled?.(batch);
       }
     }
   };
@@ -509,6 +516,21 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
     default:
       return 'I checked that section, but I need a clearer target before making an edit.';
   }
+}
+
+function formatFrameDescriptionProgressLabel(params: {
+  completedFrames: number;
+  totalFrames: number;
+  completedBatches: number;
+  totalBatches: number;
+  activeBatches: number;
+}): string {
+  const { completedFrames, totalFrames, completedBatches, totalBatches, activeBatches } = params;
+  if (completedBatches === 0 && activeBatches > 0) {
+    const noun = activeBatches === 1 ? 'batch' : 'batches';
+    return `Analyzing visuals ${completedFrames}/${totalFrames} (${activeBatches} ${noun} in flight)`;
+  }
+  return `Analyzing visuals ${completedFrames}/${totalFrames} (${completedBatches}/${totalBatches} batches)`;
 }
 
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
@@ -2238,15 +2260,9 @@ export default function ChatSidebar() {
       let nextFrames = [...frames];
       const totalOverviewFrames = nextFrames.length;
       const initialCompleted = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+      const completedBeforeRequests = initialCompleted;
       const descriptionStartedAt = performance.now();
       const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
-      setFrameIndexingProgress({
-        stage: 'describing_frames',
-        completed: initialCompleted,
-        total: Math.max(totalOverviewFrames, 1),
-        label: `Analyzing visuals ${initialCompleted}/${totalOverviewFrames}`,
-        etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
-      });
       const batches: FrameDescriptionBatch[] = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
         const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
@@ -2261,45 +2277,112 @@ export default function ChatSidebar() {
             image: frame.image,
             timelineTime: frame.sourceTime,
             sourceTime: frame.sourceTime,
-          }));
+        }));
         if (batchFrames.length === 0) continue;
         batches.push({ start, batchFrames });
       }
 
-      const errors = await runFrameDescriptionBatches(batches, (result) => {
-        nextFrames = mergeFrameDescriptions(
-          nextFrames.map((frame) => ({
-            timelineTime: frame.sourceTime,
+      let completedBatchCount = 0;
+      let activeBatchCount = 0;
+      const totalBatches = batches.length;
+      setFrameIndexingProgress({
+        stage: 'describing_frames',
+        completed: initialCompleted,
+        total: Math.max(totalOverviewFrames, 1),
+        label: formatFrameDescriptionProgressLabel({
+          completedFrames: initialCompleted,
+          totalFrames: totalOverviewFrames,
+          completedBatches: 0,
+          totalBatches: Math.max(totalBatches, 1),
+          activeBatches: 0,
+        }),
+        etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
+      });
+
+      const errors = await runFrameDescriptionBatches(batches, {
+        onBatchStart: () => {
+          activeBatchCount += 1;
+          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+          setFrameIndexingProgress({
+            stage: 'describing_frames',
+            completed,
+            total: Math.max(totalOverviewFrames, 1),
+            label: formatFrameDescriptionProgressLabel({
+              completedFrames: completed,
+              totalFrames: totalOverviewFrames,
+              completedBatches: completedBatchCount,
+              totalBatches: Math.max(totalBatches, 1),
+              activeBatches: activeBatchCount,
+            }),
+            etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - completedBeforeRequests, 0)),
+          });
+        },
+        onBatchComplete: (result) => {
+          nextFrames = mergeFrameDescriptions(
+            nextFrames.map((frame) => ({
+              timelineTime: frame.sourceTime,
+              sourceTime: frame.sourceTime,
+              sourceId: frame.sourceId,
+              kind: 'overview' as const,
+              image: frame.image,
+              description: frame.description,
+            })),
+            result.start,
+            result.data.descriptions ?? [],
+          ).map((frame) => ({
+            sourceId: frame.sourceId ?? MAIN_SOURCE_ID,
             sourceTime: frame.sourceTime,
-            sourceId: frame.sourceId,
-            kind: 'overview' as const,
             image: frame.image,
             description: frame.description,
-          })),
-          result.start,
-          result.data.descriptions ?? [],
-        ).map((frame) => ({
-          sourceId: frame.sourceId ?? MAIN_SOURCE_ID,
-          sourceTime: frame.sourceTime,
-          image: frame.image,
-          description: frame.description,
-        }));
-        const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-        const remaining = Math.max(totalOverviewFrames - completed, 0);
-        setFrameIndexingProgress({
-          stage: 'describing_frames',
-          completed,
-          total: Math.max(totalOverviewFrames, 1),
-          label: `Analyzing visuals ${completed}/${totalOverviewFrames}`,
-          etaSeconds: remaining > 0
-            ? estimateRemainingSecondsFromObservedRate(
-              descriptionStartedAt,
-              completed,
-              totalOverviewFrames,
-              descriptionFallbackPerFrame,
-            )
-            : 0,
-        });
+          }));
+          completedBatchCount += 1;
+          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+          const remaining = Math.max(totalOverviewFrames - completed, 0);
+          setFrameIndexingProgress({
+            stage: 'describing_frames',
+            completed,
+            total: Math.max(totalOverviewFrames, 1),
+            label: formatFrameDescriptionProgressLabel({
+              completedFrames: completed,
+              totalFrames: totalOverviewFrames,
+              completedBatches: completedBatchCount,
+              totalBatches: Math.max(totalBatches, 1),
+              activeBatches: activeBatchCount,
+            }),
+            etaSeconds: remaining > 0
+              ? estimateRemainingSecondsFromObservedRate(
+                descriptionStartedAt,
+                completed,
+                totalOverviewFrames,
+                descriptionFallbackPerFrame,
+              )
+              : 0,
+          });
+        },
+        onBatchSettled: () => {
+          activeBatchCount = Math.max(0, activeBatchCount - 1);
+          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+          setFrameIndexingProgress({
+            stage: 'describing_frames',
+            completed,
+            total: Math.max(totalOverviewFrames, 1),
+            label: formatFrameDescriptionProgressLabel({
+              completedFrames: completed,
+              totalFrames: totalOverviewFrames,
+              completedBatches: completedBatchCount,
+              totalBatches: Math.max(totalBatches, 1),
+              activeBatches: activeBatchCount,
+            }),
+            etaSeconds: completed >= totalOverviewFrames
+              ? 0
+              : estimateRemainingSecondsFromObservedRate(
+                descriptionStartedAt,
+                Math.max(completed, completedBeforeRequests),
+                totalOverviewFrames,
+                descriptionFallbackPerFrame,
+              ),
+          });
+        },
       });
       if (errors.length > 0) {
         const firstError = getErrorMessage(errors[0], 'Failed to analyze sampled video frames.');
