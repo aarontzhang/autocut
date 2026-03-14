@@ -46,6 +46,8 @@ type ChatResponse = {
   action?: EditAction | null;
   visualSearch?: VisualSearchSession | null;
   error?: string;
+  retryAfterSeconds?: number;
+  requestId?: string | null;
 };
 
 type ChatRequestMessage = {
@@ -68,6 +70,8 @@ type IndexingProgress = {
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
+const MAX_CHAT_REQUEST_RETRIES = 2;
+const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
 
 type ActiveMarkerMention = {
@@ -108,17 +112,51 @@ async function postChatRequest(
   }, CHAT_REQUEST_TIMEOUT_MS);
 
   try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: ctrl.signal,
-      body: JSON.stringify(payload),
-    });
-    const data = await parseJsonResponse<ChatResponse>(res);
-    if (!res.ok) {
-      throw new Error(data?.error ?? `Chat request failed (${res.status}).`);
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= MAX_CHAT_REQUEST_RETRIES; attempt += 1) {
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
+          body: JSON.stringify(payload),
+        });
+        const data = await parseJsonResponse<ChatResponse>(res);
+        if (!res.ok) {
+          const retryAfterSeconds = Number(res.headers.get('Retry-After') ?? data?.retryAfterSeconds);
+          const isRetriable = res.status === 429 || res.status >= 500;
+          const errorMessage = res.status === 529 || /overloaded/i.test(data?.error ?? '')
+            ? 'The chat provider is temporarily overloaded. Please try again in a moment.'
+            : (data?.error ?? `Chat request failed (${res.status}).`);
+
+          lastError = new Error(errorMessage);
+
+          if (attempt < MAX_CHAT_REQUEST_RETRIES && isRetriable && !ctrl.signal.aborted) {
+            const retryDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+              ? retryAfterSeconds * 1000
+              : CHAT_RETRY_BASE_DELAY_MS * (attempt + 1);
+            await sleep(retryDelay);
+            continue;
+          }
+
+          throw lastError;
+        }
+        return data ?? {};
+      } catch (error) {
+        const nextError = error instanceof Error ? error : new Error('Chat request failed.');
+        lastError = nextError;
+        if (nextError.name === 'AbortError') {
+          throw nextError;
+        }
+        if (attempt >= MAX_CHAT_REQUEST_RETRIES || ctrl.signal.aborted) {
+          throw nextError;
+        }
+        await sleep(CHAT_RETRY_BASE_DELAY_MS * (attempt + 1));
+      }
     }
-    return data ?? {};
+
+    throw lastError ?? new Error('Chat request failed.');
   } finally {
     window.clearTimeout(timeoutId);
   }
