@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic, { APIError } from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { getPrimaryMediaAsset } from '@/lib/analysisJobs';
 import {
@@ -32,9 +32,9 @@ import {
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
-const client = new OpenAI();
+const client = new Anthropic();
 const MIN_CHAT_CLIP_DURATION_SECONDS = 0.05;
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? 'gpt-4o';
+const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL ?? 'claude-sonnet-4-6';
 
 const BASE_SYSTEM_PROMPT = `You are an AI-assisted cutting assistant inside a professional clip-based timeline editor. Help users find moments, tag them with markers, and propose cuts or transitions for review using natural language commands.
 
@@ -1422,10 +1422,10 @@ function parseRetryAfterSeconds(value: string | null | undefined): number | null
 }
 
 function buildUpstreamErrorResponse(error: unknown) {
-  if (error instanceof OpenAI.APIError) {
+  if (error instanceof APIError) {
     const status = typeof error.status === 'number' ? error.status : 502;
     const retryAfterSeconds = parseRetryAfterSeconds(error.headers?.get('retry-after'));
-    const requestId = error.request_id ?? error.headers?.get('x-request-id') ?? null;
+    const requestId = error.requestID ?? error.headers?.get('request-id') ?? null;
     const headers = retryAfterSeconds
       ? { 'Retry-After': String(retryAfterSeconds) }
       : undefined;
@@ -1854,7 +1854,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     );
     const contextText = contextLines.join('\n');
 
-    const contextContent: OpenAI.Chat.ChatCompletionContentPart[] = [];
+    const contextContent: Anthropic.ContentBlockParam[] = [];
 
     const frames = requestFrames;
     const denseFrames = frames.filter((frame) => frame.kind === 'dense');
@@ -1862,8 +1862,8 @@ Honor these defaults unless the user explicitly asks for something different in 
       for (const frame of denseFrames) {
         if (!frame.image) continue;
         contextContent.push({
-          type: 'image_url',
-          image_url: { url: `data:image/jpeg;base64,${frame.image}` },
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
         });
       }
     }
@@ -1892,8 +1892,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       : '';
     contextContent.push({ type: 'text', text: contextText + overviewFrameNote + denseFrameNote });
 
-    const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-      { role: 'system', content: systemPrompt },
+    const anthropicMessages: Anthropic.MessageParam[] = [
       { role: 'user', content: contextContent },
       { role: 'assistant', content: 'Got it — I have the video context. What would you like to edit?' },
       ...normalizedMessages.map((m) => ({
@@ -1902,13 +1901,14 @@ Honor these defaults unless the user explicitly asks for something different in 
       })),
     ];
 
-    const response = await client.chat.completions.create({
+    const response = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 2048,
-      messages: openaiMessages,
+      system: systemPrompt,
+      messages: anthropicMessages,
     });
 
-    const rawText = response.choices[0]?.message?.content ?? '';
+    const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
     const { message, parsedAction } = extractTrailingAction(rawText);
     const action = reconcileNarratedSingleRangeAction(
       message,
