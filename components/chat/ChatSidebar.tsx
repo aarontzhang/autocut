@@ -13,7 +13,7 @@ import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 8;
-const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 3;
+const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 6;
 const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
@@ -525,12 +525,8 @@ function formatFrameDescriptionProgressLabel(params: {
   totalBatches: number;
   activeBatches: number;
 }): string {
-  const { completedFrames, totalFrames, completedBatches, totalBatches, activeBatches } = params;
-  if (completedBatches === 0 && activeBatches > 0) {
-    const noun = activeBatches === 1 ? 'batch' : 'batches';
-    return `Analyzing visuals ${completedFrames}/${totalFrames} (${activeBatches} ${noun} in flight)`;
-  }
-  return `Analyzing visuals ${completedFrames}/${totalFrames} (${completedBatches}/${totalBatches} batches)`;
+  const { completedFrames, totalFrames } = params;
+  return `Analyzing visuals ${completedFrames}/${totalFrames}`;
 }
 
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
@@ -1116,24 +1112,32 @@ async function extractSourceOverviewFrames(
     duration: number;
     overviewIntervalSeconds: number;
     maxOverviewFrames: number;
+    explicitTimestamps?: number[];
     onProgress?: (progress: { completed: number; total: number }) => void;
   },
 ): Promise<SourceIndexedFrame[]> {
   if (input.duration <= 0) return [];
 
-  const preferredInterval = Math.max(0.1, input.overviewIntervalSeconds);
-  const frameTarget = getOverviewFrameTarget(input.duration, preferredInterval, input.maxOverviewFrames);
-  const interval = input.duration <= preferredInterval * input.maxOverviewFrames
-    ? preferredInterval
-    : input.duration / input.maxOverviewFrames;
-  const sampleEnd = Math.max(input.duration - 0.05, 0);
-  const samples: SourceFrameSample[] = [];
-  for (let t = 0; t < sampleEnd; t += interval) {
-    samples.push({ index: samples.length, sourceTime: t });
+  let sampleTimes: number[];
+
+  if (input.explicitTimestamps && input.explicitTimestamps.length > 0) {
+    sampleTimes = input.explicitTimestamps;
+  } else {
+    const preferredInterval = Math.max(0.1, input.overviewIntervalSeconds);
+    const interval = input.duration <= preferredInterval * input.maxOverviewFrames
+      ? preferredInterval
+      : input.duration / input.maxOverviewFrames;
+    const sampleEnd = Math.max(input.duration - 0.05, 0);
+    sampleTimes = [];
+    for (let t = 0; t < sampleEnd; t += interval) {
+      sampleTimes.push(t);
+    }
+    if (sampleTimes.length === 0 || sampleTimes[sampleTimes.length - 1] < sampleEnd) {
+      sampleTimes.push(sampleEnd);
+    }
   }
-  if (samples.length === 0 || samples[samples.length - 1].sourceTime < sampleEnd) {
-    samples.push({ index: samples.length, sourceTime: sampleEnd });
-  }
+
+  const samples: SourceFrameSample[] = sampleTimes.map((t, i) => ({ index: i, sourceTime: t }));
   if (samples.length === 0) return [];
 
   const images = await extractVideoFrames(
@@ -1147,11 +1151,41 @@ async function extractSourceOverviewFrames(
     },
   );
 
-  return samples.slice(0, frameTarget).map((sample, index) => ({
+  return samples.map((sample, index) => ({
     sourceId: input.sourceId,
     sourceTime: sample.sourceTime,
     image: images[index],
   }));
+}
+
+function computeSilenceAwareTimestamps(
+  duration: number,
+  captions: CaptionEntry[],
+  minSilenceSeconds = 0.5,
+): number[] {
+  const timestamps: number[] = [];
+  const sorted = [...captions].sort((a, b) => a.startTime - b.startTime);
+
+  if (sorted.length > 0 && sorted[0].startTime >= minSilenceSeconds) {
+    timestamps.push(sorted[0].startTime / 2);
+  }
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const gapStart = sorted[i].endTime;
+    const gapEnd = sorted[i + 1].startTime;
+    if (gapEnd - gapStart >= minSilenceSeconds) {
+      timestamps.push((gapStart + gapEnd) / 2);
+    }
+  }
+
+  if (sorted.length > 0 && duration - sorted[sorted.length - 1].endTime >= minSilenceSeconds) {
+    timestamps.push((sorted[sorted.length - 1].endTime + duration) / 2);
+  }
+
+  return timestamps
+    .map(t => Math.round(t * 10) / 10)
+    .filter(t => t >= 0 && t < duration)
+    .sort((a, b) => a - b);
 }
 
 async function extractTimelineFramesFromSources(
@@ -2020,6 +2054,7 @@ export default function ChatSidebar() {
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
+  const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const syncingTaggedMarkersRef = useRef(false);
   const previousTaggedMarkerIdsRef = useRef<string[]>([]);
@@ -2171,95 +2206,120 @@ export default function ChatSidebar() {
   }, [isAgentMenuOpen]);
 
   // Source overview indexing runs only when a source is missing canonical frame data.
+  // Waits for transcript to complete so silence-aware timestamps can be computed.
   useEffect(() => {
     if ((!videoFile && !videoUrl && !videoData) || videoDuration <= 0) return;
     if (document.hidden || playbackActive || missingOverviewSources.length === 0) return;
-    if (projectedOverviewFrames === null || missingOverviewSources.length > 0) {
-      void (async () => {
-        try {
-          await ensureFramesExtracted(missingOverviewSources.length > 0);
-        } catch {
-          // Keep the editor usable even if background indexing fails.
-        }
-      })();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missingOverviewSources, playbackActive, projectedOverviewFrames, videoData, videoDuration, videoFile, videoUrl]);
-
-  const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
-    const state = useEditorStore.getState();
-    const sourcesToIndex = availableSources.filter((entry) => (
-      force
-        ? !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
-        : !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
-    ));
-    if (sourcesToIndex.length === 0) {
-      return state.projectedOverviewFrames ?? [];
-    }
-    if (document.hidden || state.playbackActive) {
-      return state.projectedOverviewFrames ?? [];
-    }
-    try {
-      setFrameAnalysisError(null);
-      const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
-      const totalTargetFrames = sourcesToIndex.reduce((count, entry) => (
-        count + getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames)
-      ), 0);
-      const extractionStartedAt = performance.now();
-      const extractionFallbackPerFrame = estimateFrameExtractionSeconds(totalTargetFrames) / Math.max(totalTargetFrames, 1);
-      let lastProgressPaintAt = 0;
-      setFrameIndexingProgress({
-        stage: 'extracting_frames',
-        completed: 0,
-        total: Math.max(totalTargetFrames, 1),
-        label: `Sampling source frames`,
-        etaSeconds: estimateFrameExtractionSeconds(totalTargetFrames),
-      });
-      let completedFrames = 0;
-      for (const entry of sourcesToIndex) {
-        const frames = await extractSourceOverviewFrames({
-          sourceId: entry.sourceId,
-          source: entry.source!,
-          duration: entry.duration,
-          overviewIntervalSeconds,
-          maxOverviewFrames,
-          onProgress: ({ completed, total }) => {
-            const now = performance.now();
-            if (completed < total && now - lastProgressPaintAt < 120) return;
-            lastProgressPaintAt = now;
-            setFrameIndexingProgress({
-              stage: 'extracting_frames',
-              completed: completedFrames + completed,
-              total: Math.max(totalTargetFrames, 1),
-              label: `Sampling frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
-              etaSeconds: estimateRemainingSecondsFromObservedRate(
-                extractionStartedAt,
-                completedFrames + completed,
-                totalTargetFrames,
-                extractionFallbackPerFrame,
-              ),
-            });
-          },
-        });
-        const describedFrames = await ensureFrameDescriptions(frames, true);
-        setSourceOverviewFrames(entry.sourceId, describedFrames, {
-          fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
-        });
-        completedFrames += frames.length;
+    if (transcriptStatus !== 'done') return;
+    void (async () => {
+      try {
+        await ensureFramesExtracted();
+      } catch {
+        // Keep the editor usable even if background indexing fails.
       }
-      const refreshedState = useEditorStore.getState();
-      setFrameIndexingProgress({
-        stage: 'extracting_frames',
-        completed: totalTargetFrames,
-        total: Math.max(totalTargetFrames, 1),
-        label: `Sampled source frames`,
-        etaSeconds: 0,
-      });
-      return refreshedState.projectedOverviewFrames ?? [];
-    } catch (error) {
-      setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
-      setFrameIndexingProgress(null);
-      return useEditorStore.getState().projectedOverviewFrames ?? [];
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missingOverviewSources, playbackActive, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+
+  const ensureFramesExtracted = useCallback(async (): Promise<IndexedVideoFrame[]> => {
+    if (extractionPromiseRef.current) return extractionPromiseRef.current;
+    const promise = (async () => {
+      const state = useEditorStore.getState();
+      const sourcesToIndex = availableSources.filter(
+        (entry) => !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
+      );
+      if (sourcesToIndex.length === 0) {
+        return state.projectedOverviewFrames ?? [];
+      }
+      if (document.hidden || state.playbackActive) {
+        return state.projectedOverviewFrames ?? [];
+      }
+      try {
+        setFrameAnalysisError(null);
+        const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
+
+        // Compute silence-aware timestamps from the transcript, if available.
+        const captions = state.sourceTranscriptCaptions;
+
+        let completedFrames = 0;
+        let totalTargetFrames = 1; // placeholder; updated once we know explicit timestamps
+
+        for (const entry of sourcesToIndex) {
+          const explicitTimestamps = captions && captions.length > 0
+            ? computeSilenceAwareTimestamps(entry.duration, captions)
+            : undefined;
+
+          const frameCount = explicitTimestamps
+            ? explicitTimestamps.length
+            : getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames);
+          totalTargetFrames = completedFrames + frameCount;
+
+          const extractionStartedAt = performance.now();
+          const extractionFallbackPerFrame = estimateFrameExtractionSeconds(frameCount) / Math.max(frameCount, 1);
+          let lastProgressPaintAt = 0;
+          setFrameIndexingProgress({
+            stage: 'extracting_frames',
+            completed: completedFrames,
+            total: Math.max(totalTargetFrames, 1),
+            label: `Sampling source frames`,
+            etaSeconds: estimateFrameExtractionSeconds(frameCount),
+          });
+
+          const frames = await extractSourceOverviewFrames({
+            sourceId: entry.sourceId,
+            source: entry.source!,
+            duration: entry.duration,
+            overviewIntervalSeconds,
+            maxOverviewFrames,
+            explicitTimestamps,
+            onProgress: ({ completed, total }) => {
+              const now = performance.now();
+              if (completed < total && now - lastProgressPaintAt < 120) return;
+              lastProgressPaintAt = now;
+              setFrameIndexingProgress({
+                stage: 'extracting_frames',
+                completed: completedFrames + completed,
+                total: Math.max(totalTargetFrames, 1),
+                label: `Sampling frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
+                etaSeconds: estimateRemainingSecondsFromObservedRate(
+                  extractionStartedAt,
+                  completedFrames + completed,
+                  totalTargetFrames,
+                  extractionFallbackPerFrame,
+                ),
+              });
+            },
+          });
+
+          const describedFrames = await ensureFrameDescriptions(frames, true);
+          setSourceOverviewFrames(entry.sourceId, describedFrames, {
+            fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
+          });
+          completedFrames += frames.length;
+        }
+
+        const refreshedState = useEditorStore.getState();
+        setFrameIndexingProgress({
+          stage: 'extracting_frames',
+          completed: totalTargetFrames,
+          total: Math.max(totalTargetFrames, 1),
+          label: `Sampled source frames`,
+          etaSeconds: 0,
+        });
+        return refreshedState.projectedOverviewFrames ?? [];
+      } catch (error) {
+        setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
+        setFrameIndexingProgress(null);
+        return useEditorStore.getState().projectedOverviewFrames ?? [];
+      }
+    })();
+    extractionPromiseRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      if (extractionPromiseRef.current === promise) {
+        extractionPromiseRef.current = null;
+      }
     }
   }, [availableSources, setSourceOverviewFrames]);
 
@@ -2706,7 +2766,7 @@ export default function ChatSidebar() {
       : frameIndexingProgress;
   const agentNotReadyReason = !agentContextReady && hasVideoSource
     ? (transcriptStatus === 'loading' && projectedOverviewFrames === null)
-      ? 'Preparing media in parallel…'
+      ? 'Preparing media…'
       : transcriptStatus === 'loading'
         ? 'Transcribing audio…'
         : projectedOverviewFrames === null

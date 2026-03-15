@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
-const client = new Anthropic();
-const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-sonnet-4-6';
+const client = new OpenAI();
 
 type FrameRequest = {
   image: string;
@@ -84,14 +83,16 @@ export async function POST(req: NextRequest) {
       return buildBetaLimitExceededResponse('frame_descriptions', usage);
     }
 
-    const content: Anthropic.ContentBlockParam[] = [{
-      type: 'text',
-      text:
-        'Describe each video frame in one short sentence for retrieval. ' +
-        'Focus on visible subjects, actions, text on screen, scene changes, and standout objects. ' +
-        'Do not speculate beyond what is visible. ' +
-        'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
-    }];
+    const content: OpenAI.Chat.ChatCompletionContentPart[] = [
+      {
+        type: 'text',
+        text:
+          'Describe each video frame in one short sentence for retrieval. ' +
+          'Focus on visible subjects, actions, text on screen, scene changes, and standout objects. ' +
+          'Do not speculate beyond what is visible. ' +
+          'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
+      },
+    ];
 
     frames.forEach((frame, index) => {
       content.push({
@@ -99,19 +100,19 @@ export async function POST(req: NextRequest) {
         text: `Frame ${index}: timeline ${frame.timelineTime.toFixed(2)}s, source ${frame.sourceTime.toFixed(2)}s.`,
       });
       content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
+        type: 'image_url',
+        image_url: { url: `data:image/jpeg;base64,${frame.image}`, detail: 'low' },
       });
     });
 
-    const response = await client.messages.create({
-      model: FRAME_DESCRIPTION_MODEL,
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 1800,
       temperature: 0,
       messages: [{ role: 'user', content }],
     });
 
-    const rawText = response.content.find(block => block.type === 'text')?.text ?? '';
+    const rawText = response.choices[0]?.message?.content ?? '';
     const parsed = parseDescriptions(rawText);
 
     if (!parsed) {
