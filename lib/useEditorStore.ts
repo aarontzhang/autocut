@@ -940,9 +940,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const clips = sanitizeTimelineClips(rawClips
       .map((clip) => normalizeLoadedClip(clip as Partial<VideoClip> & { sourcePath?: unknown }, storagePath))
       .filter((clip): clip is VideoClip => !!clip));
+    const persistedDuration = typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0;
+    const effectiveDuration = (typeof duration === 'number' && duration > 0) ? duration : persistedDuration;
     const hydratedClips = clips.length > 0
       ? clips
-      : (typeof duration === 'number' && duration > 0 ? [makeClip(0, duration)] : []);
+      : (effectiveDuration > 0 ? [makeClip(0, effectiveDuration)] : []);
 
     const rawTranscriptCaptions = Array.isArray(editState.sourceTranscriptCaptions)
       ? editState.sourceTranscriptCaptions
@@ -1007,7 +1009,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         currentProjectId: projectId,
         storagePath,
       }),
-      videoDuration: duration ?? 0,
+      videoDuration: duration ?? (typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0),
       clips: hydratedClips,
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
       transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],

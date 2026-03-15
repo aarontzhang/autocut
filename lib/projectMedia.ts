@@ -15,7 +15,6 @@ export async function uploadProjectMedia(
     throw new Error(getFileSizeErrorMessage());
   }
 
-  const supabase = getSupabaseBrowser();
   const initiateRes = await fetch('/api/uploads/initiate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -31,11 +30,15 @@ export async function uploadProjectMedia(
 
   const initiated = await initiateRes.json();
   const storagePath = initiated.storagePath as string;
-  const { error } = await supabase.storage.from('videos').uploadToSignedUrl(storagePath, initiated.token, file, {
-    upsert: false,
-    contentType: file.type || 'video/mp4',
+
+  const uploadForm = new FormData();
+  uploadForm.append('file', file);
+  uploadForm.append('storagePath', storagePath);
+  const uploadRes = await fetch('/api/uploads/file', {
+    method: 'POST',
+    body: uploadForm,
   });
-  if (error) throw error;
+  if (!uploadRes.ok) throw new Error(await readErrorMessage(uploadRes));
 
   const finalizeRes = await fetch('/api/uploads/finalize', {
     method: 'POST',
