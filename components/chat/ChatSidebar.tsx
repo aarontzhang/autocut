@@ -508,6 +508,10 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
   switch (action?.type) {
     case 'request_frames':
       return 'I need a closer visual inspection before I can place that cut precisely.';
+    case 'inspect_frames':
+      return 'I need a closer look at that section before making the edit.';
+    case 'search_transcript':
+      return 'Searching the transcript for relevant moments.';
     case 'transcribe_request':
       return 'I need a transcript for that section before I can finish the edit.';
     case 'delete_range':
@@ -855,6 +859,22 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         summary: req ? `${formatChatTime(req.startTime)} → ${formatChatTime(req.endTime)}` : '',
       };
     }
+    case 'inspect_frames': {
+      const req = action.inspectRequest;
+      const fps = req?.fps ?? 1;
+      return {
+        label: 'Inspect frames',
+        color: '#60a5fa',
+        summary: req ? `${formatChatTime(req.startTime)}→${formatChatTime(req.endTime)} @${fps}fps` : '',
+      };
+    }
+    case 'search_transcript': {
+      return {
+        label: 'Search transcript',
+        color: '#34d399',
+        summary: action.transcriptQuery ? `"${action.transcriptQuery}"` : '',
+      };
+    }
     case 'update_ai_settings':
       return {
         label: 'Update AI settings',
@@ -1166,20 +1186,29 @@ function computeSilenceAwareTimestamps(
   const timestamps: number[] = [];
   const sorted = [...captions].sort((a, b) => a.startTime - b.startTime);
 
-  if (sorted.length > 0 && sorted[0].startTime >= minSilenceSeconds) {
-    timestamps.push(sorted[0].startTime / 2);
-  }
-
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const gapStart = sorted[i].endTime;
-    const gapEnd = sorted[i + 1].startTime;
-    if (gapEnd - gapStart >= minSilenceSeconds) {
-      timestamps.push((gapStart + gapEnd) / 2);
+  function pushGapSamples(gapStart: number, gapEnd: number) {
+    const gapDuration = gapEnd - gapStart;
+    if (gapDuration < minSilenceSeconds) return;
+    const sampleCount = Math.floor(gapDuration); // 1 per second
+    if (sampleCount === 0) {
+      timestamps.push((gapStart + gapEnd) / 2); // short gap: single midpoint
+      return;
+    }
+    for (let i = 0; i < sampleCount; i++) {
+      timestamps.push(gapStart + i + 0.5); // center of each 1s bucket
     }
   }
 
+  if (sorted.length > 0 && sorted[0].startTime >= minSilenceSeconds) {
+    pushGapSamples(0, sorted[0].startTime);
+  }
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    pushGapSamples(sorted[i].endTime, sorted[i + 1].startTime);
+  }
+
   if (sorted.length > 0 && duration - sorted[sorted.length - 1].endTime >= minSilenceSeconds) {
-    timestamps.push((sorted[sorted.length - 1].endTime + duration) / 2);
+    pushGapSamples(sorted[sorted.length - 1].endTime, duration);
   }
 
   return timestamps
@@ -2518,7 +2547,7 @@ export default function ChatSidebar() {
     let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
     let producedVisibleResponse = false;
 
-    for (let round = 0; round < 2; round++) {
+    for (let round = 0; round < 4; round++) {
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
       const currentClips = freshState.clips;
@@ -2603,6 +2632,52 @@ export default function ChatSidebar() {
         setLoadingStatus('');
         history.push({ role: 'assistant', content: assistantMessage });
         history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
+        continue;
+      }
+
+      if (action?.type === 'inspect_frames' && action.inspectRequest) {
+        const req = action.inspectRequest;
+        const fps = Math.max(0.1, Math.min(4, req.fps ?? 1));
+        const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
+        const count = Math.min(Math.ceil(spanSeconds * fps), 60);
+        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
+        producedVisibleResponse = true;
+        setLoadingStatus(`Inspecting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)} @${fps}fps)…`);
+        const interval = (req.endTime - req.startTime) / count;
+        const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
+        currentFrames = (await extractTimelineFramesFromSources({
+          clips: currentClips,
+          videoData: freshState.videoData,
+          videoFile: freshState.videoFile,
+          videoUrl: freshState.videoUrl,
+          videoDuration: freshState.videoDuration,
+          timelineTimestamps,
+          kind: 'dense',
+        })).map((frame) => ({
+          ...frame,
+          rangeStart: req.startTime,
+          rangeEnd: req.endTime,
+        }));
+        setLoadingStatus('');
+        history.push({ role: 'assistant', content: assistantMessage });
+        history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)} at ${fps}fps. Now answer with these frames.]` });
+        continue;
+      }
+
+      if (action?.type === 'search_transcript' && action.transcriptQuery) {
+        const query = action.transcriptQuery;
+        const transcript = buildCurrentTranscript() ?? '';
+        const lines = transcript.split('\n').filter(line => line.toLowerCase().includes(query.toLowerCase()));
+        const MAX_RESULTS = 40;
+        const truncated = lines.length > MAX_RESULTS;
+        const resultLines = lines.slice(0, MAX_RESULTS);
+        const resultText = lines.length === 0
+          ? `[Transcript search for "${query}" returned no results.]`
+          : `[Transcript search for "${query}" found ${lines.length} line(s)${truncated ? ` (showing first ${MAX_RESULTS})` : ''}:\n${resultLines.join('\n')}\nNow decide what to inspect or edit.]`;
+        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
+        producedVisibleResponse = true;
+        history.push({ role: 'assistant', content: assistantMessage });
+        history.push({ role: 'user', content: resultText });
         continue;
       }
 

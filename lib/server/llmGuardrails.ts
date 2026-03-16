@@ -449,6 +449,33 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
     };
   }
 
+  if (type === 'inspect_frames') {
+    if (!action.inspectRequest || typeof action.inspectRequest !== 'object') return null;
+    const range = sanitizeRange(
+      (action.inspectRequest as { startTime?: unknown }).startTime,
+      (action.inspectRequest as { endTime?: unknown }).endTime,
+      safeDuration,
+    );
+    if (!range) return null;
+    const rawFps = (action.inspectRequest as { fps?: unknown }).fps;
+    return {
+      ...base,
+      type,
+      inspectRequest: {
+        startTime: range.start,
+        endTime: range.end,
+        fps: isFiniteNumber(rawFps) ? clamp(rawFps, 0.1, 4) : 1,
+      },
+    };
+  }
+
+  if (type === 'search_transcript') {
+    const rawQuery = action.query ?? action.transcriptQuery;
+    const transcriptQuery = sanitizeMessageText(rawQuery, { maxLength: 200, preserveNewlines: false });
+    if (!transcriptQuery) return null;
+    return { ...base, type, transcriptQuery };
+  }
+
   if (type === 'add_transition') {
     if (!Array.isArray(action.transitions)) return null;
     const transitions = action.transitions

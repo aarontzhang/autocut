@@ -254,6 +254,8 @@ export interface EditAction {
     | 'add_captions'
     | 'transcribe_request'
     | 'request_frames'
+    | 'inspect_frames'
+    | 'search_transcript'
     | 'add_transition'
     | 'add_marker'
     | 'add_markers'
@@ -288,6 +290,10 @@ export interface EditAction {
   segments?: Array<{ startTime: number; endTime: number; reason?: string }>;
   // request_frames
   frameRequest?: { startTime: number; endTime: number; count?: number };
+  // inspect_frames
+  inspectRequest?: { startTime: number; endTime: number; fps?: number };
+  // search_transcript
+  transcriptQuery?: string;
   // transitions
   transitions?: TransitionEntry[];
   // markers
