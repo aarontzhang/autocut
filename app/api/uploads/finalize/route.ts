@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import {
   getStorageObjectSize,
   getUserStorageQuotaSnapshot,
@@ -93,7 +93,6 @@ export async function POST(request: NextRequest) {
   }
 
   let assetId: string | null = null;
-  let indexingJobId: string | null = null;
   if (kind === 'project-main' || kind === 'main') {
     const { error: updateError } = await supabase
       .from('projects')
@@ -112,20 +111,8 @@ export async function POST(request: NextRequest) {
     try {
       const asset = await ensurePrimaryMediaAssetIfSupported(supabase, projectId, storagePath);
       assetId = asset?.id ?? null;
-      if (asset && (asset.status === 'pending' || asset.status === 'error')) {
-        const job = await enqueueAnalysisJobIfSupported(supabase, {
-          projectId,
-          assetId: asset.id,
-          jobType: 'index_asset',
-          payload: {
-            storagePath,
-            videoFilename: fileName,
-          },
-        });
-        indexingJobId = job?.id ?? null;
-      }
     } catch (assetError) {
-      console.error('[uploads.finalize] failed to initialize source asset indexing', assetError);
+      console.error('[uploads.finalize] failed to initialize media asset record', assetError);
     }
   }
 
@@ -134,6 +121,5 @@ export async function POST(request: NextRequest) {
     quota,
     uploadedSize,
     assetId,
-    indexingJobId,
   });
 }

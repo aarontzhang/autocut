@@ -404,6 +404,7 @@ interface EditorState {
       sourceIndexFreshBySourceId?: unknown;
       rawTranscriptCaptions?: unknown[];
       videoFrames?: unknown[];
+      videoDuration?: number;
     },
     project: {
       projectId: string;

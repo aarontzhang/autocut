@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import type { CaptionEntry, SourceIndexState, SourceIndexedFrame } from '@/lib/types';
+import type { CaptionEntry, SourceIndexState } from '@/lib/types';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -56,24 +56,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     });
   }
 
-  const [visualRowsResult, transcriptRowsResult] = await Promise.all([
-    supabase
-      .from('asset_visual_index')
-      .select('asset_id, source_time, sample_kind, metadata')
-      .eq('asset_id', asset.id)
-      .order('source_time', { ascending: true }),
-    supabase
-      .from('asset_transcript_words')
-      .select('asset_id, start_time, end_time, text')
-      .eq('asset_id', asset.id)
-      .order('start_time', { ascending: true }),
-  ]);
+  const { data: transcriptRows, error: transcriptError } = await supabase
+    .from('asset_transcript_words')
+    .select('asset_id, start_time, end_time, text')
+    .eq('asset_id', asset.id)
+    .order('start_time', { ascending: true });
 
-  if (visualRowsResult.error) {
-    return NextResponse.json({ error: visualRowsResult.error.message }, { status: 500 });
-  }
-  if (transcriptRowsResult.error) {
-    return NextResponse.json({ error: transcriptRowsResult.error.message }, { status: 500 });
+  if (transcriptError) {
+    return NextResponse.json({ error: transcriptError.message }, { status: 500 });
   }
 
   const sourceIndexFreshBySourceId: Record<string, SourceIndexState> = {
@@ -86,29 +76,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     },
   };
 
-  const sourceOverviewFrames: SourceIndexedFrame[] = ((visualRowsResult.data ?? []) as Array<{
-    asset_id: string;
-    source_time: number;
-    sample_kind: string;
-    metadata?: { description?: string } | null;
-  }>)
-    .flatMap((row) => {
-      const description = typeof row.metadata?.description === 'string' ? row.metadata.description.trim() : '';
-      if (!description && row.sample_kind !== 'scene_rep') return [];
-      sourceIndexFreshBySourceId[MAIN_SOURCE_ID] = {
-        ...sourceIndexFreshBySourceId[MAIN_SOURCE_ID],
-        overview: true,
-      };
-      return [{
-        sourceId: MAIN_SOURCE_ID,
-        sourceTime: Number(row.source_time ?? 0),
-        description,
-        assetId: row.asset_id,
-        indexedAt: sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.indexedAt ?? null,
-      }];
-    });
-
-  const sourceTranscriptCaptions: CaptionEntry[] = ((transcriptRowsResult.data ?? []) as Array<{
+  const sourceTranscriptCaptions: CaptionEntry[] = ((transcriptRows ?? []) as Array<{
     asset_id: string;
     start_time: number;
     end_time: number;
@@ -129,7 +97,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   return NextResponse.json({
     sourceTranscriptCaptions,
-    sourceOverviewFrames,
+    sourceOverviewFrames: [],
     sourceIndexFreshBySourceId,
     sources: [{
       sourceId: MAIN_SOURCE_ID,

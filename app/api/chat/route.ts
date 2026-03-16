@@ -1,26 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic, { APIError } from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { getPrimaryMediaAsset } from '@/lib/analysisJobs';
 import {
   AIEditingSettings,
   EditAction,
   IndexedVideoFrame,
   SilenceCandidate,
-  SourceRangeRef,
-  VerifiedSourceRange,
   VideoClip,
   VisualSearchSession,
 } from '@/lib/types';
-import {
-  confidenceBandForCandidates,
-  isLikelyVisualQuery,
-  parseVisualQuery,
-  projectVerifiedRangesToProposal,
-  retrieveVisualCandidates,
-} from '@/lib/visualRetrieval';
-import { formatTimePrecise, mergeSourceRanges, subtractSourceRanges } from '@/lib/timelineUtils';
-import { verifyCandidatesAgainstQuery } from '@/lib/server/visionIndexing.mjs';
+import { formatTimePrecise } from '@/lib/timelineUtils';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import {
   buildUntrustedDataBlock,
@@ -1154,31 +1143,6 @@ function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
     }));
 }
 
-function formatVisualCandidateMessage(session: VisualSearchSession): string {
-  if (session.proposal?.timelineRanges.length) {
-    const matchCount = session.proposal.timelineRanges.length;
-    if (session.confidenceBand === 'high') {
-      return matchCount === 1
-        ? 'I found one verified source-anchored visual match and mapped it onto the current timeline.'
-        : `I found ${matchCount} verified source-anchored visual matches and mapped them onto the current timeline.`;
-    }
-    return matchCount === 1
-      ? 'I found the strongest likely source match and mapped it onto the current timeline.'
-      : `I found ${matchCount} likely source matches and mapped them onto the current timeline.`;
-  }
-
-  if (session.candidates.length === 0) {
-    return session.followUpPrompt ?? 'I checked the indexed source media and did not find a usable on-screen match this pass.';
-  }
-
-  const preview = session.candidates
-    .slice(0, 3)
-    .map((candidate, index) => `${index + 1}. source ${candidate.sourceStart.toFixed(2)}-${candidate.sourceEnd.toFixed(2)}s`)
-    .join(' ');
-
-  return session.followUpPrompt ?? `I searched the source index and narrowed this to a few likely windows. Best candidates: ${preview}`;
-}
-
 function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (seconds: number) => string): string[] {
   const lines = [
     `Latest source visual retrieval query (untrusted user request): "${sanitizeInlineUntrustedText(session.query, 180)}" (${session.confidenceBand} confidence)`,
@@ -1364,49 +1328,6 @@ function buildBestEffortMarkerFallback(
   );
 }
 
-function extractRemovedSourceRanges(
-  appliedActions: unknown,
-  assetId?: string | null,
-): SourceRangeRef[] {
-  if (!Array.isArray(appliedActions)) return [];
-  const ranges = appliedActions.flatMap((entry) => {
-    if (!entry || typeof entry !== 'object') return [];
-    const sourceRanges = (entry as { sourceRanges?: Array<{ sourceId?: unknown; sourceStart?: unknown; sourceEnd?: unknown; assetId?: unknown }> }).sourceRanges;
-    if (!Array.isArray(sourceRanges)) return [];
-    return sourceRanges.flatMap((range) => {
-      const sourceStart = typeof range?.sourceStart === 'number' ? range.sourceStart : null;
-      const sourceEnd = typeof range?.sourceEnd === 'number' ? range.sourceEnd : null;
-      const sourceId = typeof range?.sourceId === 'string' ? range.sourceId : null;
-      const rangeAssetId = typeof range?.assetId === 'string' ? range.assetId : assetId ?? null;
-      if (sourceStart == null || sourceEnd == null || sourceEnd <= sourceStart) return [];
-      if (assetId && rangeAssetId && rangeAssetId !== assetId) return [];
-      return [{ sourceId, assetId: rangeAssetId, sourceStart, sourceEnd }];
-    });
-  });
-  return mergeSourceRanges(ranges);
-}
-
-function filterCandidatesAgainstRemovedSourceRanges(
-  candidates: ReturnType<typeof retrieveVisualCandidates> extends Promise<infer T> ? T : never,
-  removedSourceRanges: SourceRangeRef[],
-) {
-  return candidates.flatMap((candidate) => {
-    const remaining = subtractSourceRanges(
-      { assetId: candidate.assetId, sourceStart: candidate.sourceStart, sourceEnd: candidate.sourceEnd },
-      removedSourceRanges,
-    );
-    if (remaining.length === 0) return [];
-    const longest = remaining.reduce((best, range) => (
-      (range.sourceEnd - range.sourceStart) > (best.sourceEnd - best.sourceStart) ? range : best
-    ));
-    return [{
-      ...candidate,
-      sourceStart: longest.sourceStart,
-      sourceEnd: longest.sourceEnd,
-    }];
-  });
-}
-
 function parseRetryAfterSeconds(value: string | null | undefined): number | null {
   if (!value) return null;
   const numeric = Number(value);
@@ -1508,154 +1429,6 @@ Honor these defaults unless the user explicitly asks for something different in 
         message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
         action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
       });
-    }
-
-    if (
-      context?.projectId
-      && typeof context.projectId === 'string'
-      && isLikelyVisualQuery(effectiveLatestUserMessage)
-      && !hasDenseFrames
-    ) {
-      const { data: project, error: projectError } = await supabase
-        .from('projects')
-        .select('id')
-        .eq('id', context.projectId)
-        .eq('user_id', user.id)
-        .maybeSingle();
-
-      if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
-      if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-
-      const visualUsage = await consumeBetaUsage('visual_searches', user.id, 1);
-      if (!visualUsage.allowed) {
-        return buildBetaLimitExceededResponse('visual_searches', visualUsage);
-      }
-
-      let asset = null;
-      const intent = parseVisualQuery(effectiveLatestUserMessage);
-      try {
-        asset = await getPrimaryMediaAsset(supabase, context.projectId);
-      } catch (error) {
-        console.error('[chat.visual] failed to load primary media asset, falling back to legacy flow', error);
-        asset = null;
-      }
-
-      if (!asset) {
-        // Fall back to the existing transcript/frame-summary workflow when
-        // the new source-index tables are not available yet.
-      } else {
-        let candidates;
-        const removedSourceRanges = extractRemovedSourceRanges(context?.appliedActions, asset?.id);
-        try {
-          candidates = await retrieveVisualCandidates(supabase, asset, intent, 12);
-        } catch (error) {
-          console.error('[chat.visual] failed to retrieve visual candidates, falling back to legacy flow', error);
-          candidates = null;
-        }
-        if (!candidates) {
-          // Fall back to the existing transcript/frame-summary workflow when
-          // the visual sample table is not available yet.
-        } else {
-        candidates = filterCandidatesAgainstRemovedSourceRanges(candidates, removedSourceRanges);
-        let confidenceBand = confidenceBandForCandidates(candidates);
-        let proposal = null;
-        let action: EditAction | null = { type: 'none', message: 'No timeline edit was applied.' };
-        let followUpPrompt: string | undefined;
-        let verifiedRanges: VerifiedSourceRange[] = [];
-
-        if (candidates.length > 0) {
-          try {
-            verifiedRanges = await verifyCandidatesAgainstQuery(supabase, asset, effectiveLatestUserMessage, candidates);
-          } catch (error) {
-            console.error('[chat.visual] candidate verification failed', error);
-          }
-        }
-
-        if (verifiedRanges.length > 0) {
-          proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges, {
-            excludedSourceRanges: removedSourceRanges,
-          });
-          confidenceBand = proposal.confidenceBand;
-        }
-
-        if (!proposal && candidates[0]) {
-          const seed = candidates[0];
-          verifiedRanges = [{
-            assetId: asset.id,
-            sourceStart: seed.sourceStart,
-            sourceEnd: seed.sourceEnd,
-            frameStart: Math.round(seed.sourceStart * (asset.fps ?? 30)),
-            frameEnd: Math.round(seed.sourceEnd * (asset.fps ?? 30)),
-            verificationConfidence: Math.max(seed.retrievalScore, 0.55),
-            boundaryConfidence: Math.max(seed.confidenceBand === 'high' ? 0.82 : 0.68, seed.retrievalScore),
-            evidence: seed.retrievalReasons,
-            candidateId: seed.id,
-          }];
-          proposal = projectVerifiedRangesToProposal(projectionClips, asset.id, intent, verifiedRanges, {
-            excludedSourceRanges: removedSourceRanges,
-          });
-          confidenceBand = proposal.confidenceBand;
-        }
-
-        if (proposal && proposal.timelineRanges.length > 0) {
-          action = {
-            type: proposal.timelineRanges.length > 1 ? 'add_markers' : 'add_marker',
-            markers: proposal.timelineRanges.map((range, index) => ({
-              timelineTime: range.timelineStart,
-              label: proposal.timelineRanges.length > 1 ? `Finding ${index + 1}` : 'Finding',
-              createdBy: 'ai',
-              status: 'open',
-              linkedRange: {
-                startTime: range.timelineStart,
-                endTime: range.timelineEnd,
-              },
-              confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
-              note: effectiveLatestUserMessage,
-            })),
-            marker: proposal.timelineRanges[0]
-              ? {
-                  timelineTime: proposal.timelineRanges[0].timelineStart,
-                  label: 'Finding',
-                  createdBy: 'ai',
-                  status: 'open',
-                  linkedRange: {
-                    startTime: proposal.timelineRanges[0].timelineStart,
-                    endTime: proposal.timelineRanges[0].timelineEnd,
-                  },
-                  confidence: proposal.confidenceBand === 'high' ? 0.9 : proposal.confidenceBand === 'medium' ? 0.72 : 0.55,
-                  note: effectiveLatestUserMessage,
-                }
-              : undefined,
-            message: proposal.timelineRanges.length === 1
-              ? 'Tagged one likely moment for review.'
-              : `Tagged ${proposal.timelineRanges.length} likely moments for review.`,
-          };
-          followUpPrompt = 'I tagged the strongest matches as markers so you can review them, then ask me to cut around a marker or add a transition at one.';
-        } else {
-          followUpPrompt = confidenceBand === 'medium'
-            ? 'I searched deeper in the source index and found a few plausible windows. I can keep narrowing from one of those moments or from an approximate timestamp.'
-            : 'I made a best-effort pass through the indexed source media but did not get to a clean timeline match yet. I can keep narrowing if you give me an approximate timestamp or one extra visual detail.';
-        }
-
-        const visualSearch: VisualSearchSession = {
-          projectId: context.projectId,
-          assetId: asset.id,
-          query: effectiveLatestUserMessage,
-          confidenceBand,
-          intent,
-          candidates,
-          proposal,
-          followUpPrompt,
-          updatedAt: Date.now(),
-        };
-
-        return NextResponse.json({
-          message: formatVisualCandidateMessage(visualSearch),
-          action,
-          visualSearch,
-        });
-        }
-      }
     }
 
     if (clipSummaries.length > 0) {

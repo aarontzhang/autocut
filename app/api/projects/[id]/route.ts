@@ -1,5 +1,5 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { enqueueAnalysisJobIfSupported, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
@@ -61,28 +61,15 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (!updated) return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
 
   let assetId: string | null = null;
-  let indexingJobId: string | null = null;
   if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
     try {
       const asset = await ensurePrimaryMediaAssetIfSupported(supabase, id, body.video_path);
       assetId = asset?.id ?? null;
-      if (asset && (asset.status === 'pending' || asset.status === 'error')) {
-        const job = await enqueueAnalysisJobIfSupported(supabase, {
-          projectId: id,
-          assetId: asset.id,
-          jobType: 'index_asset',
-          payload: {
-            storagePath: body.video_path,
-            videoFilename: body.video_filename ?? null,
-          },
-        });
-        indexingJobId = job?.id ?? null;
-      }
     } catch (assetError) {
-      console.error('[projects.patch] failed to initialize source asset indexing', assetError);
+      console.error('[projects.patch] failed to initialize media asset record', assetError);
     }
   }
-  return NextResponse.json({ ok: true, assetId, indexingJobId });
+  return NextResponse.json({ ok: true, assetId });
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

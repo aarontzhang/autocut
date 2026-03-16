@@ -116,36 +116,6 @@ export interface MediaAsset {
   indexedAt: string | null;
 }
 
-export interface AssetScene {
-  id: string;
-  assetId: string;
-  sceneIndex: number;
-  sourceStart: number;
-  sourceEnd: number;
-  representativeThumbnailPath: string | null;
-  metadata?: Record<string, unknown> | null;
-}
-
-export type AssetVisualSampleKind = 'scene_rep' | 'window_250ms';
-
-export interface AssetVisualSample {
-  id: string;
-  assetId: string;
-  sourceTime: number;
-  windowDuration: number;
-  sampleKind: AssetVisualSampleKind;
-  thumbnailPath: string | null;
-  ocrText: string | null;
-  embedding: number[] | null;
-  brightness: number | null;
-  contrast: number | null;
-  edgeDensity: number | null;
-  motionScore: number | null;
-  fogScore: number | null;
-  darknessScore: number | null;
-  metadata?: Record<string, unknown> | null;
-}
-
 export interface AssetTranscriptWord {
   id: string;
   assetId: string;
@@ -153,41 +123,6 @@ export interface AssetTranscriptWord {
   endTime: number;
   text: string;
   confidence?: number | null;
-}
-
-export type AnalysisJobType =
-  | 'index_asset'
-  | 'verify_visual_candidates'
-  | 'repeat_detect_from_seed';
-
-export type AnalysisJobStatus =
-  | 'queued'
-  | 'running'
-  | 'completed'
-  | 'failed';
-
-export interface AnalysisJobProgress {
-  completed: number;
-  total: number;
-  stage?: string;
-}
-
-export interface AnalysisJob {
-  id: string;
-  projectId: string;
-  assetId: string | null;
-  jobType: AnalysisJobType;
-  status: AnalysisJobStatus;
-  priority: number;
-  attemptCount: number;
-  payload?: Record<string, unknown> | null;
-  result?: Record<string, unknown> | null;
-  error?: string | null;
-  lockedAt?: string | null;
-  lockedBy?: string | null;
-  progress?: AnalysisJobProgress | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface SourceIndexedFrame {
