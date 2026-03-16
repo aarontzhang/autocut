@@ -2640,8 +2640,6 @@ export default function ChatSidebar() {
         const fps = Math.max(0.1, Math.min(4, req.fps ?? 1));
         const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
         const count = Math.min(Math.ceil(spanSeconds * fps), 60);
-        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
-        producedVisibleResponse = true;
         setLoadingStatus(`Inspecting ${count} frames (${formatTime(req.startTime)}–${formatTime(req.endTime)} @${fps}fps)…`);
         const interval = (req.endTime - req.startTime) / count;
         const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
@@ -2674,8 +2672,6 @@ export default function ChatSidebar() {
         const resultText = lines.length === 0
           ? `[Transcript search for "${query}" returned no results.]`
           : `[Transcript search for "${query}" found ${lines.length} line(s)${truncated ? ` (showing first ${MAX_RESULTS})` : ''}:\n${resultLines.join('\n')}\nNow decide what to inspect or edit.]`;
-        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
-        producedVisibleResponse = true;
         history.push({ role: 'assistant', content: assistantMessage });
         history.push({ role: 'user', content: resultText });
         continue;

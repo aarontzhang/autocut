@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { buildClipSchedule } from './playbackEngine';
 import type {
+  AppliedActionRecord,
   CaptionEntry,
   EditAction,
   MarkerEntry,
@@ -15,6 +16,7 @@ export interface EditSnapshot {
   transitions: TransitionEntry[];
   markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
+  appliedActions?: AppliedActionRecord[];
 }
 
 export const MIN_CLIP_DURATION_SECONDS = 0.05;

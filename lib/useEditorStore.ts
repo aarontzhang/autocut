@@ -463,6 +463,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       transitions: s.transitions,
       markers: s.markers,
       textOverlays: s.textOverlays,
+      appliedActions: s.appliedActions,
     };
   },
 
@@ -785,6 +786,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...prev,
       history: history.slice(0, -1),
       future: [snap, ...future],
+      appliedActions: prev.appliedActions ?? get().appliedActions,
       pendingAction: null,
       selectedItem: null,
       taggedMarkerIds: [],
@@ -808,6 +810,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...next,
       history: [...history, snap],
       future: future.slice(1),
+      appliedActions: next.appliedActions ?? get().appliedActions,
       pendingAction: null,
       selectedItem: null,
       taggedMarkerIds: [],

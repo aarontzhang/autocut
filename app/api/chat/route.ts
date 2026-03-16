@@ -244,6 +244,7 @@ You may be provided with sampled frames from the user's video as text summaries,
 - If the user is scouting with markers only, you may place an approximate marker from the best available evidence and note the likely review window.
 - If dense frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
+- CRITICAL: Never set deleteStartTime or deleteEndTime in the middle of spoken speech. Before finalising any delete boundary, check the transcript to confirm no caption overlaps that timestamp. If a caption's endTime is after your proposed deleteStartTime, push deleteStartTime to at least that caption's endTime.
 - If NEITHER frame summaries/dense frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate. Never copy transcript text directly as captions — use transcribe_request only to store the transcript internally.`;
 
