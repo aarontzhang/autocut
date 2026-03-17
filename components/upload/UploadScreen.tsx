@@ -11,6 +11,19 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { STORAGE_FILE_LIMIT_BYTES, STORAGE_QUOTA_BYTES, formatStorageBytes, getFileSizeErrorMessage } from '@/lib/storageQuota';
 
+const MAX_VIDEO_DURATION_SECONDS = 30 * 60;
+
+function readFileDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const tmp = document.createElement('video');
+    tmp.preload = 'metadata';
+    tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; URL.revokeObjectURL(url); };
+    tmp.onerror = () => { resolve(0); tmp.src = ''; URL.revokeObjectURL(url); };
+    tmp.src = url;
+  });
+}
+
 export default function UploadScreen() {
   const setVideoCloud = useEditorStore(s => s.setVideoCloud);
   const setUploadProgress = useEditorStore(s => s.setUploadProgress);
@@ -31,6 +44,12 @@ export default function UploadScreen() {
     if (!file.type.startsWith('video/')) return;
     if (file.size > STORAGE_FILE_LIMIT_BYTES) {
       setUploadError(getFileSizeErrorMessage());
+      setUploadProgress(null);
+      return;
+    }
+    const duration = await readFileDuration(file);
+    if (duration > MAX_VIDEO_DURATION_SECONDS) {
+      setUploadError('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
       setUploadProgress(null);
       return;
     }

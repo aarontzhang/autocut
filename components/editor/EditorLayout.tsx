@@ -325,6 +325,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const duration = await readVideoDuration(blobUrl);
     URL.revokeObjectURL(blobUrl);
 
+    if (duration > 30 * 60) {
+      setStorageNotice('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
+      return;
+    }
+
     setProjectVideoFile(file, targetProjectId);
     if (duration > 0) {
       setVideoDuration(duration);
@@ -339,7 +344,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       console.warn('Background upload failed:', error.message);
       handleStorageUploadError(error);
     });
-  }, [handleStorageUploadError, handleStorageUploadSuccess, hasMainMedia, projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setVideoDuration, showSingleSourceNotice, user]);
+  }, [handleStorageUploadError, handleStorageUploadSuccess, hasMainMedia, projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setStorageNotice, setVideoDuration, showSingleSourceNotice, user]);
 
   const importFiles = useCallback(async (files: File[]) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
