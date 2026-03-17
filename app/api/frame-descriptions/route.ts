@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
-const client = new OpenAI();
+const client = new Anthropic();
+const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-haiku-4-5-20251001';
 
 type FrameRequest = {
   image: string;
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest) {
       return buildBetaLimitExceededResponse('frame_descriptions', usage);
     }
 
-    const content: OpenAI.Chat.ChatCompletionContentPart[] = [
+    const content: Anthropic.ContentBlockParam[] = [
       {
         type: 'text',
         text:
@@ -100,19 +101,18 @@ export async function POST(req: NextRequest) {
         text: `Frame ${index}: timeline ${frame.timelineTime.toFixed(2)}s, source ${frame.sourceTime.toFixed(2)}s.`,
       });
       content.push({
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${frame.image}`, detail: 'low' },
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
       });
     });
 
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await client.messages.create({
+      model: FRAME_DESCRIPTION_MODEL,
       max_tokens: 1800,
-      temperature: 0,
       messages: [{ role: 'user', content }],
     });
 
-    const rawText = response.choices[0]?.message?.content ?? '';
+    const rawText = response.content.find(block => block.type === 'text')?.text ?? '';
     const parsed = parseDescriptions(rawText);
 
     if (!parsed) {
