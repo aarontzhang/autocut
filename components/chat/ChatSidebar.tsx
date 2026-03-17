@@ -2018,6 +2018,7 @@ export default function ChatSidebar() {
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
+  const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const syncingTaggedMarkersRef = useRef(false);
   const previousTaggedMarkerIdsRef = useRef<string[]>([]);
@@ -2183,6 +2184,8 @@ export default function ChatSidebar() {
   }, [missingOverviewSources, playbackActive, videoData, videoDuration, videoFile, videoUrl]);
 
   const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
+    if (!force && extractionPromiseRef.current) return extractionPromiseRef.current;
+    const promise = (async () => {
     const state = useEditorStore.getState();
     const sourcesToIndex = availableSources.filter(
       (entry) => force || !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
@@ -2261,6 +2264,15 @@ export default function ChatSidebar() {
       setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
       setFrameIndexingProgress(null);
       return useEditorStore.getState().projectedOverviewFrames ?? [];
+    }
+    })();
+    extractionPromiseRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      if (extractionPromiseRef.current === promise) {
+        extractionPromiseRef.current = null;
+      }
     }
   }, [availableSources, setSourceOverviewFrames]);
 
