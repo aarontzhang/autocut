@@ -760,12 +760,16 @@ export async function extractVideoFrames(
     // After the probe succeeds, download remote URLs to a local blob
     // so seeks are instant (in-memory) rather than making hundreds of
     // range requests to Supabase storage.
+    // Use readMediaInput so the download is shared with any concurrent
+    // FFmpeg audio extraction, avoiding two parallel full-video fetches.
     if (typeof fileOrUrl === 'string' && /^https?:\/\//.test(srcUrl)) {
-      const response = await fetch(srcUrl);
-      if (response.ok) {
-        const blob = await response.blob();
+      try {
+        const bytes = await readMediaInput(fileOrUrl);
+        const blob = new Blob([bytes]);
         fallbackObjectUrl = URL.createObjectURL(blob);
         srcUrl = fallbackObjectUrl;
+      } catch {
+        // Keep srcUrl as the remote URL; seeks will fall back to range requests.
       }
     }
 
