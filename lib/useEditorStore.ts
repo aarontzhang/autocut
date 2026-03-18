@@ -181,7 +181,7 @@ export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   },
   frameInspection: {
     defaultFrameCount: 30,
-    overviewIntervalSeconds: 1,
+    overviewIntervalSeconds: 2,
     maxOverviewFrames: 1800,
   },
   captions: {

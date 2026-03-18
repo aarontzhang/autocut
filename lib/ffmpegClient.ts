@@ -757,6 +757,18 @@ export async function extractVideoFrames(
       probeVideo.load();
     }
 
+    // After the probe succeeds, download remote URLs to a local blob
+    // so seeks are instant (in-memory) rather than making hundreds of
+    // range requests to Supabase storage.
+    if (typeof fileOrUrl === 'string' && /^https?:\/\//.test(srcUrl)) {
+      const response = await fetch(srcUrl);
+      if (response.ok) {
+        const blob = await response.blob();
+        fallbackObjectUrl = URL.createObjectURL(blob);
+        srcUrl = fallbackObjectUrl;
+      }
+    }
+
     const hardwareConcurrency = typeof navigator !== 'undefined' && Number.isFinite(navigator.hardwareConcurrency)
       ? navigator.hardwareConcurrency
       : 4;
