@@ -562,7 +562,7 @@ export default function LandingPage() {
           align-items: stretch;
         }
         .lp-hero-graphic {
-          padding: 32px 0;
+          padding: 86px 0 32px;
           display: flex;
           align-items: stretch;
         }
