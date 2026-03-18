@@ -27,6 +27,7 @@ export async function proxy(request: NextRequest) {
   const isPublicAsset = /\.[A-Za-z0-9]+$/.test(pathname);
   const isPublic = (
     pathname === '/'
+    || pathname === '/waitlist'
     || pathname.startsWith('/api')
     || pathname.startsWith('/auth')
     || pathname.startsWith('/_next')
@@ -38,7 +39,7 @@ export async function proxy(request: NextRequest) {
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
-    url.pathname = '/auth/login';
+    url.pathname = '/waitlist';
     return NextResponse.redirect(url);
   }
 
