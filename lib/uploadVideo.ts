@@ -47,12 +47,18 @@ export async function uploadVideoToSupabase(
 
   onProgress?.(5);
 
-  onProgress?.(15);
+  onProgress?.(10);
   const { error: uploadErr } = await supabase.storage
     .from('videos')
     .uploadToSignedUrl(storagePath, initiated.token, file, {
       upsert: false,
       contentType: file.type || 'video/mp4',
+      onUploadProgress: (progress) => {
+        if (!onProgress || !progress.total) return;
+        // Map the actual upload bytes to 10–95% of the overall progress
+        const pct = Math.round((progress.loaded / progress.total) * 85);
+        onProgress(10 + pct);
+      },
     });
 
   if (uploadErr) {

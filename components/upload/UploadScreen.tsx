@@ -17,9 +17,20 @@ function readFileDuration(file: File): Promise<number> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const tmp = document.createElement('video');
+    let settled = false;
+    const finish = (duration: number) => {
+      if (settled) return;
+      settled = true;
+      tmp.src = '';
+      URL.revokeObjectURL(url);
+      resolve(duration);
+    };
+    // Safety timeout — if the browser never fires loadedmetadata (can happen on
+    // HTTPS with certain codecs), resolve with 0 so the upload can still proceed.
+    const timeoutId = window.setTimeout(() => finish(0), 10_000);
     tmp.preload = 'metadata';
-    tmp.onloadedmetadata = () => { resolve(tmp.duration); tmp.src = ''; URL.revokeObjectURL(url); };
-    tmp.onerror = () => { resolve(0); tmp.src = ''; URL.revokeObjectURL(url); };
+    tmp.onloadedmetadata = () => { clearTimeout(timeoutId); finish(tmp.duration); };
+    tmp.onerror = () => { clearTimeout(timeoutId); finish(0); };
     tmp.src = url;
   });
 }

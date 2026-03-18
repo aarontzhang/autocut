@@ -203,7 +203,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   }, [currentTime, deleteSelectedItem, redo, setCurrentTime, undo]);
 
   useEffect(() => {
-    const source = videoData ?? videoFile ?? videoUrl;
+    // Prefer a URL string over a File object so readMediaInput can cache the
+    // result across chunks instead of re-reading the entire file from disk
+    // on every 45-second segment.
+    const source = videoData ?? videoUrl ?? videoFile;
     const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
     if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || document.hidden || playbackActive) {
       return;
