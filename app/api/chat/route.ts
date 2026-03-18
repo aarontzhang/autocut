@@ -85,20 +85,6 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - intensity: 0.0 to 1.0
 - Use when user says: "make clip 1 black and white", "add cinematic look to the intro", etc.
 
-### 6. Request Dense Frames (request_frames)
-- Request a higher-density set of actual video frames for a specific time range to pinpoint a precise visual moment
-- Use when the user wants an edit "right before X happens", "when Y appears", etc. and you need better visual resolution
-- startTime/endTime: the range to inspect (seconds); count: frames to extract (default comes from context settings, max 60)
-- Prefer narrow requests around the likely boundary when possible, but if you already have a plausible range to inspect, request frames for that range now instead of asking the user to narrow it further.
-- Avoid requesting dense frames across essentially the entire video when you have no plausible target area at all.
-- If the user only wants markers/bookmarks for review, an approximate placement is acceptable. Use the best supported estimate you have and add an open marker with a linkedRange/confidence instead of insisting on frame-perfect confirmation.
-- Reserve frame-perfect dense inspection for actual edits like cuts, split points, or transition boundaries.
-- Dense sampled frames are discrete evidence, not proof that an entire multi-second range matches. Use them to make the best supported action you can from the requested window.
-- Use this when the text-only frame summaries are not specific enough. After extraction, the frames will be attached as images — use them to identify the exact timestamp, then make your edit
-
-Example:
-<action>{"type":"request_frames","frameRequest":{"startTime":10,"endTime":25,"count":15},"message":"Getting a closer look at that section to find the exact moment."}</action>
-
 ### 7. Transcribe Audio (transcribe_request)
 - Request real audio transcription for a region of the video using Whisper — stores the result internally as a transcript for future queries, does NOT add visible captions
 - Use when user asks about what is said/spoken in the video, or when you need the transcript to answer a question, or when user says "transcribe"
@@ -148,10 +134,12 @@ Example:
 - If the user's latest turn makes a clear actionable editing request, include exactly one JSON <action> block at the very end of the reply.
 - NEVER ask the user a clarifying question when you have transcript or frame evidence available. Find the answer from the context you have, then act. Only ask if the request is so broad you have zero evidence to start from (e.g. "edit my video" with no further detail).
 - When the user says something like "find X and delete it" or "remove the section between Y and Z", always attempt to locate it using the tools you have (transcript search, frame inspection) before giving up or asking.
+- CRITICAL: If your prose mentions a specific timestamp, says "I'll place a marker", "I'll cut at X", "I found it at Y", or otherwise commits to a concrete action — you MUST emit that action in the same response. Never describe an action you are about to take and then return type:none. The action block is how you act, not a separate follow-up step.
+- CRITICAL: If you have identified specific timestamps or ranges from the context (frame summaries, transcript, or prior conversation), immediately produce the edit or marker. Do not defer to a future turn.
 - Keep ALL messages to 1-2 short sentences. Do not narrate your reasoning process, list findings as bullet points, or explain what you looked at. Just state what you found or what you're doing.
 - Do not make the conversation artificially sequential. Some turns should be conversational, and some turns should immediately produce an action, depending on what the user asked right now.
 - If you emit an action and mention any explicit timestamp or time range in the prose above it, those times must exactly match the action JSON. Do not describe one range in prose and output a different range in <action>.
-- For single-range actions such as delete_range or request_frames, mention at most one explicit target range in prose, and make it the same final range you put in the action.
+- For single-range actions such as delete_range, mention at most one explicit target range in prose, and make it the same final range you put in the action.
 
 ## Action block examples
 
@@ -221,18 +209,15 @@ No action:
 - Use type:none only when you want to explicitly report that you checked something and there is no edit to make. Ordinary conversational replies can omit the action block entirely.
 
 ## Visual and audio context
-You may be provided with sampled frames from the user's video as text summaries, dense sampled frames as images, and/or a full audio transcript.
+You may be provided with sampled frames from the user's video as text summaries and/or a full audio transcript.
 - Overview frame summaries are provided upfront. Use them along with the transcript to reason about content before editing.
-- Dense frames may be attached as images for a narrower time range. Use those images when you need precise visual confirmation.
 - For visually triggered edits, prioritize the visual evidence over the transcript when they disagree. Spoken words can lead or lag what appears on screen.
 - For visual events like gestures, objects, or on-screen actions, transcript mentions are only hints about where to look. Do not conclude the visual moment was already cut just because the spoken mention maps to removed source time.
-- If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching or inspect the remaining visible footage instead of asking whether you should continue.
-- If the text summaries are not specific enough for the user's visual request, issue request_frames for the most relevant narrow range when the user needs an exact edit boundary.
-- If the user is scouting with markers only, you may place an approximate marker from the best available evidence and note the likely review window.
-- If dense frames are attached: use them to answer visual questions about what is on screen. Do NOT say you cannot see or analyze the video.
+- If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching in the remaining visible footage instead of asking whether you should continue.
+- If the user is scouting with markers only, place an approximate marker from the best available evidence and note the likely review window.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
 - CRITICAL: Never set deleteStartTime or deleteEndTime in the middle of spoken speech. Before finalising any delete boundary, check the transcript to confirm no caption overlaps that timestamp. If a caption's endTime is after your proposed deleteStartTime, push deleteStartTime to at least that caption's endTime.
-- If NEITHER frame summaries/dense frames nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
+- If NEITHER frame summaries nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate. Never copy transcript text directly as captions — use transcribe_request only to store the transcript internally.`;
 
 const PROMPT_INJECTION_RULES = `
@@ -1278,7 +1263,6 @@ function buildMarkerActionFromTimelineRanges(
 function buildBestEffortMarkerFallback(
   latestUserMessage: string,
   currentAction: EditAction | null,
-  denseFrames: IndexedVideoFrame[],
   priorVisualSearch: VisualSearchSession | null,
 ): EditAction | null {
   if (currentAction && currentAction.type !== 'none') return null;
@@ -1298,36 +1282,7 @@ function buildBestEffortMarkerFallback(
     );
   }
 
-  const denseTimelineTimes = denseFrames
-    .map((frame) => frame.timelineTime)
-    .filter((time): time is number => Number.isFinite(time));
-  if (denseTimelineTimes.length === 0) return null;
-
-  const rangeStarts = denseFrames
-    .map((frame) => typeof frame.rangeStart === 'number' ? frame.rangeStart : frame.timelineTime)
-    .filter((time): time is number => Number.isFinite(time));
-  const rangeEnds = denseFrames
-    .map((frame) => typeof frame.rangeEnd === 'number' ? frame.rangeEnd : frame.timelineTime)
-    .filter((time): time is number => Number.isFinite(time));
-  if (rangeStarts.length === 0 || rangeEnds.length === 0) return null;
-
-  const rangeStart = Math.min(...rangeStarts);
-  const rangeEnd = Math.max(...rangeEnds);
-  if (!(rangeEnd > rangeStart)) return null;
-
-  const midpoint = rangeStart + (rangeEnd - rangeStart) / 2;
-  const explicitAnchor = extractExplicitTimelineReferences(latestUserMessage)
-    .find((time) => time >= rangeStart - 0.5 && time <= rangeEnd + 0.5);
-  const anchor = explicitAnchor ?? denseTimelineTimes.reduce((closest, candidate) => (
-    Math.abs(candidate - midpoint) < Math.abs(closest - midpoint) ? candidate : closest
-  ), denseTimelineTimes[0]);
-
-  return buildMarkerActionFromTimelineRanges(
-    latestUserMessage,
-    [{ timelineStart: rangeStart, timelineEnd: rangeEnd, markerTime: anchor }],
-    rangeEnd - rangeStart <= 8 ? 0.48 : 0.36,
-    `Placed a best-guess review marker around ${formatMinutesSeconds(anchor)}.`,
-  );
+  return null;
 }
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | null {
@@ -1392,7 +1347,6 @@ export async function POST(req: NextRequest) {
     const richMessages = normalizeRichChatTurns(messages);
     const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages);
     const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
-    const hasDenseFrames = requestFrames.some((frame) => frame.kind === 'dense');
     const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}
@@ -1401,7 +1355,6 @@ export async function POST(req: NextRequest) {
 - Silence removal: trim ${settings.silenceRemoval.paddingSeconds}s from each silent gap edge; skip any silent gap shorter than ${settings.silenceRemoval.minDurationSeconds}s after trimming
 - Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
-- Dense frame inspection default count: ${settings.frameInspection.defaultFrameCount}
 - Overview frame sampling: every ${settings.frameInspection.overviewIntervalSeconds}s, capped at ${settings.frameInspection.maxOverviewFrames} frames
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
@@ -1610,7 +1563,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Minimum silence duration after padding: ${settings.silenceRemoval.minDurationSeconds}s\n` +
       `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
       `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
-      `- Default dense-frame count: ${settings.frameInspection.defaultFrameCount}\n` +
       `- Overview frame interval: ${settings.frameInspection.overviewIntervalSeconds}s\n` +
       `- Max overview frames: ${settings.frameInspection.maxOverviewFrames}\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
@@ -1632,17 +1584,6 @@ Honor these defaults unless the user explicitly asks for something different in 
     const contextContent: Anthropic.ContentBlockParam[] = [];
 
     const frames = requestFrames;
-    const denseFrames = frames.filter((frame) => frame.kind === 'dense');
-    if (denseFrames.length > 0) {
-      for (const frame of denseFrames) {
-        if (!frame.image) continue;
-        contextContent.push({
-          type: 'image',
-          source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
-        });
-      }
-    }
-
     const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
     const overviewFrameNote = overviewFrames.length > 0
       ? `\n[Overview frame summaries: showing ${overviewFrames.length} most relevant]\n` +
@@ -1651,15 +1592,7 @@ Honor these defaults unless the user explicitly asks for something different in 
           (frame.description ? `, summary: ${sanitizeInlineUntrustedText(frame.description, 240)}` : '')
         ).join('\n')
       : '';
-    const denseFrameNote = denseFrames.length > 0
-      ? `\n[${denseFrames.length} dense video frame(s) are attached above as images in this exact order. Use the mapping below when reasoning about timestamps.]\n` +
-        denseFrames.map((frame, index) =>
-          `Dense frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}, ${frame.kind}` +
-          (frame.rangeStart !== undefined && frame.rangeEnd !== undefined ? `, requested from ${fmtSec(frame.rangeStart)} to ${fmtSec(frame.rangeEnd)}` : '') +
-          (frame.description ? `, summary: ${sanitizeInlineUntrustedText(frame.description, 240)}` : '')
-        ).join('\n')
-      : '';
-    contextContent.push({ type: 'text', text: contextText + overviewFrameNote + denseFrameNote });
+    contextContent.push({ type: 'text', text: contextText + overviewFrameNote });
 
     const anthropicMessages: Anthropic.MessageParam[] = [
       { role: 'user', content: contextContent },
@@ -1685,7 +1618,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       validationContext.videoDuration,
     );
     const fallbackMarkerAction = validateEditAction(
-      buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, denseFrames, priorVisualSearch),
+      buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, priorVisualSearch),
       validationContext,
     );
     return NextResponse.json({

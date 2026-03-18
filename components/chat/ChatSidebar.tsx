@@ -475,16 +475,8 @@ async function runFrameDescriptionBatches(
 
 function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType<typeof useEditorStore.getState>['clips']): IndexedVideoFrame[] {
   return frames
-    .filter((frame) => frame.kind === 'dense' || hasUsableFrameDescription(frame.description))
+    .filter((frame) => hasUsableFrameDescription(frame.description))
     .map((frame) => {
-      if (frame.kind === 'dense') {
-        return {
-          ...frame,
-          projectedTimelineTime: frame.timelineTime,
-          visibleOnTimeline: true,
-        };
-      }
-
       if (frame.projectedTimelineTime !== undefined || frame.visibleOnTimeline !== undefined) {
         return {
           ...frame,
@@ -506,8 +498,6 @@ function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType
 
 function getAssistantFallbackMessage(action?: EditAction | null): string {
   switch (action?.type) {
-    case 'request_frames':
-      return 'I need a closer visual inspection before I can place that cut precisely.';
     case 'transcribe_request':
       return 'I need a transcript for that section before I can finish the edit.';
     case 'delete_range':
@@ -845,14 +835,6 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         label: 'Transcribe audio',
         color: '#f59e0b',
         summary: seg ? `${formatChatTime(seg.startTime)} → ${formatChatTime(seg.endTime)}` : '',
-      };
-    }
-    case 'request_frames': {
-      const req = action.frameRequest;
-      return {
-        label: 'Inspect frames',
-        color: '#60a5fa',
-        summary: req ? `${formatChatTime(req.startTime)} → ${formatChatTime(req.endTime)}` : '',
       };
     }
     case 'update_ai_settings':
@@ -2527,37 +2509,6 @@ export default function ChatSidebar() {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
-
-      if (action?.type === 'request_frames' && action.frameRequest) {
-        const req = action.frameRequest as { startTime: number; endTime: number; count?: number };
-        const spanSeconds = Math.max(req.endTime - req.startTime, 0.5);
-        const count = Math.min(
-          req.count ?? Math.max(freshState.aiSettings.frameInspection.defaultFrameCount, Math.ceil(spanSeconds * 4)),
-          60,
-        );
-        addMessage({ role: 'assistant', content: assistantMessage, visualSearch: visualSearch ?? undefined });
-        producedVisibleResponse = true;
-        setLoadingStatus(`Inspecting ${count} precise frames (${formatTime(req.startTime)}–${formatTime(req.endTime)})…`);
-        const interval = (req.endTime - req.startTime) / count;
-        const timelineTimestamps = Array.from({ length: count }, (_, i) => req.startTime + i * interval);
-        currentFrames = (await extractTimelineFramesFromSources({
-          clips: currentClips,
-          videoData: freshState.videoData,
-          videoFile: freshState.videoFile,
-          videoUrl: freshState.videoUrl,
-          videoDuration: freshState.videoDuration,
-          timelineTimestamps,
-          kind: 'dense',
-        })).map((frame) => ({
-          ...frame,
-          rangeStart: req.startTime,
-          rangeEnd: req.endTime,
-        }));
-        setLoadingStatus('');
-        history.push({ role: 'assistant', content: assistantMessage });
-        history.push({ role: 'user', content: `[${count} dense frames extracted from ${formatTime(req.startTime)} to ${formatTime(req.endTime)}. Now answer with these frames.]` });
-        continue;
-      }
 
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
