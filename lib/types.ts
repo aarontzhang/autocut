@@ -302,3 +302,42 @@ export interface EditAction {
   settings?: Partial<AIEditingSettings>;
   message: string;
 }
+
+// ─── Source Index Layer ──────────────────────────────────────────────────────
+
+/** A single word from Whisper word-level output, annotated with filler status */
+export interface SourceWord {
+  word: string;
+  start: number;    // source video seconds
+  end: number;      // source video seconds
+  isFiller: boolean;
+}
+
+/** A semantic segment (sentence or phrase) indexed against source time */
+export interface SourceSegment {
+  id: string;
+  text: string;
+  sourceStart: number;
+  sourceEnd: number;
+  words: SourceWord[];
+  sceneId: string | null;
+  fillerWords: string[];   // filler words found in this segment
+  pauseAfterMs: number;    // gap in ms to the next segment (0 if last)
+}
+
+/** A scene boundary detected via visual change analysis */
+export interface SceneBoundary {
+  id: string;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+/** The complete source index for one video clip — stored alongside the project */
+export interface SourceIndex {
+  version: string;
+  sourceId: string;
+  sourceDuration: number;
+  segments: SourceSegment[];
+  scenes: SceneBoundary[];
+  indexedAt: string;
+}

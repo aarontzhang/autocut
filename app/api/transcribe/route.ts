@@ -4,6 +4,8 @@ import { CaptionEntry } from '@/lib/types';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { buildSourceIndex } from '@/lib/indexer/sourceIndex';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const TRANSCRIBE_REQUESTS_PER_MINUTE = 25;
@@ -76,7 +78,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ captions, words: wordEntries });
+    const rawWords = words.map((w) => {
+      const typedWord = w as WhisperWord;
+      return {
+        word: typedWord.word.trim(),
+        start: startTime + typedWord.start,
+        end: startTime + typedWord.end,
+      };
+    }).filter((w) => w.word);
+    const sourceIndex = buildSourceIndex(rawWords, [], MAIN_SOURCE_ID, startTime + (requestedDuration || 0));
+
+    return NextResponse.json({ captions, words: wordEntries, segments: sourceIndex.segments });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
   }
