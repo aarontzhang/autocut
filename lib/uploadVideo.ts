@@ -48,18 +48,20 @@ export async function uploadVideoToSupabase(
   onProgress?.(5);
 
   onProgress?.(10);
+  const uploadOptions = {
+    upsert: false,
+    contentType: file.type || 'video/mp4',
+    onUploadProgress: (progress: { loaded: number; total?: number }) => {
+      if (!onProgress || !progress.total) return;
+      // Map the actual upload bytes to 10–95% of the overall progress
+      const pct = Math.round((progress.loaded / progress.total) * 85);
+      onProgress(10 + pct);
+    },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
   const { error: uploadErr } = await supabase.storage
     .from('videos')
-    .uploadToSignedUrl(storagePath, initiated.token, file, {
-      upsert: false,
-      contentType: file.type || 'video/mp4',
-      onUploadProgress: (progress) => {
-        if (!onProgress || !progress.total) return;
-        // Map the actual upload bytes to 10–95% of the overall progress
-        const pct = Math.round((progress.loaded / progress.total) * 85);
-        onProgress(10 + pct);
-      },
-    });
+    .uploadToSignedUrl(storagePath, initiated.token, file, uploadOptions);
 
   if (uploadErr) {
     console.error('[uploadVideo] Signed upload failed:', uploadErr);
