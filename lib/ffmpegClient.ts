@@ -765,7 +765,7 @@ export async function extractVideoFrames(
     if (typeof fileOrUrl === 'string' && /^https?:\/\//.test(srcUrl)) {
       try {
         const bytes = await readMediaInput(fileOrUrl);
-        const blob = new Blob([bytes]);
+        const blob = new Blob([bytes.buffer as ArrayBuffer]);
         fallbackObjectUrl = URL.createObjectURL(blob);
         srcUrl = fallbackObjectUrl;
       } catch {
