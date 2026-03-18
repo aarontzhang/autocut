@@ -11,6 +11,7 @@ import {
   EditAction,
   IndexedVideoFrame,
   MarkerEntry,
+  SourceIndex,
   SourceIndexState,
   SourceIndexedFrame,
   TextOverlayEntry,
@@ -267,6 +268,7 @@ function buildBaseEditorState(input?: {
   | 'sourceIndexFreshBySourceId'
   | 'timelineProjectionFresh'
   | 'visualSearchSession'
+  | 'sourceIndex'
 > {
   return {
     videoFile: input?.videoFile ?? null,
@@ -307,6 +309,7 @@ function buildBaseEditorState(input?: {
     sourceIndexFreshBySourceId: buildInitialSourceIndexState(),
     timelineProjectionFresh: true,
     visualSearchSession: null,
+    sourceIndex: null,
   };
 }
 
@@ -350,6 +353,7 @@ interface EditorState {
   sourceIndexFreshBySourceId: SourceIndexStateMap;
   timelineProjectionFresh: boolean;
   visualSearchSession: VisualSearchSession | null;
+  sourceIndex: SourceIndex | null;
   setVideoFile: (file: File) => void;
   setVideoDuration: (duration: number) => void;
   setCurrentTime: (time: number) => void;
@@ -405,6 +409,7 @@ interface EditorState {
       rawTranscriptCaptions?: unknown[];
       videoFrames?: unknown[];
       videoDuration?: number;
+      sourceIndex?: unknown;
     },
     project: {
       projectId: string;
@@ -432,6 +437,7 @@ interface EditorState {
     sourceIndexFreshBySourceId?: SourceIndexStateMap;
   }) => void;
   setVisualSearchSession: (session: VisualSearchSession | null) => void;
+  setSourceIndex: (index: SourceIndex | null) => void;
   addMarker: (marker: Omit<MarkerEntry, 'id' | 'number'> & { id?: string; number?: number }) => string;
   updateMarker: (id: string, patch: Partial<Omit<MarkerEntry, 'id'>>) => void;
   removeMarker: (id: string) => void;
@@ -1042,6 +1048,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         transcript: persistedFreshness[MAIN_SOURCE_ID]?.transcript || !!(sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0),
       }),
       timelineProjectionFresh: derivedIndexState.timelineProjectionFresh,
+      sourceIndex: (editState.sourceIndex as SourceIndex | null | undefined) ?? null,
     });
   },
 
@@ -1260,4 +1267,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   }),
 
   setVisualSearchSession: (session) => set({ visualSearchSession: session }),
+
+  setSourceIndex: (index) => set({ sourceIndex: index }),
 }));
