@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
@@ -483,104 +484,6 @@ function TimelineMock() {
   );
 }
 
-/* ─── Waitlist form ─────────────────────────────────────────── */
-
-function WaitlistForm({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) {
-  const [email, setEmail] = useState('');
-  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'duplicate' | 'error'>('idle');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const inputHeight = size === 'lg' ? 46 : size === 'sm' ? 34 : 40;
-  const fontSize = size === 'lg' ? 14 : size === 'sm' ? 12 : 13;
-  const btnPadding = size === 'lg' ? '0 24px' : size === 'sm' ? '0 14px' : '0 18px';
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!email.trim() || status === 'loading') return;
-    setStatus('loading');
-    try {
-      const res = await fetch('/api/waitlist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setStatus('error'); return; }
-      setStatus(data.alreadyJoined ? 'duplicate' : 'success');
-    } catch {
-      setStatus('error');
-    }
-  }
-
-  if (status === 'success') {
-    return (
-      <div style={{ fontSize, color: 'rgba(255,255,255,0.6)', lineHeight: 1.5 }}>
-        <span style={{ color: '#4ade80', marginRight: 8 }}>✓</span>
-        You&apos;re on the list — we&apos;ll be in touch.
-      </div>
-    );
-  }
-
-  if (status === 'duplicate') {
-    return (
-      <div style={{ fontSize, color: 'rgba(255,255,255,0.6)', lineHeight: 1.5 }}>
-        <span style={{ color: '#facc15', marginRight: 8 }}>✓</span>
-        You&apos;re already on the waitlist.
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <input
-        ref={inputRef}
-        type="email"
-        required
-        value={email}
-        onChange={(e) => { setEmail(e.target.value); if (status === 'error') setStatus('idle'); }}
-        placeholder="your@email.com"
-        style={{
-          height: inputHeight,
-          padding: '0 14px',
-          background: 'rgba(255,255,255,0.05)',
-          border: status === 'error'
-            ? '1px solid rgba(239,68,68,0.6)'
-            : '1px solid rgba(255,255,255,0.12)',
-          borderRadius: 10,
-          color: 'rgba(255,255,255,0.88)',
-          fontSize,
-          fontFamily: 'inherit',
-          outline: 'none',
-          minWidth: 220,
-        }}
-      />
-      <button
-        type="submit"
-        disabled={status === 'loading'}
-        className="iridescent-button"
-        style={{
-          height: inputHeight,
-          padding: btnPadding,
-          borderRadius: 10,
-          fontSize,
-          fontWeight: 600,
-          cursor: status === 'loading' ? 'wait' : 'pointer',
-          letterSpacing: '-0.01em',
-          opacity: status === 'loading' ? 0.7 : 1,
-          border: 'none',
-        }}
-      >
-        {status === 'loading' ? 'Joining…' : 'Join waitlist'}
-      </button>
-      {status === 'error' && (
-        <span style={{ fontSize: fontSize - 1, color: 'rgba(239,68,68,0.8)', width: '100%' }}>
-          Something went wrong — please try again.
-        </span>
-      )}
-    </form>
-  );
-}
-
 /* ─── Main page ─────────────────────────────────────────────── */
 
 export default function LandingPage() {
@@ -756,7 +659,13 @@ export default function LandingPage() {
           <AutocutMark size={32} withTile />
           <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-0.02em' }}>Autocut</span>
         </div>
-        <WaitlistForm size="sm" />
+        <Link href="/waitlist" className="iridescent-button" style={{
+          display: 'inline-block', padding: '8px 20px',
+          borderRadius: 20, fontSize: 13, fontWeight: 600,
+          textDecoration: 'none', letterSpacing: '-0.01em',
+        }}>
+          Join the waitlist
+        </Link>
       </nav>
 
       {/* ── Hero: text LEFT, graphic RIGHT ───────────────────── */}
@@ -780,7 +689,15 @@ export default function LandingPage() {
           }}>
             Tell Autocut what you want changed. Cut the filler, trim a section, place markers. It finds the right moments and applies every edit directly to your timeline.
           </p>
-          <WaitlistForm size="lg" />
+          <div>
+            <Link href="/waitlist" className="iridescent-button" style={{
+              display: 'inline-block', padding: '12px 28px',
+              borderRadius: 24, fontSize: 14, fontWeight: 600,
+              textDecoration: 'none', letterSpacing: '-0.01em',
+            }}>
+              Join the waitlist →
+            </Link>
+          </div>
         </div>
 
         <div className="lp-hero-graphic">
@@ -845,9 +762,13 @@ export default function LandingPage() {
         }}>
           The best creators spend their time creating, not clicking through timelines.
         </p>
-        <div style={{ display: 'flex', justifyContent: 'center' }}>
-          <WaitlistForm size="lg" />
-        </div>
+        <Link href="/waitlist" className="iridescent-button" style={{
+          display: 'inline-block', padding: '13px 32px',
+          borderRadius: 26, fontSize: 14, fontWeight: 600,
+          textDecoration: 'none', letterSpacing: '-0.01em',
+        }}>
+          Join the waitlist →
+        </Link>
       </section>
 
       {/* ── Footer ───────────────────────────────────────────── */}
