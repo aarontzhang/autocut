@@ -778,6 +778,15 @@ function upsertMarkersFromVisualSearch(
   });
 }
 
+function getDeleteRangesFromAction(action: EditAction): Array<{ start: number; end: number }> | null {
+  if (action.type === 'delete_range') {
+    if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return null;
+    return [{ start: action.deleteStartTime, end: action.deleteEndTime }];
+  }
+  if (action.type === 'delete_ranges') return action.ranges ?? null;
+  return null;
+}
+
 // ─── Action card config ────────────────────────────────────────────────────────
 function getActionMeta(action: EditAction): { label: string; color: string; summary: string } {
   switch (action.type) {
@@ -1294,6 +1303,9 @@ function AssistantMessage({
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const updateMessage = useEditorStore(s => s.updateMessage);
+  const setPendingDeleteRanges = useEditorStore(s => s.setPendingDeleteRanges);
+  const clearPendingDeleteRanges = useEditorStore(s => s.clearPendingDeleteRanges);
+  const pendingDeleteRanges = useEditorStore(s => s.pendingDeleteRanges);
   const appliedActions = useEditorStore(s => s.appliedActions);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
@@ -1333,6 +1345,8 @@ function AssistantMessage({
     || msg.actionStatus === 'rejected'
     || msg.autoApplied
     || actionPreviouslyApplied;
+  const isDeleteAction = !!action && (action.type === 'delete_range' || action.type === 'delete_ranges');
+  const deleteRanges = action ? getDeleteRangesFromAction(action) : null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const actionResultText = msg.actionResult ?? (
     msg.actionStatus === 'rejected'
@@ -1344,7 +1358,19 @@ function AssistantMessage({
           : null
   );
 
-  useEffect(() => () => clearPreviewSnapshot(msg.id), [clearPreviewSnapshot, msg.id]);
+  useEffect(() => () => {
+    clearPreviewSnapshot(msg.id);
+    clearPendingDeleteRanges(msg.id);
+  }, [clearPreviewSnapshot, clearPendingDeleteRanges, msg.id]);
+
+  useEffect(() => {
+    if (!isDeleteAction || !deleteRanges || actionResolved) return;
+    if (pendingDeleteRanges && pendingDeleteRanges.ownerId !== msg.id) return;
+    if (!pendingDeleteRanges || pendingDeleteRanges.ownerId !== msg.id) {
+      setPendingDeleteRanges(msg.id, deleteRanges);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDeleteAction, actionResolved, msg.id]);
 
   useEffect(() => {
     if (!actionPreviouslyApplied || msg.actionStatus === 'completed' || msg.actionStatus === 'rejected') return;
@@ -1476,6 +1502,24 @@ function AssistantMessage({
     setAcceptedReviewActions([]);
     setReviewResult(null);
   }, [clearPreviewSnapshot, msg.id]);
+
+  const handleAcceptAll = useCallback(() => {
+    if (!action || !deleteRanges) return;
+    applyStoredAction(action);
+    const sourceRanges = sourceRangesForAction(useEditorStore.getState().clips, action);
+    recordAppliedAction(action, action.message, { sourceRanges });
+    clearPendingDeleteRanges(msg.id);
+    const n = deleteRanges.length;
+    updateMessage(msg.id, {
+      actionStatus: 'completed',
+      actionResult: `Committed ${n} cut${n !== 1 ? 's' : ''}.`,
+    });
+  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, recordAppliedAction, updateMessage]);
+
+  const handleCancelDelete = useCallback(() => {
+    clearPendingDeleteRanges(msg.id);
+    updateMessage(msg.id, { actionStatus: 'rejected', actionResult: 'Cancelled.' });
+  }, [clearPendingDeleteRanges, msg.id, updateMessage]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -1636,7 +1680,23 @@ function AssistantMessage({
                   Finish the active review before opening another one.
                 </p>
               )}
-              {action?.type === 'update_ai_settings' ? (
+              {isDeleteAction && !actionResolved ? (
+                <>
+                  {deleteRanges && (
+                    <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                      {deleteRanges.length} cut{deleteRanges.length !== 1 ? 's' : ''} highlighted. Accept to apply.
+                    </p>
+                  )}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={handleAcceptAll} style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, background: 'var(--accent)', border: 'none', color: '#000', borderRadius: 4, cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
+                      Accept
+                    </button>
+                    <button onClick={handleCancelDelete} style={{ padding: '5px 10px', fontSize: 12, background: 'none', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : action?.type === 'update_ai_settings' ? (
                 <button
                   onClick={handleApplySettings}
                   style={{

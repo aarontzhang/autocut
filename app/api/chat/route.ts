@@ -1569,7 +1569,9 @@ Honor these defaults unless the user explicitly asks for something different in 
     }
     contextLines.push(
       `\nTime-mapping rule:\n` +
-      `Use source ranges as the stable identity for moments discussed earlier in the chat. If an earlier message referred to a moment before cuts were made, first find that moment in source time, then convert it to the current timeline using the clip mapping above.`
+      `- The transcript timestamps (e.g., [2:48.000-2:59.000]) are CURRENT TIMELINE COORDINATES — they are already remapped after every edit. Use them directly as deleteStartTime/deleteEndTime. Do NOT apply any source-to-timeline offset to transcript timestamps.\n` +
+      `- The "timeline [X–Y]" range in each clip summary shows where that clip sits on the current timeline. The "from source [A–B]" shows the original video segment. These are for reference when translating moments from pre-cut chat turns — NOT for converting transcript timestamps.\n` +
+      `- Use source ranges as the stable identity for moments discussed BEFORE a structural edit. For moments referenced by transcript lines in the current context, trust the transcript timestamps directly.`
     );
     const contextText = contextLines.join('\n');
 

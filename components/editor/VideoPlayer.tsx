@@ -55,17 +55,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoUrl = useEditorStore(s => s.videoUrl);
   const currentTime = useEditorStore(s => s.currentTime);
   const videoDuration = useEditorStore(s => s.videoDuration);
-  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
-  const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
-  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
+  const pendingDeleteRanges = useEditorStore(s => s.pendingDeleteRanges);
+  const clips = useEditorStore(s =>
+    s.pendingDeleteRanges ? s.clips : (s.previewSnapshot?.clips ?? s.clips)
+  );
+  const captions = useEditorStore(s =>
+    s.pendingDeleteRanges ? s.captions : (s.previewSnapshot?.captions ?? s.captions)
+  );
+  const textOverlays = useEditorStore(s =>
+    s.pendingDeleteRanges ? s.textOverlays : (s.previewSnapshot?.textOverlays ?? s.textOverlays)
+  );
 
   const currentTimeRef = useRef(currentTime);
   const playbackIntentRef = useRef(false);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const pendingDeleteRangesRef = useRef(pendingDeleteRanges);
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  useEffect(() => {
+    pendingDeleteRangesRef.current = pendingDeleteRanges;
+  }, [pendingDeleteRanges]);
 
   useEffect(() => {
     const container = videoContainerRef.current;
@@ -158,6 +170,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         setCurrentTime(timelineTime);
       }
       applyClipEffects(timelineTime);
+      const pending = pendingDeleteRangesRef.current;
+      if (pending && pending.ranges.length > 0) {
+        const sorted = [...pending.ranges].sort((a, b) => a.start - b.start);
+        let skipEnd: number | null = null;
+        for (const range of sorted) {
+          if (timelineTime >= range.start && timelineTime < range.end) {
+            skipEnd = range.end;
+          } else if (skipEnd !== null && range.start <= skipEnd) {
+            skipEnd = Math.max(skipEnd, range.end);
+          }
+        }
+        if (skipEnd !== null) { seekToTimelineTime(skipEnd); return; }
+      }
       return;
     }
 
@@ -183,7 +208,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const lastEntry = schedule[schedule.length - 1];
       video.currentTime = Math.max(0, lastEntry.sourceStart + lastEntry.sourceDuration - 0.001);
     }
-  }, [applyClipEffects, schedule, setCurrentTime, totalTimelineDuration, videoRef]);
+  }, [applyClipEffects, schedule, seekToTimelineTime, setCurrentTime, totalTimelineDuration, videoRef]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;

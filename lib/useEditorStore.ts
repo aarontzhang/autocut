@@ -53,6 +53,8 @@ export type SelectedItem = {
   id: string;
 } | null;
 
+export type PendingDeleteRanges = { ownerId: string; ranges: Array<{ start: number; end: number }> };
+
 function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
   return {
     id: uuidv4(),
@@ -269,6 +271,7 @@ function buildBaseEditorState(input?: {
   | 'timelineProjectionFresh'
   | 'visualSearchSession'
   | 'sourceIndex'
+  | 'pendingDeleteRanges'
 > {
   return {
     videoFile: input?.videoFile ?? null,
@@ -310,6 +313,7 @@ function buildBaseEditorState(input?: {
     timelineProjectionFresh: true,
     visualSearchSession: null,
     sourceIndex: null,
+    pendingDeleteRanges: null,
   };
 }
 
@@ -354,6 +358,7 @@ interface EditorState {
   timelineProjectionFresh: boolean;
   visualSearchSession: VisualSearchSession | null;
   sourceIndex: SourceIndex | null;
+  pendingDeleteRanges: PendingDeleteRanges | null;
   setVideoFile: (file: File) => void;
   setVideoDuration: (duration: number) => void;
   setCurrentTime: (time: number) => void;
@@ -363,6 +368,8 @@ interface EditorState {
   setPreviewSnapshot: (ownerId: string, snapshot: EditSnapshot) => void;
   clearPreviewSnapshot: (ownerId?: string) => void;
   commitPreviewSnapshot: (snapshot: EditSnapshot) => void;
+  setPendingDeleteRanges: (ownerId: string, ranges: Array<{ start: number; end: number }>) => void;
+  clearPendingDeleteRanges: (ownerId?: string) => void;
   splitClipAtTime: (timelineTime: number) => void;
   deleteRangeAtTime: (startTime: number, endTime: number) => void;
   deleteClip: (clipId: string) => void;
@@ -508,6 +515,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (ownerId && state.previewOwnerId && state.previewOwnerId !== ownerId) return state;
     return { previewSnapshot: null, previewOwnerId: null };
   }),
+
+  setPendingDeleteRanges: (ownerId, ranges) => set({ pendingDeleteRanges: { ownerId, ranges } }),
+  clearPendingDeleteRanges: (ownerId) => set((state) => {
+    if (ownerId && state.pendingDeleteRanges && state.pendingDeleteRanges.ownerId !== ownerId) return state;
+    return { pendingDeleteRanges: null };
+  }),
   commitPreviewSnapshot: (snapshot) => {
     const current = (get() as unknown as EditorStoreWithSnapshot)._snapshot();
     set((state) => ({
@@ -519,6 +532,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       previewSnapshot: null,
       previewOwnerId: null,
+      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         snapshot.clips,
         state.aiSettings,
@@ -772,6 +786,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       previewSnapshot: null,
       previewOwnerId: null,
+      pendingDeleteRanges: null,
       ...(actionChangesTimelineStructure(action)
         ? buildDerivedIndexState(
             next.clips,
@@ -798,6 +813,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
+      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         prev.clips,
         get().aiSettings,
@@ -822,6 +838,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
+      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         next.clips,
         get().aiSettings,
@@ -867,6 +884,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       textOverlays: [],
       previewSnapshot: null,
       previewOwnerId: null,
+      pendingDeleteRanges: null,
       selectedItem: null,
       taggedMarkerIds: [],
       ...buildDerivedIndexState(
