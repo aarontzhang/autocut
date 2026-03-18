@@ -10,6 +10,14 @@ let loadPromise: Promise<void> | null = null;
 let progressHandler: ((progress: number) => void) | null = null;
 let activeJobCancel: (() => void) | null = null;
 const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
+const fileDataCache = new WeakMap<File, Promise<Uint8Array>>();
+let lastWrittenInputKey: string | null = null;
+
+function getSourceKey(fileOrUrl: Uint8Array | File | string): string | null {
+  if (typeof fileOrUrl === 'string') return `url:${fileOrUrl}`;
+  if (fileOrUrl instanceof File) return `file:${fileOrUrl.name}:${fileOrUrl.size}:${fileOrUrl.lastModified}`;
+  return null;
+}
 
 function createAbortError() {
   return new DOMException('Export canceled.', 'AbortError');
@@ -19,6 +27,7 @@ export function resetFFmpeg() {
   ffmpegInstance = null;
   loadPromise = null;
   progressHandler = null;
+  lastWrittenInputKey = null;
 }
 
 async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpeg> {
@@ -55,7 +64,12 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
     return fileOrUrl;
   }
   if (fileOrUrl instanceof File) {
-    return new Uint8Array(await fileOrUrl.arrayBuffer() as ArrayBuffer);
+    let pending = fileDataCache.get(fileOrUrl);
+    if (!pending) {
+      pending = fileOrUrl.arrayBuffer().then((buf) => new Uint8Array(buf as ArrayBuffer));
+      fileDataCache.set(fileOrUrl, pending);
+    }
+    return pending;
   }
   const cached = remoteMediaInputCache.get(fileOrUrl);
   if (cached) {
@@ -260,10 +274,14 @@ export async function extractAudioSegment(
   endTime: number,
 ): Promise<Blob> {
   const ffmpeg = await getFFmpeg();
-  const inputBytes = await readMediaInput(fileOrUrl);
-  try { await ffmpeg.deleteFile('input_audio'); } catch { /* doesn't exist, fine */ }
+  const inputKey = getSourceKey(fileOrUrl);
+  if (inputKey === null || inputKey !== lastWrittenInputKey) {
+    const inputBytes = await readMediaInput(fileOrUrl);
+    try { await ffmpeg.deleteFile('input_audio'); } catch { /* doesn't exist, fine */ }
+    await ffmpeg.writeFile('input_audio', inputBytes);
+    lastWrittenInputKey = inputKey;
+  }
   try { await ffmpeg.deleteFile('audio_out.mp3'); } catch { /* doesn't exist, fine */ }
-  await ffmpeg.writeFile('input_audio', inputBytes);
 
   try {
     await ffmpeg.exec([
