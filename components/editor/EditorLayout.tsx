@@ -208,7 +208,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     // on every 45-second segment.
     const source = videoData ?? videoUrl ?? videoFile;
     const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
-    if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || document.hidden || playbackActive) {
+    if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || transcriptStatus === 'error' || document.hidden || playbackActive) {
       return;
     }
     const ranges = buildOverlappingRanges(0, videoDuration);

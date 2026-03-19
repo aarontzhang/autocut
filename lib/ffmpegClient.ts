@@ -77,11 +77,17 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
   }
 
   const pendingBytes = (async () => {
-    const response = await fetch(fileOrUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to load media source (${response.status}).`);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
+    try {
+      const response = await fetch(fileOrUrl, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`Failed to load media source (${response.status}).`);
+      }
+      return new Uint8Array(await response.arrayBuffer() as ArrayBuffer);
+    } finally {
+      clearTimeout(timeoutId);
     }
-    return new Uint8Array(await response.arrayBuffer() as ArrayBuffer);
   })();
 
   remoteMediaInputCache.set(fileOrUrl, pendingBytes);
@@ -293,7 +299,7 @@ export async function extractAudioSegment(
       '-ac', '1',     // mono
       '-f', 'mp3',
       'audio_out.mp3',
-    ]);
+    ], 300_000);
 
     const outputData = await ffmpeg.readFile('audio_out.mp3');
     return new Blob([outputData as unknown as ArrayBuffer], { type: 'audio/mpeg' });
@@ -664,9 +670,14 @@ export async function extractVideoFrames(
         reject(new Error('Failed to load video for frame extraction'));
       };
       const cleanup = () => {
+        clearTimeout(timeoutId);
         video.removeEventListener('loadedmetadata', handleLoadedMetadata);
         video.removeEventListener('error', handleError);
       };
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error('Video metadata load timed out'));
+      }, 20_000);
 
       video.addEventListener('loadedmetadata', handleLoadedMetadata);
       video.addEventListener('error', handleError);
