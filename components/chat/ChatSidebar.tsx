@@ -1897,45 +1897,60 @@ function ProgressStatusCard({
   const targetProgress = getProgressValue(progress);
   const etaLabel = formatEtaLabel(progress?.etaSeconds);
   const isCompleted = tone === 'completed';
+  const statusText = progress?.label || etaLabel;
 
   return (
     <div style={{
       marginLeft: 22,
       padding: '12px 13px',
       borderRadius: 10,
-      border: isCompleted ? '1px solid rgba(74,222,128,0.24)' : '1px solid rgba(255,255,255,0.08)',
-      background: isCompleted
-        ? 'linear-gradient(180deg, rgba(20,83,45,0.28), rgba(20,83,45,0.16))'
-        : 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
+      border: '1px solid rgba(255,255,255,0.08)',
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
       display: 'flex',
       flexDirection: 'column',
       gap: 8,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ display: 'flex', gap: 4 }}>
-          {[0, 1, 2].map((index) => (
-            <div
-              key={index}
-              style={{
-                width: 5,
-                height: 5,
-                borderRadius: '50%',
-                background: isCompleted ? 'rgba(74,222,128,0.95)' : 'rgba(33,212,255,0.9)',
-                opacity: isCompleted ? 0.9 : 0.28,
-                animation: isCompleted ? 'none' : `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
-              }}
-            />
-          ))}
-        </div>
+        {isCompleted ? (
+          <div style={{
+            width: 14,
+            height: 14,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'rgba(33,212,255,0.92)',
+            flexShrink: 0,
+          }}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
+            </svg>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[0, 1, 2].map((index) => (
+              <div
+                key={index}
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: '50%',
+                  background: 'rgba(33,212,255,0.9)',
+                  opacity: 0.28,
+                  animation: `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
+                }}
+              />
+            ))}
+          </div>
+        )}
         <span style={{
           fontSize: 11,
-          color: isCompleted ? 'rgba(187,247,208,0.96)' : 'var(--fg-secondary)',
+          color: 'var(--fg-secondary)',
           fontFamily: 'var(--font-serif)',
         }}>
           {title}
         </span>
       </div>
-      {targetProgress !== null && (
+      {!isCompleted && targetProgress !== null && (
         <div style={{
           width: '100%',
           height: 6,
@@ -1945,26 +1960,24 @@ function ProgressStatusCard({
           boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
         }}>
           <div style={{
-            width: `${Math.max((isCompleted ? 1 : (targetProgress ?? 0.06)) * 100, 4)}%`,
+            width: `${Math.max((targetProgress ?? 0.06) * 100, 4)}%`,
             height: '100%',
-            background: isCompleted
-              ? 'linear-gradient(90deg, rgba(74,222,128,0.92), rgba(134,239,172,1))'
-              : 'linear-gradient(90deg, rgba(33,212,255,0.78), rgba(125,211,252,1))',
-            boxShadow: isCompleted ? '0 0 18px rgba(74,222,128,0.2)' : '0 0 18px rgba(33,212,255,0.22)',
+            background: 'linear-gradient(90deg, rgba(33,212,255,0.78), rgba(125,211,252,1))',
+            boxShadow: '0 0 18px rgba(33,212,255,0.22)',
             transition: 'width 0.45s cubic-bezier(0.22, 1, 0.36, 1)',
           }} />
         </div>
       )}
-      {(progress?.label || etaLabel) && (
+      {statusText && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <span style={{
             fontSize: 10,
-            color: isCompleted ? 'rgba(220,252,231,0.92)' : 'var(--fg-muted)',
+            color: 'var(--fg-muted)',
             fontFamily: 'var(--font-serif)',
           }}>
-            {progress?.label ?? ''}
+            {statusText}
           </span>
-          {etaLabel && (
+          {!isCompleted && etaLabel && (
             <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
               {etaLabel}
             </span>
