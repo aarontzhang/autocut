@@ -7,7 +7,8 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "worker:analysis": "node scripts/analysis-worker.mjs"
+    "worker:analysis": "node scripts/analysis-worker.mjs",
+    "postinstall": "node scripts/copy-ffmpeg.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
