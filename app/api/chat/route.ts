@@ -85,6 +85,13 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - intensity: 0.0 to 1.0
 - Use when user says: "make clip 1 black and white", "add cinematic look to the intro", etc.
 
+### 6. Add Captions (add_captions)
+- Add timed captions/subtitles to a specific section or across the whole timeline
+- captions: array of caption entries with startTime, endTime, and text
+- Use when user says: "add captions", "caption this from 0:30 to 1:00", "add subtitles to the full video", etc.
+- IMPORTANT: if the needed spoken words are not already available in the transcript context, use transcribe_request first for the exact requested range, then follow up with add_captions once the transcript is ready.
+- IMPORTANT: when the transcript is available, build caption entries only for the requested time range. Do not caption outside the user's requested section unless they asked for the whole video.
+
 ### 7. Transcribe Audio (transcribe_request)
 - Request real audio transcription for a region of the video using Whisper
 - Use when user asks about what is said/spoken, needs content searched, or says "transcribe"
@@ -174,6 +181,9 @@ Markers:
 
 Text overlay:
 <action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"Added title overlay."}</action>
+
+Captions:
+<action>{"type":"add_captions","captions":[{"startTime":30,"endTime":31.2,"text":"This is"},{"startTime":31.2,"endTime":32.6,"text":"the caption"}],"message":"Added captions from 0:30 to 0:33."}</action>
 
 Replace/edit existing text overlay (index 0):
 <action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"Updated the text overlay."}</action>
@@ -275,22 +285,6 @@ function isVisualSearchSession(value: unknown): value is VisualSearchSession {
   return typeof session.projectId === 'string'
     && typeof session.query === 'string'
     && Array.isArray(session.candidates);
-}
-
-function isCaptionRequest(message: string): boolean {
-  const normalized = message.toLowerCase();
-  if (!normalized.trim()) return false;
-  return /\b(add|create|generate|make|show|turn on)\b[\w\s]{0,24}\b(captions?|subtitles?)\b/.test(normalized)
-    || /\b(captions?|subtitles?)\b[\w\s]{0,24}\b(add|create|generate|make|show)\b/.test(normalized)
-    || /\bcaption this\b/.test(normalized)
-    || /\bsubtitle this\b/.test(normalized);
-}
-
-function isCaptionCapabilityQuestion(message: string): boolean {
-  const normalized = message.toLowerCase();
-  if (!normalized.trim()) return false;
-  return /\b(can|could|do|does|are|is)\b[\w\s]{0,20}\b(add|create|generate|make|support|do)\b[\w\s]{0,16}\b(captions?|subtitles?|captioning)\b/.test(normalized)
-    || /\b(captions?|subtitles?|captioning)\b[\w\s]{0,20}\b(available|supported|possible)\b/.test(normalized);
 }
 
 function tokenizeForRetrieval(text: string): string[] {
@@ -1461,13 +1455,6 @@ Honor these defaults unless the user explicitly asks for something different in 
     );
     const latestPendingAssistantAction = getLatestPendingAssistantAction(richMessages, validationContext);
 
-    if (isCaptionRequest(effectiveLatestUserMessage) || isCaptionCapabilityQuestion(effectiveLatestUserMessage)) {
-      return NextResponse.json({
-        message: 'Cut Assistant is focused on finding moments and reviewing cuts right now. Captioning is not available in this assistant yet.',
-        action: { type: 'none', message: 'Captioning is not available in Cut Assistant yet.' },
-      });
-    }
-
     if (clipSummaries.length > 0) {
       let cursor = 0;
       const summaries = clipSummaries.map(c => {
@@ -1634,7 +1621,7 @@ Honor these defaults unless the user explicitly asks for something different in 
         );
         if (transcriptBlock) {
           contextLines.push(
-            `\nVideo transcript (spoken content only — do NOT copy as captions, use transcribe_request for that):\n${transcriptBlock}`
+            `\nVideo transcript (spoken content only. Do not assume this means captions are already added. If the user explicitly asks for captions and the needed transcript is available, you may use these transcript lines to build add_captions entries for the requested range; otherwise use transcribe_request when transcript is missing):\n${transcriptBlock}`
           );
         }
       }

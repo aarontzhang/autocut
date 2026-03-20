@@ -68,6 +68,17 @@ type IndexingProgress = {
   etaSeconds?: number | null;
 };
 
+type ProgressCardTone = 'active' | 'completed';
+
+type AnalysisStatusCard = {
+  key: string;
+  title: string;
+  progress: IndexingProgress | null;
+  detail?: string | null;
+  secondaryLabel?: string | null;
+  tone?: ProgressCardTone;
+};
+
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
@@ -343,6 +354,16 @@ function getIndexingStageTitle(progress: IndexingProgress | null, fallback?: str
     default:
       return 'Preparing media…';
   }
+}
+
+function buildCompletedProgress(stage: IndexingProgress['stage']): IndexingProgress {
+  return {
+    stage,
+    completed: 1,
+    total: 1,
+    label: 'Completed',
+    etaSeconds: 0,
+  };
 }
 
 function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
@@ -1865,22 +1886,27 @@ function ProgressStatusCard({
   progress,
   detail,
   secondaryLabel,
+  tone = 'active',
 }: {
   title: string;
   progress: IndexingProgress | null;
   detail?: string | null;
   secondaryLabel?: string | null;
+  tone?: ProgressCardTone;
 }) {
   const targetProgress = getProgressValue(progress);
   const etaLabel = formatEtaLabel(progress?.etaSeconds);
+  const isCompleted = tone === 'completed';
 
   return (
     <div style={{
       marginLeft: 22,
       padding: '12px 13px',
       borderRadius: 10,
-      border: '1px solid rgba(255,255,255,0.08)',
-      background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
+      border: isCompleted ? '1px solid rgba(74,222,128,0.24)' : '1px solid rgba(255,255,255,0.08)',
+      background: isCompleted
+        ? 'linear-gradient(180deg, rgba(20,83,45,0.28), rgba(20,83,45,0.16))'
+        : 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
       display: 'flex',
       flexDirection: 'column',
       gap: 8,
@@ -1894,14 +1920,18 @@ function ProgressStatusCard({
                 width: 5,
                 height: 5,
                 borderRadius: '50%',
-                background: 'rgba(33,212,255,0.9)',
-                opacity: 0.28,
-                animation: `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
+                background: isCompleted ? 'rgba(74,222,128,0.95)' : 'rgba(33,212,255,0.9)',
+                opacity: isCompleted ? 0.9 : 0.28,
+                animation: isCompleted ? 'none' : `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
               }}
             />
           ))}
         </div>
-        <span style={{ fontSize: 11, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
+        <span style={{
+          fontSize: 11,
+          color: isCompleted ? 'rgba(187,247,208,0.96)' : 'var(--fg-secondary)',
+          fontFamily: 'var(--font-serif)',
+        }}>
           {title}
         </span>
       </div>
@@ -1915,17 +1945,23 @@ function ProgressStatusCard({
           boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
         }}>
           <div style={{
-            width: `${Math.max((targetProgress ?? 0.06) * 100, 4)}%`,
+            width: `${Math.max((isCompleted ? 1 : (targetProgress ?? 0.06)) * 100, 4)}%`,
             height: '100%',
-            background: 'linear-gradient(90deg, rgba(33,212,255,0.78), rgba(125,211,252,1))',
-            boxShadow: '0 0 18px rgba(33,212,255,0.22)',
+            background: isCompleted
+              ? 'linear-gradient(90deg, rgba(74,222,128,0.92), rgba(134,239,172,1))'
+              : 'linear-gradient(90deg, rgba(33,212,255,0.78), rgba(125,211,252,1))',
+            boxShadow: isCompleted ? '0 0 18px rgba(74,222,128,0.2)' : '0 0 18px rgba(33,212,255,0.22)',
             transition: 'width 0.45s cubic-bezier(0.22, 1, 0.36, 1)',
           }} />
         </div>
       )}
       {(progress?.label || etaLabel) && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+          <span style={{
+            fontSize: 10,
+            color: isCompleted ? 'rgba(220,252,231,0.92)' : 'var(--fg-muted)',
+            fontFamily: 'var(--font-serif)',
+          }}>
             {progress?.label ?? ''}
           </span>
           {etaLabel && (
@@ -1994,24 +2030,7 @@ function StatusNoticeCard({
 
 // ─── Empty state ───────────────────────────────────────────────────────────────
 function EmptyState({
-  isIndexing,
-  indexingReason,
-  indexingProgress,
-  secondaryProgress,
-  secondaryProgressTitle,
-  indexingDetail,
-  statusNotice,
-  errorNotice,
-}: {
-  isIndexing: boolean;
-  indexingReason: string | null;
-  indexingProgress: IndexingProgress | null;
-  secondaryProgress?: IndexingProgress | null;
-  secondaryProgressTitle?: string | null;
-  indexingDetail?: string | null;
-  statusNotice?: string | null;
-  errorNotice?: string | null;
-}) {
+}: Record<string, never>) {
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
@@ -2024,41 +2043,6 @@ function EmptyState({
       <p style={{ fontSize: 12, color: 'var(--fg-muted)', margin: 0, lineHeight: 1.6, fontFamily: 'var(--font-serif)' }}>
         Describe the event you want to find, then review the markers and proposed cuts before applying them.
       </p>
-      {isIndexing && (
-        <div style={{ width: '100%', maxWidth: 290, marginTop: 10 }}>
-          <ProgressStatusCard
-            title={getIndexingStageTitle(indexingProgress, indexingReason)}
-            progress={indexingProgress}
-            detail={indexingDetail}
-          />
-        </div>
-      )}
-      {secondaryProgress && (
-        <div style={{ width: '100%', maxWidth: 290, marginTop: 6 }}>
-          <ProgressStatusCard
-            title={secondaryProgressTitle ?? getIndexingStageTitle(secondaryProgress, null)}
-            progress={secondaryProgress}
-            detail={null}
-          />
-        </div>
-      )}
-      {statusNotice && (
-        <div style={{ width: '100%', maxWidth: 290, marginTop: isIndexing ? 0 : 10 }}>
-          <StatusNoticeCard
-            title="Transcript unavailable"
-            detail={statusNotice}
-          />
-        </div>
-      )}
-      {errorNotice && (
-        <div style={{ width: '100%', maxWidth: 290 }}>
-          <StatusNoticeCard
-            title="Visual analysis error"
-            detail={errorNotice}
-            tone="error"
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -2717,7 +2701,8 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
-  const framesReady = frameAnalysisError !== null || (projectedOverviewFrames !== null && frameDescriptionsReady);
+  const frameAnalysisReady = projectedOverviewFrames !== null && frameDescriptionsReady;
+  const framesReady = frameAnalysisError !== null || frameAnalysisReady;
   const transcriptFailed = transcriptStatus === 'error';
   const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
@@ -2730,30 +2715,6 @@ export default function ChatSidebar() {
           estimatedTranscriptEta / Math.max(transcriptProgress.total, 1),
         )
       : estimatedTranscriptEta;
-  const indexingProgress = transcriptStatus === 'loading'
-    ? {
-        stage: 'transcribing' as const,
-        completed: transcriptProgress?.completed ?? 0,
-        total: transcriptProgress?.total ?? 1,
-        label: transcriptProgress && transcriptProgress.total > 0
-          ? `Transcribing audio ${Math.min(transcriptProgress.completed, transcriptProgress.total)}/${transcriptProgress.total}`
-          : 'Transcribing audio',
-        etaSeconds: estimatedTranscriptRemainingEta,
-      }
-    : framesReady
-      ? null
-      : frameIndexingProgress;
-  const agentNotReadyReason = !agentContextReady && hasVideoSource
-    ? (transcriptStatus === 'loading' && projectedOverviewFrames === null)
-      ? 'Preparing media…'
-      : transcriptStatus === 'loading'
-        ? 'Transcribing audio…'
-        : projectedOverviewFrames === null
-          ? 'Sampling video frames…'
-          : !frameDescriptionsReady
-            ? 'Analyzing sampled frames…'
-          : null
-    : null;
   const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
     ? formatTranscriptFailureNotice(transcriptError)
     : null;
@@ -2777,6 +2738,49 @@ export default function ChatSidebar() {
   const indexingDetail = (!framesReady && !secondaryIndexingProgress)
     ? 'Deep indexing can take a while on longer videos.'
     : null;
+  const analysisStatusCards: AnalysisStatusCard[] = [];
+  if (hasVideoSource) {
+    if (transcriptStatus === 'loading') {
+      analysisStatusCards.push({
+        key: 'audio-analysis',
+        title: 'Audio analysis',
+        progress: {
+          stage: 'transcribing',
+          completed: transcriptProgress?.completed ?? 0,
+          total: transcriptProgress?.total ?? 1,
+          label: transcriptProgress && transcriptProgress.total > 0
+            ? `Transcribing audio ${Math.min(transcriptProgress.completed, transcriptProgress.total)}/${transcriptProgress.total}`
+            : 'Transcribing audio',
+          etaSeconds: estimatedTranscriptRemainingEta,
+        },
+        secondaryLabel: 'Transcribing audio…',
+      });
+    } else if (transcriptStatus === 'done') {
+      analysisStatusCards.push({
+        key: 'audio-analysis',
+        title: 'Audio analysis',
+        progress: buildCompletedProgress('transcribing'),
+        tone: 'completed',
+      });
+    }
+
+    if (frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
+      analysisStatusCards.push({
+        key: 'frame-analysis',
+        title: 'Frame analysis',
+        progress: frameIndexingProgress,
+        detail: indexingDetail,
+        secondaryLabel: getIndexingStageTitle(frameIndexingProgress, null),
+      });
+    } else if (frameAnalysisReady) {
+      analysisStatusCards.push({
+        key: 'frame-analysis',
+        title: 'Frame analysis',
+        progress: buildCompletedProgress('describing_frames'),
+        tone: 'completed',
+      });
+    }
+  }
   const composerInputDisabled = isChatLoading || reviewLocked;
   const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
   const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
@@ -3006,23 +3010,18 @@ export default function ChatSidebar() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
-        {messages.length === 0 ? (
-          <EmptyState
-            isIndexing={hasVideoSource && !agentContextReady}
-            indexingReason={agentNotReadyReason}
-            indexingProgress={indexingProgress}
-            secondaryProgress={secondaryIndexingProgress}
-            secondaryProgressTitle={secondaryIndexingProgress ? getIndexingStageTitle(secondaryIndexingProgress, null) : null}
-            indexingDetail={indexingDetail}
-            statusNotice={transcriptUnavailableNotice}
-            errorNotice={frameAnalysisErrorNotice}
-          />
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {messages.map(msg => msg.role === 'user'
-              ? <UserMessage key={msg.id} msg={msg} />
-              : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
-            )}
+        {(analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: messages.length === 0 ? 18 : 12 }}>
+            {analysisStatusCards.map((card) => (
+              <ProgressStatusCard
+                key={card.key}
+                title={card.title}
+                progress={card.progress}
+                detail={card.detail}
+                secondaryLabel={card.secondaryLabel}
+                tone={card.tone}
+              />
+            ))}
             {transcriptUnavailableNotice && (
               <StatusNoticeCard
                 title="Transcript unavailable"
@@ -3036,21 +3035,15 @@ export default function ChatSidebar() {
                 tone="error"
               />
             )}
-            {!isChatLoading && hasVideoSource && !agentContextReady && !canSendDespiteIndexing && (
-              <>
-                <ProgressStatusCard
-                  title={getIndexingStageTitle(indexingProgress, agentNotReadyReason)}
-                  progress={indexingProgress}
-                  detail={indexingDetail}
-                />
-                {secondaryIndexingProgress && (
-                  <ProgressStatusCard
-                    title={getIndexingStageTitle(secondaryIndexingProgress, null)}
-                    progress={secondaryIndexingProgress}
-                    detail={null}
-                  />
-                )}
-              </>
+          </div>
+        )}
+        {messages.length === 0 ? (
+          <EmptyState />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {messages.map(msg => msg.role === 'user'
+              ? <UserMessage key={msg.id} msg={msg} />
+              : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
             )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>
