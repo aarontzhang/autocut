@@ -413,6 +413,7 @@ interface EditorState {
       aiSettings?: unknown;
       backgroundTranscript?: unknown;
       transcriptStatus?: unknown;
+      transcriptError?: unknown;
       sourceTranscriptCaptions?: unknown[];
       sourceOverviewFrames?: unknown[];
       sourceIndexFreshBySourceId?: unknown;
@@ -1036,6 +1037,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceTranscriptCaptions,
       sourceOverviewFrames,
     );
+    const hasTranscriptCaptions = Boolean(sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0);
+    const persistedTranscriptError = typeof editState.transcriptError === 'string'
+      ? editState.transcriptError
+      : null;
 
     set({
       ...buildBaseEditorState({
@@ -1063,9 +1068,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       backgroundTranscript: derivedIndexState.backgroundTranscript ?? (
         typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null
       ),
-      transcriptStatus: sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
-        ? 'done'
-        : (editState.transcriptStatus === 'error' ? 'error' : 'idle'),
+      // Persist the last failure message for debugging, but do not lock the
+      // project into a permanent non-retrying transcript error after reload.
+      transcriptStatus: hasTranscriptCaptions ? 'done' : 'idle',
+      transcriptError: hasTranscriptCaptions ? null : persistedTranscriptError,
       sourceTranscriptCaptions,
       sourceOverviewFrames: sourceOverviewFrames && sourceOverviewFrames.length > 0 ? sourceOverviewFrames : null,
       projectedOverviewFrames: derivedIndexState.projectedOverviewFrames,

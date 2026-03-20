@@ -294,7 +294,10 @@ export async function extractAudioSegment(
       '-ss', String(startTime),
       '-to', String(endTime),
       '-i', 'input_audio',
+      '-map', '0:a:0',
       '-vn',          // strip video
+      '-sn',          // ignore subtitle streams
+      '-dn',          // ignore data streams from iPhone MOV containers
       '-ar', '16000', // 16kHz — Whisper's preferred rate
       '-ac', '1',     // mono
       '-f', 'mp3',
