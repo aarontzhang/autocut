@@ -83,6 +83,8 @@ const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
+const APPROVAL_CONTINUATION_PREFIX = 'Continue with the remaining steps from my earlier request now that the approved edit was applied.';
+const MAX_AUTO_APPROVAL_CONTINUATIONS = 4;
 
 type ActiveMarkerMention = {
   query: string;
@@ -425,6 +427,76 @@ function serializeActionForComparison(value: unknown): string {
 function actionsMatch(a?: EditAction, b?: EditAction): boolean {
   if (!a || !b) return false;
   return serializeActionForComparison(a) === serializeActionForComparison(b);
+}
+
+function assistantPromisesMoreSteps(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+
+  return /\b(follow up|afterwards|after that|next[, ]|then[, ]|remaining steps|rest of)\b/.test(normalized)
+    || /\bfirst[, ]/.test(normalized)
+    || /\bi(?:'ll| will)\s+start with\b/.test(normalized)
+    || /\bi(?:'ll| will)\s+(?:handle|take care of)\s+(?:all|both|the rest)\b/.test(normalized)
+    || /\bonce\b[\s\S]{0,60}\b(?:applied|done|finished|committed)\b/.test(normalized)
+    || /\bafter\b[\s\S]{0,60}\b(?:applied|done|finished|committed)\b/.test(normalized);
+}
+
+function isApprovalContinuationMessage(message: string): boolean {
+  return message.trim().startsWith(APPROVAL_CONTINUATION_PREFIX);
+}
+
+function extractOriginalRequestFromApprovalContinuation(message: string): string | null {
+  const match = message.match(/ORIGINAL_REQUEST_START\s*([\s\S]*?)\s*ORIGINAL_REQUEST_END/i);
+  const originalRequest = match?.[1]?.trim();
+  return originalRequest || null;
+}
+
+function countApprovalContinuationMessages(messages: ChatMessageType[]): number {
+  return messages.filter((message) => (
+    message.role === 'user' && isApprovalContinuationMessage(message.content)
+  )).length;
+}
+
+function resolveOriginalRequestFromMessage(message: ChatMessageType | undefined): string | null {
+  if (!message || message.role !== 'user') return null;
+  const extracted = extractOriginalRequestFromApprovalContinuation(message.content);
+  if (extracted) return extracted;
+  const trimmed = message.content.trim();
+  return trimmed || null;
+}
+
+function buildApprovalContinuationMessage(params: {
+  originalRequest: string;
+  action: EditAction;
+  actionResult?: string | null;
+}): string {
+  return [
+    APPROVAL_CONTINUATION_PREFIX,
+    `Approved action: ${params.action.type}.`,
+    params.actionResult ? `Approved result: ${params.actionResult}` : null,
+    'Continue only with the remaining work from that original request, and do not repeat the approved edit unless it is still required after the timeline change.',
+    'ORIGINAL_REQUEST_START',
+    params.originalRequest,
+    'ORIGINAL_REQUEST_END',
+  ].filter(Boolean).join('\n');
+}
+
+function findAssistantMessageIndex(messages: ChatMessageType[], messageId: string): number {
+  return messages.findIndex((message) => message.id === messageId && message.role === 'assistant');
+}
+
+function findOriginalRequestForAssistantMessage(messages: ChatMessageType[], assistantMessageId: string): string | null {
+  const assistantIndex = findAssistantMessageIndex(messages, assistantMessageId);
+  if (assistantIndex === -1) return null;
+
+  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user') continue;
+    const originalRequest = resolveOriginalRequestFromMessage(message);
+    if (originalRequest) return originalRequest;
+  }
+
+  return null;
 }
 
 function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: string): ChatRequestMessage[] {
@@ -1225,9 +1297,11 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
 function AssistantMessage({
   msg,
   onTranscriptReady,
+  onActionResolved,
 }: {
   msg: ChatMessageType;
   onTranscriptReady: (messageId: string) => Promise<void>;
+  onActionResolved: (messageId: string, action: EditAction, actionResult?: string | null) => Promise<void>;
 }) {
   const videoUrl = useEditorStore(s => s.videoUrl);
   const videoFile = useEditorStore(s => s.videoFile);
@@ -1351,7 +1425,8 @@ function AssistantMessage({
     setReviewBaseSnapshot(null);
     setReviewPreviewActive(false);
     setReviewResult(result);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewBaseSnapshot, reviewSteps.length, updateMessage]);
+    void onActionResolved(msg.id, action, result);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, onActionResolved, recordAppliedAction, reviewBaseSnapshot, reviewSteps.length, updateMessage]);
 
   const handleAcceptAll = useCallback(() => {
     if (!action || !deleteRanges) return;
@@ -1364,7 +1439,8 @@ function AssistantMessage({
       actionStatus: 'completed',
       actionResult: `Committed ${n} cut${n !== 1 ? 's' : ''}.`,
     });
-  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, recordAppliedAction, updateMessage]);
+    void onActionResolved(msg.id, action, `Committed ${n} cut${n !== 1 ? 's' : ''}.`);
+  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
 
   const handleCancelDelete = useCallback(() => {
     clearPendingDeleteRanges(msg.id);
@@ -1445,7 +1521,8 @@ function AssistantMessage({
     recordAppliedAction(action, action.message);
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
     setReviewResult('AI settings updated.');
-  }, [action, applyStoredAction, msg.id, recordAppliedAction, updateMessage]);
+    void onActionResolved(msg.id, action, 'AI settings updated.');
+  }, [action, applyStoredAction, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -2456,13 +2533,16 @@ export default function ChatSidebar() {
   }, [addMessage, clearTaggedMarkers, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
-    if (isChatLoading || reviewLocked) return;
+    const storeState = useEditorStore.getState();
+    if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
     const currentMessages = useEditorStore.getState().messages;
     const assistantIndex = currentMessages.findIndex(m => m.id === messageId);
     if (assistantIndex === -1) return;
 
     const triggeringUser = [...currentMessages.slice(0, assistantIndex)].reverse().find(m => m.role === 'user');
     if (!triggeringUser) return;
+    const originalRequest = resolveOriginalRequestFromMessage(triggeringUser);
+    if (!originalRequest) return;
 
     setIsChatLoading(true);
     setLoadingStatus('Continuing with transcript…');
@@ -2471,7 +2551,7 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      const history = buildChatRequestHistory(currentMessages, `Continue my previous request now that the requested transcript is available. Original request: "${triggeringUser.content}". Do not ask to transcribe the same section again.`);
+      const history = buildChatRequestHistory(currentMessages, `Continue my previous request now that the requested transcript is available. Original request: "${originalRequest}". Do not ask to transcribe the same section again.`);
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
@@ -2481,7 +2561,53 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [addMessage, isChatLoading, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, runSingleTurn, setIsChatLoading]);
+
+  const handleActionResolved = useCallback(async (
+    messageId: string,
+    action: EditAction,
+    actionResult?: string | null,
+  ) => {
+    if (action.type === 'transcribe_request') return;
+
+    const currentMessages = useEditorStore.getState().messages;
+    if (countApprovalContinuationMessages(currentMessages) >= MAX_AUTO_APPROVAL_CONTINUATIONS) return;
+
+    const assistantIndex = findAssistantMessageIndex(currentMessages, messageId);
+    if (assistantIndex === -1) return;
+
+    const assistantMessage = currentMessages[assistantIndex];
+    if (!assistantPromisesMoreSteps(assistantMessage.content)) return;
+
+    const originalRequest = findOriginalRequestForAssistantMessage(currentMessages, messageId);
+    if (!originalRequest) return;
+
+    const storeState = useEditorStore.getState();
+    if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
+
+    setIsChatLoading(true);
+    setLoadingStatus('Continuing with remaining steps…');
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    stopRequestedRef.current = false;
+
+    try {
+      const continuationMessage = buildApprovalContinuationMessage({
+        originalRequest,
+        action,
+        actionResult,
+      });
+      const history = buildChatRequestHistory(currentMessages, continuationMessage);
+      await runSingleTurn(history, ctrl);
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
+      }
+    } finally {
+      setIsChatLoading(false);
+      setLoadingStatus('');
+    }
+  }, [addMessage, runSingleTurn, setIsChatLoading]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -2857,7 +2983,7 @@ export default function ChatSidebar() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {messages.map(msg => msg.role === 'user'
               ? <UserMessage key={msg.id} msg={msg} />
-              : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} />
+              : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} onActionResolved={handleActionResolved} />
             )}
             {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>

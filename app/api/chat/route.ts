@@ -662,10 +662,16 @@ function isSyntheticContinuationUserMessage(message: string): boolean {
   const normalized = message.trim();
   if (!normalized) return false;
   return /^\[\d+\s+dense frames extracted from .*now answer with these frames\.\]$/i.test(normalized)
-    || /^continue my previous request now that the requested transcript is available\./i.test(normalized);
+    || /^continue my previous request now that the requested transcript is available\./i.test(normalized)
+    || /^continue with the remaining steps from my earlier request now that the approved edit was applied\./i.test(normalized);
 }
 
 function extractOriginalRequestFromContinuation(message: string): string | null {
+  const approvalContinuationMatch = message.match(/ORIGINAL_REQUEST_START\s*([\s\S]*?)\s*ORIGINAL_REQUEST_END/i);
+  if (approvalContinuationMatch?.[1]) {
+    return approvalContinuationMatch[1].trim();
+  }
+
   const transcriptContinuationMatch = message.match(/original request:\s*"([\s\S]+?)"\.?\s*do not ask to transcribe/i);
   if (transcriptContinuationMatch?.[1]) {
     return transcriptContinuationMatch[1].trim();
