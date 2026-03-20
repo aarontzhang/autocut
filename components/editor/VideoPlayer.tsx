@@ -31,24 +31,6 @@ const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
 
-function fitVideoFrame(
-  container: { width: number; height: number },
-  video: { width: number; height: number } | null,
-) {
-  if (!container.width || !container.height || !video?.width || !video.height) {
-    return { width: container.width, height: container.height };
-  }
-
-  const containerRatio = container.width / container.height;
-  const videoRatio = video.width / video.height;
-
-  if (videoRatio > containerRatio) {
-    return { width: container.width, height: container.width / videoRatio };
-  }
-
-  return { width: container.height * videoRatio, height: container.height };
-}
-
 function getEntrySourceTime(entry: RenderTimelineEntry, timelineTime: number) {
   const clampedTimelineTime = Math.max(entry.timelineStart, Math.min(timelineTime, entry.timelineEnd));
   return entry.sourceStart + (clampedTimelineTime - entry.timelineStart) * entry.speed;
@@ -117,16 +99,8 @@ function getTransitionMix(boundary: ResolvedTransitionBoundary, timelineTime: nu
   };
 }
 
-function splitManualCaption(text: string) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
 
@@ -159,16 +133,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const textOverlays = useEditorStore((s) => (
     s.pendingDeleteRanges ? s.textOverlays : (s.previewSnapshot?.textOverlays ?? s.textOverlays)
   ));
-  const sourceTranscriptCaptions = useEditorStore((s) => s.sourceTranscriptCaptions);
 
   const clipById = useMemo(() => new Map(clips.map((clip) => [clip.id, clip])), [clips]);
   const renderTimeline = useMemo(() => buildRenderTimeline(clips, transitions), [clips, transitions]);
   const totalTimelineDuration = renderTimeline.length > 0
     ? renderTimeline[renderTimeline.length - 1].timelineEnd
     : videoDuration;
-  const autoCaptionCues = useMemo(
-    () => sourceTranscriptCaptions ? buildCaptionCues(clips, sourceTranscriptCaptions, transitions) : [],
-    [clips, sourceTranscriptCaptions, transitions],
+  const captionCues = useMemo(
+    () => buildCaptionCues(clips, manualCaptions, transitions),
+    [clips, manualCaptions, transitions],
   );
 
   const currentTransition = useMemo(() => {
@@ -183,30 +156,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     [currentTime, currentTransition],
   );
 
-  const activeManualCaption = manualCaptions.find((caption) => currentTime >= caption.startTime && currentTime < caption.endTime) ?? null;
-  const activeAutoCue = !activeManualCaption
-    ? autoCaptionCues.find((cue) => currentTime >= cue.startTime && currentTime < cue.endTime) ?? null
-    : null;
+  const activeCaptionCue = captionCues.find((cue) => currentTime >= cue.startTime && currentTime < cue.endTime) ?? null;
   const activeCaption = useMemo(() => {
     if (!captionsEnabled) return null;
-    if (activeManualCaption) {
-      const lines = splitManualCaption(activeManualCaption.text);
-      return {
-        text: lines.join('\n'),
-        lines: lines.length > 0 ? lines : [activeManualCaption.text],
-      };
-    }
-    if (activeAutoCue) {
-      return getCaptionCueDisplay(activeAutoCue, currentTime);
+    if (activeCaptionCue) {
+      return getCaptionCueDisplay(activeCaptionCue, currentTime);
     }
     return null;
-  }, [activeAutoCue, activeManualCaption, captionsEnabled, currentTime]);
+  }, [activeCaptionCue, captionsEnabled, currentTime]);
   const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
-  const videoDisplaySize = useMemo(
-    () => fitVideoFrame(containerSize, videoDimensions),
-    [containerSize, videoDimensions],
-  );
-  const hasCaptionTrack = manualCaptions.length > 0 || autoCaptionCues.length > 0;
+  const videoDisplaySize = useMemo(() => containerSize, [containerSize]);
+  const hasCaptionTrack = captionCues.length > 0;
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -314,7 +274,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
     const activeEntries = findRenderEntriesAtTime(renderTimeline, currentTimeRef.current);
     const primaryEntry = activeEntries[0] ?? renderTimeline[0];
-    const nextEntry = renderTimeline.find((entry) => entry.timelineStart >= primaryEntry.timelineEnd - 1e-6 && entry.clipId !== primaryEntry.clipId) ?? null;
+    const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
+    const nextEntry = activeEntries.find((entry) => entry.clipId !== primaryEntry.clipId)
+      ?? (primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null);
     const sourceTime = primaryVideo.currentTime;
     const entrySourceEnd = primaryEntry.sourceStart + primaryEntry.sourceDuration;
 
@@ -458,15 +420,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
       <div
         ref={videoContainerRef}
-        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', padding: 16 }}
+        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}
       >
         <div
           style={{
             position: 'relative',
-            width: Math.max(0, videoDisplaySize.width),
-            height: Math.max(0, videoDisplaySize.height),
-            maxWidth: '100%',
-            maxHeight: '100%',
+            width: '100%',
+            height: '100%',
             overflow: 'hidden',
             borderRadius: 10,
             background: '#000',
@@ -480,13 +440,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               inset: 0,
               width: '100%',
               height: '100%',
-              objectFit: 'contain',
+              objectFit: 'cover',
               cursor: 'pointer',
               opacity: transitionMix?.outgoingOpacity ?? 1,
             }}
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
-              setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
               setVideoDuration(el.duration);
               setIsVideoReady(el.readyState >= 2);
               seekToTimelineTime(currentTimeRef.current);
@@ -508,7 +467,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               inset: 0,
               width: '100%',
               height: '100%',
-              objectFit: 'contain',
+              objectFit: 'cover',
               pointerEvents: 'none',
               opacity: transitionMix?.incomingOpacity ?? 0,
               clipPath: transitionMix?.incomingClipPath ?? 'inset(0 0 0 0)',
@@ -609,7 +568,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                         background: 'rgba(0,0,0,0.74)',
                         borderRadius: 6,
                         color: '#fff',
-                        fontSize: Math.max(16, Math.min(28, videoDisplaySize.width * 0.037)),
+                        fontSize: Math.max(14, Math.min(24, videoDisplaySize.width * 0.031)),
                         fontWeight: 800,
                         lineHeight: 1.18,
                         textAlign: 'center',

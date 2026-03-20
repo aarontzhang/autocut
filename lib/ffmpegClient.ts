@@ -35,6 +35,10 @@ function createAbortError() {
   return new DOMException('Export canceled.', 'AbortError');
 }
 
+function cloneWritableBytes(bytes: Uint8Array): Uint8Array {
+  return bytes.slice();
+}
+
 export function resetFFmpeg() {
   ffmpegInstance = null;
   loadPromise = null;
@@ -298,26 +302,11 @@ function buildClipAudioFilterChain(clip: VideoClip): string[] {
   return aFilters;
 }
 
-function splitCaptionLines(text: string) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 type ExportCaptionWindow = {
   startTime: number;
   endTime: number;
   lines: string[];
 };
-
-function overlapsManualCaption(
-  startTime: number,
-  endTime: number,
-  manualCaptions: CaptionEntry[],
-) {
-  return manualCaptions.some((caption) => startTime < caption.endTime && endTime > caption.startTime);
-}
 
 function buildAutoCaptionWindows(cues: CaptionCue[]): ExportCaptionWindow[] {
   return cues.flatMap((cue) => cue.words.flatMap((word, index) => {
@@ -337,19 +326,10 @@ function buildAutoCaptionWindows(cues: CaptionCue[]): ExportCaptionWindow[] {
 function buildExportCaptionWindows(params: {
   clips: VideoClip[];
   transitions: TransitionEntry[];
-  manualCaptions: CaptionEntry[];
-  sourceTranscriptCaptions: CaptionEntry[];
+  captions: CaptionEntry[];
 }): ExportCaptionWindow[] {
-  const autoCues = buildCaptionCues(params.clips, params.sourceTranscriptCaptions, params.transitions);
-  const autoWindows = buildAutoCaptionWindows(autoCues)
-    .filter((window) => !overlapsManualCaption(window.startTime, window.endTime, params.manualCaptions));
-  const manualWindows = params.manualCaptions.map((caption) => ({
-    startTime: caption.startTime,
-    endTime: caption.endTime,
-    lines: splitCaptionLines(caption.text),
-  }));
-
-  return [...autoWindows, ...manualWindows]
+  const captionCues = buildCaptionCues(params.clips, params.captions, params.transitions);
+  return buildAutoCaptionWindows(captionCues)
     .filter((window) => window.endTime > window.startTime && window.lines.length > 0)
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
 }
@@ -370,7 +350,7 @@ async function writeCaptionTextFiles(
       await ffmpeg.writeFile(fileName, encoder.encode(line));
       const lineOffset = lineCount - lineIndex - 1;
       drawTextFilters.push(
-        `drawtext=textfile=${fileName}:font=Arial:fontcolor=white:fontsize=h*0.045:box=1:boxcolor=black@0.74:boxborderw=10:` +
+        `drawtext=textfile=${fileName}:font=Arial:fontcolor=white:fontsize=h*0.036:box=1:boxcolor=black@0.74:boxborderw=8:` +
         `x=(w-text_w)/2:y=h-(h*0.16)-${lineOffset}*(text_h+12):enable='between(t,${window.startTime.toFixed(3)},${window.endTime.toFixed(3)})'`,
       );
     }
@@ -442,7 +422,7 @@ export async function extractAudioSegment(
   if (inputKey === null || inputKey !== lastWrittenInputKey) {
     const inputBytes = await readMediaInput(fileOrUrl);
     try { await ffmpeg.deleteFile('input_audio'); } catch { /* doesn't exist, fine */ }
-    await ffmpeg.writeFile('input_audio', inputBytes);
+    await ffmpeg.writeFile('input_audio', cloneWritableBytes(inputBytes));
     lastWrittenInputKey = inputKey;
   }
   try { await ffmpeg.deleteFile('audio_out.mp3'); } catch { /* doesn't exist, fine */ }
@@ -493,7 +473,7 @@ export async function cutSegments({
   onStage?.('Reading file…');
   const inputName = 'input.mp4';
   const inputData = await readMediaInput(fileUrl);
-  await ffmpeg.writeFile(inputName, inputData);
+  await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
 
   // Compute keep segments by inverting cuts
   const keepSegments = cuts.length > 0
@@ -555,7 +535,6 @@ export interface ExportClipsOptions {
   clips: VideoClip[];
   captions?: CaptionEntry[];
   transitions?: TransitionEntry[];
-  sourceTranscriptCaptions?: CaptionEntry[] | null;
   signal?: AbortSignal;
   onStage?: (stage: string) => void;
   onProgress?: (progress: number) => void;
@@ -566,7 +545,6 @@ export async function exportClips({
   clips,
   captions = [],
   transitions = [],
-  sourceTranscriptCaptions = null,
   signal,
   onStage,
   onProgress,
@@ -581,8 +559,7 @@ export async function exportClips({
   const captionWindows = buildExportCaptionWindows({
     clips,
     transitions: normalizedTransitions,
-    manualCaptions: captions,
-    sourceTranscriptCaptions: sourceTranscriptCaptions ?? [],
+    captions,
   });
   const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0;
 
@@ -601,7 +578,7 @@ export async function exportClips({
       onStage?.('Reading source media…');
       const inputData = await readMediaInput(source);
       job.throwIfCancelled();
-      await ffmpeg.writeFile(inputName, inputData);
+      await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
       reportOverallProgress(15);
 
       const segFiles: string[] = [];
@@ -665,7 +642,7 @@ export async function exportClips({
       probeMediaInput(source).catch(() => ({ width: 0, height: 0 })),
     ]);
     job.throwIfCancelled();
-    await ffmpeg.writeFile(inputName, inputData);
+    await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
     reportOverallProgress(15);
 
     const targetWidth = toEvenDimension(dimensions.width || 1280, 1280);

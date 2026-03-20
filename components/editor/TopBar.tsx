@@ -15,7 +15,6 @@ export default function TopBar() {
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
   const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
-  const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
@@ -45,7 +44,6 @@ export default function TopBar() {
         clips,
         captions,
         transitions,
-        sourceTranscriptCaptions,
         signal: abortController.signal,
         onStage: (stage) => setRunningJob({ stage }),
         onProgress: (progress) => setRunningJob({ progress: Math.min(progress, 99) }),
@@ -59,7 +57,7 @@ export default function TopBar() {
       const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
       setFFmpegJob({ status: 'error', message: msg || 'Unknown error' });
     }
-  }, [captions, clips, exportSource, setFFmpegJob, sourceTranscriptCaptions, transitions]);
+  }, [captions, clips, exportSource, setFFmpegJob, transitions]);
 
   return (
     <div
