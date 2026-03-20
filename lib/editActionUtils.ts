@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { buildClipSchedule } from './playbackEngine';
+import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
 import type {
   AppliedActionRecord,
   CaptionEntry,
@@ -159,6 +159,16 @@ function withClearedMarkers(snapshot: EditSnapshot, patch: Partial<EditSnapshot>
   };
 }
 
+function withTimelineChanges(snapshot: EditSnapshot, patch: Partial<EditSnapshot>): EditSnapshot {
+  const nextClips = patch.clips ?? snapshot.clips;
+  const nextTransitions = normalizeTransitionEntries(nextClips, patch.transitions ?? snapshot.transitions);
+  return withClearedMarkers(snapshot, {
+    ...patch,
+    clips: nextClips,
+    transitions: nextTransitions,
+  });
+}
+
 export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction): EditSnapshot {
   if (
     action.type === 'none' ||
@@ -170,12 +180,12 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
   if (action.type === 'split_clip') {
     if (action.splitTime === undefined) return snapshot;
     const clips = splitClipsAtTime(snapshot.clips, action.splitTime);
-    return clips === snapshot.clips ? snapshot : withClearedMarkers(snapshot, { clips });
+    return clips === snapshot.clips ? snapshot : withTimelineChanges(snapshot, { clips });
   }
 
   if (action.type === 'delete_range') {
     if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return snapshot;
-    return withClearedMarkers(snapshot, {
+    return withTimelineChanges(snapshot, {
       clips: deleteRangeFromClips(snapshot.clips, action.deleteStartTime, action.deleteEndTime),
     });
   }
@@ -186,7 +196,7 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
       if (range.end <= range.start) return acc;
       return deleteRangeFromClips(acc, range.start, range.end);
     }, snapshot.clips);
-    return withClearedMarkers(snapshot, { clips });
+    return withTimelineChanges(snapshot, { clips });
   }
 
   if (action.type === 'reorder_clip') {
@@ -196,14 +206,14 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     const remaining = snapshot.clips.filter(item => item.id !== clip.id);
     const targetIndex = Math.max(0, Math.min(action.newIndex, remaining.length));
     const clips = [...remaining.slice(0, targetIndex), clip, ...remaining.slice(targetIndex)];
-    return withClearedMarkers(snapshot, { clips });
+    return withTimelineChanges(snapshot, { clips });
   }
 
   if (action.type === 'delete_clip') {
     const clipIndex = action.clipIndex ?? 0;
     const clip = snapshot.clips[clipIndex];
     if (!clip) return snapshot;
-    return withClearedMarkers(snapshot, {
+    return withTimelineChanges(snapshot, {
       clips: snapshot.clips.filter(item => item.id !== clip.id),
     });
   }
@@ -211,7 +221,7 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
   if (action.type === 'set_clip_speed') {
     const clip = snapshot.clips[action.clipIndex ?? 0];
     if (!clip || action.speed === undefined) return snapshot;
-    return withClearedMarkers(snapshot, {
+    return withTimelineChanges(snapshot, {
       clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, speed: action.speed ?? item.speed } : item),
     });
   }
@@ -247,9 +257,13 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
   }
 
   if (action.type === 'add_transition') {
+    const transitions = normalizeTransitionEntries(
+      snapshot.clips,
+      [...snapshot.transitions, ...(action.transitions ?? []).map((transition) => ({ ...transition, id: uuidv4() }))],
+    );
     return {
       ...snapshot,
-      transitions: [...snapshot.transitions, ...(action.transitions ?? []).map(transition => ({ ...transition, id: uuidv4() }))],
+      transitions,
     };
   }
 

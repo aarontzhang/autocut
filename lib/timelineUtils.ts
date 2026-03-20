@@ -1,22 +1,36 @@
-import { getCaptionSourceId, getClipSourceId, getSourceRangeId } from './sourceUtils';
-import { VideoClip, CaptionEntry, EditAction, IndexedVideoFrame, SilenceCandidate, SourceIndexedFrame, SourceRangeRef } from './types';
+import { getCaptionSourceId, getSourceRangeId } from './sourceUtils';
+import {
+  CaptionCue,
+  CaptionCueWord,
+  CaptionEntry,
+  EditAction,
+  IndexedVideoFrame,
+  SilenceCandidate,
+  SourceIndexedFrame,
+  SourceRangeRef,
+  TransitionEntry,
+  VideoClip,
+} from './types';
+import { buildClipSchedule, getTimelineDuration as getRenderTimelineDuration } from './playbackEngine';
+
+const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
+const DEFAULT_CAPTION_MAX_LINES = 2;
+const DEFAULT_CAPTION_PAUSE_BREAK_SECONDS = 0.45;
+const CAPTION_PUNCTUATION_BREAK = /[.!?]$|[,;:]$/;
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
  * accounting for which clip it falls in and any speed changes.
  */
 export function timelineToSourceTime(clips: VideoClip[], timelineTime: number): number {
-  let cursor = 0;
-  for (let index = 0; index < clips.length; index++) {
-    const clip = clips[index];
-    const clipDuration = clip.sourceDuration / clip.speed;
-    const clipEnd = cursor + clipDuration;
-    const isLastClip = index === clips.length - 1;
-    if (timelineTime >= cursor && (timelineTime < clipEnd || (isLastClip && timelineTime <= clipEnd))) {
-      const offset = Math.max(0, timelineTime - cursor);
-      return clip.sourceStart + offset * clip.speed;
+  const schedule = buildClipSchedule(clips);
+  for (let index = schedule.length - 1; index >= 0; index -= 1) {
+    const entry = schedule[index];
+    const isLastClip = index === schedule.length - 1;
+    if (timelineTime >= entry.timelineStart && (timelineTime < entry.timelineEnd || (isLastClip && timelineTime <= entry.timelineEnd))) {
+      const offset = Math.max(0, timelineTime - entry.timelineStart);
+      return entry.sourceStart + offset * entry.speed;
     }
-    cursor = clipEnd;
   }
   // Past end — clamp to end of last clip
   if (clips.length > 0) {
@@ -34,26 +48,25 @@ export function getSourceSegmentsForTimelineRange(
   clips: VideoClip[],
   startTime: number,
   endTime: number,
+  transitions: TransitionEntry[] = [],
 ): Array<{ sourceId: string; sourceStart: number; sourceDuration: number; timelineOffset: number }> {
   const segments: Array<{ sourceId: string; sourceStart: number; sourceDuration: number; timelineOffset: number }> = [];
-  let cursor = 0;
-  for (const clip of clips) {
-    const clipDuration = clip.sourceDuration / clip.speed;
-    const clipStart = cursor;
-    const clipEnd = cursor + clipDuration;
+  const schedule = buildClipSchedule(clips, transitions);
+  for (const entry of schedule) {
+    const clipStart = entry.timelineStart;
+    const clipEnd = entry.timelineEnd;
     const overlapStart = Math.max(startTime, clipStart);
     const overlapEnd = Math.min(endTime, clipEnd);
     if (overlapEnd > overlapStart) {
-      const sourceOffset = (overlapStart - clipStart) * clip.speed;
+      const sourceOffset = (overlapStart - clipStart) * entry.speed;
       segments.push({
-        sourceId: getClipSourceId(clip),
-        sourceStart: clip.sourceStart + sourceOffset,
-        sourceDuration: (overlapEnd - overlapStart) * clip.speed,
+        sourceId: entry.sourceId,
+        sourceStart: entry.sourceStart + sourceOffset,
+        sourceDuration: (overlapEnd - overlapStart) * entry.speed,
         timelineOffset: overlapStart,
       });
     }
-    cursor = clipEnd;
-    if (cursor >= endTime) break;
+    if (clipEnd >= endTime) break;
   }
   return segments;
 }
@@ -152,18 +165,16 @@ export function sourceTimeToTimeline(
   clips: VideoClip[],
   sourceTime: number,
   sourceId?: string | null,
+  transitions: TransitionEntry[] = [],
 ): number | null {
-  let cursor = 0;
-  for (const clip of clips) {
-    const clipDuration = clip.sourceDuration / clip.speed;
-    if (sourceId && getClipSourceId(clip) !== sourceId) {
-      cursor += clipDuration;
+  const schedule = buildClipSchedule(clips, transitions);
+  for (const entry of schedule) {
+    if (sourceId && entry.sourceId !== sourceId) {
       continue;
     }
-    if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
-      return cursor + (sourceTime - clip.sourceStart) / clip.speed;
+    if (sourceTime >= entry.sourceStart && sourceTime <= entry.sourceStart + entry.sourceDuration) {
+      return entry.timelineStart + (sourceTime - entry.sourceStart) / entry.speed;
     }
-    cursor += clipDuration;
   }
   return null;
 }
@@ -176,19 +187,17 @@ export function sourceTimeToTimelineOccurrences(
   clips: VideoClip[],
   sourceTime: number,
   sourceId?: string | null,
+  transitions: TransitionEntry[] = [],
 ): number[] {
   const matches: number[] = [];
-  let cursor = 0;
-  for (const clip of clips) {
-    const clipDuration = clip.sourceDuration / clip.speed;
-    if (sourceId && getClipSourceId(clip) !== sourceId) {
-      cursor += clipDuration;
+  const schedule = buildClipSchedule(clips, transitions);
+  for (const entry of schedule) {
+    if (sourceId && entry.sourceId !== sourceId) {
       continue;
     }
-    if (sourceTime >= clip.sourceStart && sourceTime <= clip.sourceStart + clip.sourceDuration) {
-      matches.push(cursor + (sourceTime - clip.sourceStart) / clip.speed);
+    if (sourceTime >= entry.sourceStart && sourceTime <= entry.sourceStart + entry.sourceDuration) {
+      matches.push(entry.timelineStart + (sourceTime - entry.sourceStart) / entry.speed);
     }
-    cursor += clipDuration;
   }
   return matches;
 }
@@ -202,29 +211,26 @@ export function sourceRangeToTimelineRanges(
   sourceId: string | null | undefined,
   sourceStart: number,
   sourceEnd: number,
+  transitions: TransitionEntry[] = [],
 ): Array<{ timelineStart: number; timelineEnd: number }> {
   if (sourceEnd <= sourceStart) return [];
   const ranges: Array<{ timelineStart: number; timelineEnd: number }> = [];
-  let cursor = 0;
-  for (const clip of clips) {
-    const clipDuration = clip.sourceDuration / clip.speed;
-    if (sourceId && getClipSourceId(clip) !== sourceId) {
-      cursor += clipDuration;
+  const schedule = buildClipSchedule(clips, transitions);
+  for (const entry of schedule) {
+    if (sourceId && entry.sourceId !== sourceId) {
       continue;
     }
-    const clipSourceStart = clip.sourceStart;
-    const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
+    const clipSourceStart = entry.sourceStart;
+    const clipSourceEnd = entry.sourceStart + entry.sourceDuration;
     const overlapStart = Math.max(sourceStart, clipSourceStart);
     const overlapEnd = Math.min(sourceEnd, clipSourceEnd);
 
     if (overlapEnd > overlapStart) {
       ranges.push({
-        timelineStart: cursor + (overlapStart - clipSourceStart) / clip.speed,
-        timelineEnd: cursor + (overlapEnd - clipSourceStart) / clip.speed,
+        timelineStart: entry.timelineStart + (overlapStart - clipSourceStart) / entry.speed,
+        timelineEnd: entry.timelineStart + (overlapEnd - clipSourceStart) / entry.speed,
       });
     }
-
-    cursor += clipDuration;
   }
   return ranges;
 }
@@ -322,11 +328,57 @@ export function sourceRangesForAction(
  * Build a transcript string from raw captions remapped to the current timeline.
  * Captions whose source time falls in deleted segments are omitted.
  */
-export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionEntry[]): string {
-  const mapped = rawCaptions
+function scoreCaptionLineBreak(left: string, right: string, maxCharsPerLine: number): number {
+  const overflowPenalty = Math.max(0, left.length - maxCharsPerLine) + Math.max(0, right.length - maxCharsPerLine);
+  const balancePenalty = Math.abs(left.length - right.length) * 0.35;
+  const lastLeftWord = left.split(' ').at(-1)?.toLowerCase() ?? '';
+  const awkwardBreakPenalty = ['a', 'an', 'and', 'but', 'for', 'in', 'of', 'or', 'the', 'to'].includes(lastLeftWord) ? 8 : 0;
+  return overflowPenalty * 100 + balancePenalty + awkwardBreakPenalty;
+}
+
+function buildBalancedCaptionLines(
+  words: CaptionCueWord[],
+  maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
+): string[] {
+  const textWords = words.map((word) => word.text.trim()).filter(Boolean);
+  if (textWords.length === 0) return [];
+  const fullText = textWords.join(' ');
+  if (fullText.length <= maxCharsPerLine || textWords.length === 1) {
+    return [fullText];
+  }
+
+  let bestSplitIndex = -1;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let index = 1; index < textWords.length; index += 1) {
+    const left = textWords.slice(0, index).join(' ');
+    const right = textWords.slice(index).join(' ');
+    const score = scoreCaptionLineBreak(left, right, maxCharsPerLine);
+    if (score < bestScore) {
+      bestScore = score;
+      bestSplitIndex = index;
+    }
+  }
+
+  if (bestSplitIndex <= 0) {
+    return [fullText];
+  }
+
+  return [
+    textWords.slice(0, bestSplitIndex).join(' '),
+    textWords.slice(bestSplitIndex).join(' '),
+  ];
+}
+
+function projectCaptionWordsToTimeline(
+  clips: VideoClip[],
+  rawCaptions: CaptionEntry[],
+  transitions: TransitionEntry[] = [],
+): CaptionCueWord[] {
+  return rawCaptions
     .map((cap) => {
       const captionSourceId = getCaptionSourceId(cap);
-      const occurrences = sourceRangeToTimelineRanges(clips, captionSourceId, cap.startTime, cap.endTime)
+      const occurrences = sourceRangeToTimelineRanges(clips, captionSourceId, cap.startTime, cap.endTime, transitions)
         .filter((range) => range.timelineEnd > range.timelineStart);
       return occurrences.map((range) => ({
         startTime: range.timelineStart,
@@ -336,7 +388,93 @@ export function buildTranscriptContext(clips: VideoClip[], rawCaptions: CaptionE
     })
     .flat()
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
-    .filter((entry): entry is { startTime: number; endTime: number; text: string } => !!entry && !!entry.text);
+    .filter((entry): entry is CaptionCueWord => !!entry && !!entry.text);
+}
+
+export function buildCaptionCues(
+  clips: VideoClip[],
+  rawCaptions: CaptionEntry[],
+  transitions: TransitionEntry[] = [],
+  options?: {
+    maxCharsPerLine?: number;
+    maxLines?: number;
+    pauseBreakSeconds?: number;
+  },
+): CaptionCue[] {
+  const maxCharsPerLine = options?.maxCharsPerLine ?? DEFAULT_MAX_CAPTION_CHARS_PER_LINE;
+  const maxLines = options?.maxLines ?? DEFAULT_CAPTION_MAX_LINES;
+  const pauseBreakSeconds = options?.pauseBreakSeconds ?? DEFAULT_CAPTION_PAUSE_BREAK_SECONDS;
+  const mapped = projectCaptionWordsToTimeline(clips, rawCaptions, transitions);
+  if (mapped.length === 0) return [];
+
+  const cues: CaptionCue[] = [];
+  let activeWords: CaptionCueWord[] = [];
+
+  const flushActiveWords = () => {
+    if (activeWords.length === 0) return;
+    const lines = buildBalancedCaptionLines(activeWords, maxCharsPerLine).slice(0, maxLines);
+    const text = lines.join('\n');
+    if (!text.trim()) {
+      activeWords = [];
+      return;
+    }
+    cues.push({
+      id: `cue_${Math.round(activeWords[0].startTime * 1000)}_${Math.round(activeWords[activeWords.length - 1].endTime * 1000)}_${cues.length}`,
+      startTime: activeWords[0].startTime,
+      endTime: activeWords[activeWords.length - 1].endTime,
+      text,
+      lines,
+      words: activeWords,
+    });
+    activeWords = [];
+  };
+
+  for (const word of mapped) {
+    const pauseSinceLast = activeWords.length > 0
+      ? word.startTime - activeWords[activeWords.length - 1].endTime
+      : 0;
+    const candidateWords = [...activeWords, word];
+    const candidateLines = buildBalancedCaptionLines(candidateWords, maxCharsPerLine);
+    const shouldFlush = activeWords.length > 0 && (
+      pauseSinceLast > pauseBreakSeconds
+      || candidateLines.length > maxLines
+      || candidateLines.some((line) => line.length > maxCharsPerLine + 8)
+      || candidateWords.length > 14
+      || candidateWords.map((entry) => entry.text).join(' ').length > maxCharsPerLine * maxLines + 8
+      || (
+        CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
+        && pauseSinceLast > 0.12
+        && activeWords.length >= 3
+      )
+    );
+
+    if (shouldFlush) {
+      flushActiveWords();
+    }
+
+    activeWords.push(word);
+  }
+
+  flushActiveWords();
+  return cues;
+}
+
+export function getCaptionCueDisplay(cue: CaptionCue, currentTime: number): { text: string; lines: string[] } {
+  const visibleWords = cue.words.filter((word) => currentTime + 0.03 >= word.startTime);
+  const displayWords = visibleWords.length > 0 ? visibleWords : cue.words.slice(0, 1);
+  const lines = buildBalancedCaptionLines(displayWords);
+  return {
+    text: lines.join('\n'),
+    lines,
+  };
+}
+
+export function buildTranscriptContext(
+  clips: VideoClip[],
+  rawCaptions: CaptionEntry[],
+  transitions: TransitionEntry[] = [],
+): string {
+  const mapped = projectCaptionWordsToTimeline(clips, rawCaptions, transitions);
 
   const lines: string[] = [];
   let active: { startTime: number; endTime: number; parts: string[] } | null = null;
@@ -402,12 +540,13 @@ export function projectSourceFramesToTimeline(
   clips: VideoClip[],
   sourceFrames: SourceIndexedFrame[],
   frameTargetConfig: { overviewIntervalSeconds: number; maxOverviewFrames: number },
+  transitions: TransitionEntry[] = [],
 ): IndexedVideoFrame[] {
   if (clips.length === 0 || sourceFrames.length === 0) return [];
 
   const projected = sourceFrames
     .flatMap((frame) => {
-      const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId)
+      const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId, transitions)
         .filter((timelineTime) => Number.isFinite(timelineTime));
       return timelineOccurrences.map((timelineTime) => ({
         image: frame.image,
@@ -424,7 +563,7 @@ export function projectSourceFramesToTimeline(
 
   if (projected.length === 0) return [];
 
-  const duration = getTimelineDuration(clips);
+  const duration = getTimelineDuration(clips, transitions);
   const preferredInterval = Math.max(0.1, frameTargetConfig.overviewIntervalSeconds);
   const targetCount = Math.max(
     1,
@@ -442,24 +581,12 @@ type TimelineSpeechSegment = {
   endTime: number;
 };
 
-export function getTimelineDuration(clips: VideoClip[]): number {
-  return clips.reduce((total, clip) => total + clip.sourceDuration / clip.speed, 0);
+export function getTimelineDuration(clips: VideoClip[], transitions: TransitionEntry[] = []): number {
+  return getRenderTimelineDuration(clips, transitions);
 }
 
-function collectTimelineClipBoundaries(clips: VideoClip[]): number[] {
-  const boundaries: number[] = [];
-  let cursor = 0;
-
-  for (const clip of clips) {
-    const clipDuration = clip.sourceDuration / clip.speed;
-    if (cursor > 1e-3) {
-      boundaries.push(cursor);
-    }
-    cursor += clipDuration;
-    boundaries.push(cursor);
-  }
-
-  return boundaries;
+function collectTimelineClipBoundaries(clips: VideoClip[], transitions: TransitionEntry[] = []): number[] {
+  return buildClipSchedule(clips, transitions).map((entry) => entry.timelineEnd);
 }
 
 function mergeTimelineSpeechSegments(segments: TimelineSpeechSegment[]): TimelineSpeechSegment[] {
@@ -484,36 +611,17 @@ function mergeTimelineSpeechSegments(segments: TimelineSpeechSegment[]): Timelin
   return merged;
 }
 
-export function buildTimelineSpeechSegments(clips: VideoClip[], rawCaptions: CaptionEntry[]): TimelineSpeechSegment[] {
+export function buildTimelineSpeechSegments(
+  clips: VideoClip[],
+  rawCaptions: CaptionEntry[],
+  transitions: TransitionEntry[] = [],
+): TimelineSpeechSegment[] {
   if (clips.length === 0 || rawCaptions.length === 0) return [];
 
-  const speechSegments: TimelineSpeechSegment[] = [];
-  let timelineCursor = 0;
-
-  for (const clip of clips) {
-    const clipSourceId = getClipSourceId(clip);
-    const clipSourceStart = clip.sourceStart;
-    const clipSourceEnd = clip.sourceStart + clip.sourceDuration;
-    const clipSpeed = clip.speed || 1;
-    const clipTimelineStart = timelineCursor;
-    const clipTimelineDuration = clip.sourceDuration / clipSpeed;
-
-    for (const caption of rawCaptions) {
-      if (getCaptionSourceId(caption) !== clipSourceId) continue;
-      const overlapStart = Math.max(caption.startTime, clipSourceStart);
-      const overlapEnd = Math.min(caption.endTime, clipSourceEnd);
-      if (overlapEnd <= overlapStart) continue;
-
-      speechSegments.push({
-        startTime: clipTimelineStart + (overlapStart - clipSourceStart) / clipSpeed,
-        endTime: clipTimelineStart + (overlapEnd - clipSourceStart) / clipSpeed,
-      });
-    }
-
-    timelineCursor += clipTimelineDuration;
-  }
-
-  return mergeTimelineSpeechSegments(speechSegments);
+  return mergeTimelineSpeechSegments(
+    projectCaptionWordsToTimeline(clips, rawCaptions, transitions)
+      .map((word) => ({ startTime: word.startTime, endTime: word.endTime })),
+  );
 }
 
 export function buildTimelineSilenceCandidates(
@@ -524,12 +632,13 @@ export function buildTimelineSilenceCandidates(
     minDurationSeconds: number;
     preserveShortPauses?: boolean;
   },
+  transitions: TransitionEntry[] = [],
 ): SilenceCandidate[] {
-  const timelineDuration = getTimelineDuration(clips);
+  const timelineDuration = getTimelineDuration(clips, transitions);
   if (timelineDuration <= 0) return [];
-  const clipBoundaries = collectTimelineClipBoundaries(clips);
+  const clipBoundaries = collectTimelineClipBoundaries(clips, transitions);
 
-  const speechSegments = buildTimelineSpeechSegments(clips, rawCaptions);
+  const speechSegments = buildTimelineSpeechSegments(clips, rawCaptions, transitions);
   const paddingSeconds = Math.max(0, settings.paddingSeconds);
   const minDurationSeconds = Math.max(0, settings.minDurationSeconds);
   const preserveShortPauses = settings.preserveShortPauses ?? false;

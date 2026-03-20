@@ -29,6 +29,7 @@ import {
 } from './editActionUtils';
 import { buildTranscriptContext, formatTimePrecise, projectSourceFramesToTimeline } from './timelineUtils';
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
+import { normalizeTransitionEntries } from './playbackEngine';
 
 export type { EditSnapshot } from './editActionUtils';
 
@@ -111,6 +112,38 @@ function normalizeCaptionEntry(entry: Partial<CaptionEntry>): CaptionEntry | nul
   };
 }
 
+function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEntry | null {
+  if (
+    entry.type !== 'crossfade'
+    && entry.type !== 'fade_black'
+    && entry.type !== 'dissolve'
+    && entry.type !== 'wipe'
+  ) {
+    return null;
+  }
+  if (!Number.isFinite(entry.duration)) return null;
+  const atTime = Number.isFinite(entry.atTime) ? entry.atTime! : 0;
+  return {
+    id: typeof entry.id === 'string' ? entry.id : undefined,
+    afterClipId: typeof entry.afterClipId === 'string' ? entry.afterClipId : undefined,
+    atTime,
+    type: entry.type,
+    duration: Math.max(0.05, entry.duration!),
+  };
+}
+
+function normalizeTransitionState(
+  clips: VideoClip[],
+  transitions: Array<Partial<TransitionEntry>> | null | undefined,
+): TransitionEntry[] {
+  return normalizeTransitionEntries(
+    clips,
+    transitions
+      ?.map((entry) => normalizeTransitionEntry(entry))
+      .filter((entry): entry is TransitionEntry => !!entry) ?? [],
+  );
+}
+
 function normalizeOverviewFrame(entry: Partial<SourceIndexedFrame>): SourceIndexedFrame | null {
   const sourceId = normalizeSourceId(entry.sourceId);
   if (sourceId && sourceId !== MAIN_SOURCE_ID) return null;
@@ -158,15 +191,16 @@ function patchSourceIndexState(
 
 function buildDerivedIndexState(
   clips: VideoClip[],
+  transitions: TransitionEntry[],
   aiSettings: AIEditingSettings,
   sourceTranscriptCaptions: CaptionEntry[] | null,
   sourceOverviewFrames: SourceIndexedFrame[] | null,
 ) {
   const backgroundTranscript = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
-    ? buildTranscriptContext(clips, sourceTranscriptCaptions)
+    ? buildTranscriptContext(clips, sourceTranscriptCaptions, transitions)
     : null;
   const projectedOverviewFrames = sourceOverviewFrames && sourceOverviewFrames.length > 0
-    ? projectSourceFramesToTimeline(clips, sourceOverviewFrames, aiSettings.frameInspection)
+    ? projectSourceFramesToTimeline(clips, sourceOverviewFrames, aiSettings.frameInspection, transitions)
     : [];
   return {
     backgroundTranscript,
@@ -466,7 +500,7 @@ interface EditorState {
   deleteSelectedItem: () => void;
   updateCaption: (id: string, patch: { startTime?: number; endTime?: number }) => void;
   updateTextOverlay: (id: string, patch: { startTime?: number; endTime?: number }) => void;
-  updateTransition: (id: string, patch: { atTime?: number }) => void;
+  updateTransition: (id: string, patch: Partial<TransitionEntry>) => void;
 }
 
 type EditorStoreWithSnapshot = EditorState & {
@@ -502,13 +536,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setVideoDuration: (duration) => {
-    const { clips, aiSettings, sourceTranscriptCaptions, sourceOverviewFrames } = get();
+    const { clips, transitions, aiSettings, sourceTranscriptCaptions, sourceOverviewFrames } = get();
     if (clips.length === 0 && duration > 0) {
       const nextClips = [makeClip(0, duration)];
       set({
         videoDuration: duration,
         clips: nextClips,
-        ...buildDerivedIndexState(nextClips, aiSettings, sourceTranscriptCaptions, sourceOverviewFrames),
+        transitions: normalizeTransitionState(nextClips, transitions),
+        ...buildDerivedIndexState(nextClips, normalizeTransitionState(nextClips, transitions), aiSettings, sourceTranscriptCaptions, sourceOverviewFrames),
       });
       return;
     }
@@ -544,6 +579,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         snapshot.clips,
+        snapshot.transitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -562,15 +598,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       message: `Split clip at ${formatTimePrecise(timelineTime)}`,
     };
 
+    const nextTransitions = normalizeTransitionState(newClips, get().transitions);
     set((state) => ({
       history: [...state.history, snap],
       future: [],
       clips: newClips,
+      transitions: nextTransitions,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
       ...buildDerivedIndexState(
         newClips,
+        nextTransitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -587,15 +626,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const newClips = deleteRangeFromClips(clips, startTime, endTime);
     if (newClips === clips) return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const nextTransitions = normalizeTransitionState(newClips, get().transitions);
     set((state) => ({
       history: [...state.history, snap],
       future: [],
       clips: newClips,
+      transitions: nextTransitions,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
       ...buildDerivedIndexState(
         newClips,
+        nextTransitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -607,15 +649,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     set((state) => {
       const nextClips = state.clips.filter((clip) => clip.id !== clipId);
+      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
       return {
         history: [...state.history, snap],
         future: [],
         clips: nextClips,
+        transitions: nextTransitions,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: null,
         ...buildDerivedIndexState(
           nextClips,
+          nextTransitions,
           state.aiSettings,
           state.sourceTranscriptCaptions,
           state.sourceOverviewFrames,
@@ -632,15 +677,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const nextClips = [...clips];
     const [removed] = nextClips.splice(idx, 1);
     nextClips.splice(Math.max(0, Math.min(nextClips.length, newIndex)), 0, removed);
+    const nextTransitions = normalizeTransitionState(nextClips, get().transitions);
     set((state) => ({
       history: [...state.history, snap],
       future: [],
       clips: nextClips,
+      transitions: nextTransitions,
       markers: [],
       taggedMarkerIds: [],
       selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
       ...buildDerivedIndexState(
         nextClips,
+        nextTransitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -655,13 +703,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
           : clip
       ));
+      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
       return {
         clips: nextClips,
+        transitions: nextTransitions,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
         ...buildDerivedIndexState(
           nextClips,
+          nextTransitions,
           state.aiSettings,
           state.sourceTranscriptCaptions,
           state.sourceOverviewFrames,
@@ -678,15 +729,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
           : clip
       ));
+      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
       return {
         history: [...state.history, snap],
         future: [],
         clips: nextClips,
+        transitions: nextTransitions,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
         ...buildDerivedIndexState(
           nextClips,
+          nextTransitions,
           state.aiSettings,
           state.sourceTranscriptCaptions,
           state.sourceOverviewFrames,
@@ -703,15 +757,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ? { ...clip, speed: Math.max(0.1, Math.min(10, speed)) }
           : clip
       ));
+      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
       return {
         history: [...state.history, snap],
         future: [],
         clips: nextClips,
+        transitions: nextTransitions,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: state.selectedItem?.type === 'marker' ? null : state.selectedItem,
         ...buildDerivedIndexState(
           nextClips,
+          nextTransitions,
           state.aiSettings,
           state.sourceTranscriptCaptions,
           state.sourceOverviewFrames,
@@ -773,6 +830,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           previewOwnerId: null,
           ...buildDerivedIndexState(
             state.clips,
+            state.transitions,
             aiSettings,
             state.sourceTranscriptCaptions,
             state.sourceOverviewFrames,
@@ -799,6 +857,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...(actionChangesTimelineStructure(action)
         ? buildDerivedIndexState(
             next.clips,
+            next.transitions,
             state.aiSettings,
             state.sourceTranscriptCaptions,
             state.sourceOverviewFrames,
@@ -825,6 +884,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         prev.clips,
+        prev.transitions,
         get().aiSettings,
         get().sourceTranscriptCaptions,
         get().sourceOverviewFrames,
@@ -850,6 +910,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         next.clips,
+        next.transitions,
         get().aiSettings,
         get().sourceTranscriptCaptions,
         get().sourceOverviewFrames,
@@ -898,6 +959,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       ...buildDerivedIndexState(
         nextClips,
+        [],
         state.aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -911,6 +973,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiSettings,
       ...buildDerivedIndexState(
         state.clips,
+        state.transitions,
         aiSettings,
         state.sourceTranscriptCaptions,
         state.sourceOverviewFrames,
@@ -1031,8 +1094,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       : buildInitialSourceIndexState();
 
     const aiSettings = mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined);
+    const normalizedTransitions = normalizeTransitionState(
+      hydratedClips,
+      (editState.transitions as Array<Partial<TransitionEntry>> | undefined) ?? [],
+    );
     const derivedIndexState = buildDerivedIndexState(
       hydratedClips,
+      normalizedTransitions,
       aiSettings,
       sourceTranscriptCaptions,
       sourceOverviewFrames,
@@ -1053,7 +1121,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoDuration: duration ?? (typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0),
       clips: hydratedClips,
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
-      transitions: (editState.transitions as TransitionEntry[] | undefined) ?? [],
+      transitions: normalizedTransitions,
       markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
       messages: (editState.messages as ChatMessage[] | undefined) ?? [],
@@ -1116,15 +1184,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const newHistory = [...state.history, snap];
     if (type === 'clip') {
       const nextClips = state.clips.filter((clip) => clip.id !== id);
+      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
       set({
         history: newHistory,
         future: [],
         clips: nextClips,
+        transitions: nextTransitions,
         markers: [],
         taggedMarkerIds: [],
         selectedItem: null,
         ...buildDerivedIndexState(
           nextClips,
+          nextTransitions,
           state.aiSettings,
           state.sourceTranscriptCaptions,
           state.sourceOverviewFrames,
@@ -1166,9 +1237,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
 
   updateTransition: (id, patch) => set((state) => ({
-    transitions: state.transitions.map((transition) => (
-      transition.id === id ? { ...transition, ...patch } : transition
-    )),
+    transitions: normalizeTransitionState(
+      state.clips,
+      state.transitions.map((transition) => (
+        transition.id === id ? { ...transition, ...patch } : transition
+      )),
+    ),
   })),
 
   addMarker: (marker) => {
@@ -1241,7 +1315,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
     return {
       backgroundTranscript: normalizedCaptions !== undefined
-        ? buildTranscriptContext(state.clips, normalizedCaptions)
+        ? buildTranscriptContext(state.clips, normalizedCaptions, state.transitions)
         : text,
       transcriptStatus: status,
       transcriptError: status === 'error'
@@ -1270,6 +1344,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }),
       ...buildDerivedIndexState(
         state.clips,
+        state.transitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
         normalizedFrames,
@@ -1293,6 +1368,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceIndexFreshBySourceId,
       ...buildDerivedIndexState(
         state.clips,
+        state.transitions,
         state.aiSettings,
         sourceTranscriptCaptions,
         sourceOverviewFrames,

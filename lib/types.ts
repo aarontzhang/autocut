@@ -46,9 +46,40 @@ export interface SilenceCandidate {
 
 export interface TransitionEntry {
   id?: string;
+  afterClipId?: string;
   atTime: number;
   type: 'crossfade' | 'fade_black' | 'dissolve' | 'wipe';
   duration: number;
+}
+
+export interface ResolvedTransitionBoundary {
+  id?: string;
+  afterClipId: string;
+  atTime: number;
+  type: TransitionEntry['type'];
+  duration: number;
+  fromClipId: string;
+  toClipId: string;
+}
+
+export interface RenderTimelineEntry extends ClipScheduleEntry {
+  transitionIn?: ResolvedTransitionBoundary | null;
+  transitionOut?: ResolvedTransitionBoundary | null;
+}
+
+export interface CaptionCueWord {
+  text: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface CaptionCue {
+  id: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+  lines: string[];
+  words: CaptionCueWord[];
 }
 
 export interface MarkerEntry {

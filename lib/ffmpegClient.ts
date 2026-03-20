@@ -13,6 +13,16 @@ const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
 const fileDataCache = new WeakMap<File, Promise<Uint8Array>>();
 let lastWrittenInputKey: string | null = null;
 
+function normalizeUnknownError(error: unknown, fallback: string): Error {
+  if (error instanceof Error) return error;
+  if (typeof error === 'string' && error.trim()) return new Error(error);
+  try {
+    return new Error(JSON.stringify(error));
+  } catch {
+    return new Error(fallback);
+  }
+}
+
 function getSourceKey(fileOrUrl: Uint8Array | File | string): string | null {
   if (typeof fileOrUrl === 'string') return `url:${fileOrUrl}`;
   if (fileOrUrl instanceof File) return `file:${fileOrUrl.name}:${fileOrUrl.size}:${fileOrUrl.lastModified}`;
@@ -48,11 +58,16 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
     const base = window.location.origin + '/ffmpeg';
     // classWorkerURL bypasses Turbopack's static-analysis restriction.
     // All files served from same origin — no CORS/COEP issues, no toBlobURL needed.
-    await ffmpegInstance!.load({
-      classWorkerURL: `${base}/worker.js`,
-      coreURL: `${base}/ffmpeg-core.js`,
-      wasmURL: `${base}/ffmpeg-core.wasm`,
-    });
+    try {
+      await ffmpegInstance!.load({
+        classWorkerURL: `${base}/worker.js`,
+        coreURL: `${base}/ffmpeg-core.js`,
+        wasmURL: `${base}/ffmpeg-core.wasm`,
+      });
+    } catch (error) {
+      resetFFmpeg();
+      throw normalizeUnknownError(error, 'Failed to load FFmpeg.');
+    }
   })();
 
   await loadPromise;
@@ -308,7 +323,7 @@ export async function extractAudioSegment(
     return new Blob([outputData as unknown as ArrayBuffer], { type: 'audio/mpeg' });
   } catch (err) {
     resetFFmpeg();
-    throw err;
+    throw normalizeUnknownError(err, 'Failed to extract audio for transcription.');
   }
 }
 

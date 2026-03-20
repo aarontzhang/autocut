@@ -73,9 +73,9 @@ export default function Timeline({
   }, [createMarkerAtTime, splitClipAtTime]);
 
   const TRACK_HEIGHT = BASE_TRACK_HEIGHT;
-  const schedule = buildClipSchedule(clips);
+  const schedule = buildClipSchedule(clips, transitions);
   const mainTrackEnd = schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration;
-  const contentDuration = Math.max(mainTrackEnd, videoDuration);
+  const contentDuration = mainTrackEnd > 0 ? mainTrackEnd : videoDuration;
   const RIGHT_PAD = Math.max(30, contentDuration * 0.3);
   const totalTimelineDuration = contentDuration + RIGHT_PAD;
 
@@ -165,7 +165,8 @@ export default function Timeline({
 
     if (!playerRef?.current) {
       setCurrentTime(nextTime);
-      const currentSchedule = buildClipSchedule(useEditorStore.getState().clips);
+      const currentState = useEditorStore.getState();
+      const currentSchedule = buildClipSchedule(currentState.clips, currentState.transitions);
       const targetEntry = findTimelineEntryAtTime(currentSchedule, nextTime);
       if (targetEntry && videoRef.current) {
         const offsetInTimeline = nextTime - targetEntry.timelineStart;
