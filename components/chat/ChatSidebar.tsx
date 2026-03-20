@@ -1424,7 +1424,7 @@ function AssistantMessage({
 
       const mergedCaptions = dedupeCaptionEntries([...(existingSourceTranscriptCaptions ?? []), ...rawCaptions]);
       const transcriptText = buildTranscriptContext(clips, mergedCaptions);
-      setBackgroundTranscript(transcriptText, 'done', mergedCaptions);
+      setBackgroundTranscript(transcriptText, 'done', mergedCaptions, null, { markFresh: false });
       addMessage({
         role: 'assistant',
         content: `Transcript ready for ${formatTime(seg.startTime)} to ${formatTime(seg.endTime)}. Continuing with your request.`,

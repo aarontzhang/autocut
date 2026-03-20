@@ -1,4 +1,4 @@
-import { getCaptionSourceId, getSourceRangeId } from './sourceUtils';
+import { getSourceRangeId, normalizeSourceId } from './sourceUtils';
 import {
   CaptionCue,
   CaptionCueWord,
@@ -407,7 +407,15 @@ function projectCaptionWordsToTimeline(
 ): CaptionCueWord[] {
   return rawCaptions
     .map((cap) => {
-      const captionSourceId = getCaptionSourceId(cap);
+      const captionSourceId = normalizeSourceId(cap.sourceId);
+      if (!captionSourceId) {
+        if (cap.endTime <= cap.startTime || !cap.text.trim()) return [];
+        return [{
+          startTime: cap.startTime,
+          endTime: cap.endTime,
+          text: cap.text.trim(),
+        }];
+      }
       const occurrences = sourceRangeToTimelineRanges(clips, captionSourceId, cap.startTime, cap.endTime, transitions)
         .filter((range) => range.timelineEnd > range.timelineStart);
       return occurrences.map((range) => ({

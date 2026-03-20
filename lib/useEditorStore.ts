@@ -105,7 +105,7 @@ function normalizeCaptionEntry(entry: Partial<CaptionEntry>): CaptionEntry | nul
   }
   return {
     id: typeof entry.id === 'string' ? entry.id : undefined,
-    sourceId: MAIN_SOURCE_ID,
+    sourceId: sourceId ?? undefined,
     startTime: entry.startTime!,
     endTime: entry.endTime!,
     text: entry.text!,
@@ -474,6 +474,7 @@ interface EditorState {
     status: TranscriptStatus,
     rawCaptions?: CaptionEntry[],
     errorMessage?: string | null,
+    options?: { markFresh?: boolean },
   ) => void;
   setTranscriptProgress: (progress: TranscriptProgress) => void;
   setSourceOverviewFrames: (
@@ -1335,10 +1336,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     confidence: null,
   }),
 
-  setBackgroundTranscript: (text, status, rawCaptions, errorMessage) => set((state) => {
+  setBackgroundTranscript: (text, status, rawCaptions, errorMessage, options) => set((state) => {
     const normalizedCaptions = rawCaptions
       ?.map((entry) => normalizeCaptionEntry(entry))
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
+    const shouldMarkTranscriptFresh = options?.markFresh ?? (normalizedCaptions !== undefined);
     return {
       backgroundTranscript: normalizedCaptions !== undefined
         ? buildTranscriptContext(state.clips, normalizedCaptions, state.transitions)
@@ -1349,7 +1351,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         : null,
       transcriptProgress: status === 'loading' ? state.transcriptProgress : null,
       ...(normalizedCaptions !== undefined ? { sourceTranscriptCaptions: normalizedCaptions } : {}),
-      ...(normalizedCaptions !== undefined ? {
+      ...(normalizedCaptions !== undefined && shouldMarkTranscriptFresh ? {
         sourceIndexFreshBySourceId: patchSourceIndexState(state.sourceIndexFreshBySourceId, { transcript: true }),
       } : {}),
     };

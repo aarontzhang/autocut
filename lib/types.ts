@@ -24,6 +24,8 @@ export interface ClipScheduleEntry {
 export interface CaptionEntry {
   id?: string;
   sourceId?: string;
+  // Source-backed transcript words keep a sourceId. User-added captions stay
+  // in current-timeline coordinates and omit sourceId.
   startTime: number;
   endTime: number;
   text: string;
