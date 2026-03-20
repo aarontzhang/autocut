@@ -611,7 +611,7 @@ function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number
     || action.type === 'set_clip_filter'
   ) {
     const clipIndex = action.clipIndex ?? 0;
-    const schedule = buildClipSchedule(snapshot.clips);
+    const schedule = buildClipSchedule(snapshot.clips, snapshot.transitions);
     return schedule[clipIndex]?.timelineStart ?? null;
   }
 

@@ -1212,7 +1212,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return;
     }
     if (type === 'transition') {
-      set({ history: newHistory, future: [], transitions: state.transitions.filter((entry) => entry.id !== id), selectedItem: null });
+      const nextTransitions = normalizeTransitionState(
+        state.clips,
+        state.transitions.filter((entry) => entry.id !== id),
+      );
+      set({
+        history: newHistory,
+        future: [],
+        transitions: nextTransitions,
+        selectedItem: null,
+        ...buildDerivedIndexState(
+          state.clips,
+          nextTransitions,
+          state.aiSettings,
+          state.sourceTranscriptCaptions,
+          state.sourceOverviewFrames,
+        ),
+      });
       return;
     }
     set({
@@ -1236,14 +1252,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     )),
   })),
 
-  updateTransition: (id, patch) => set((state) => ({
-    transitions: normalizeTransitionState(
+  updateTransition: (id, patch) => set((state) => {
+    const nextTransitions = normalizeTransitionState(
       state.clips,
       state.transitions.map((transition) => (
         transition.id === id ? { ...transition, ...patch } : transition
       )),
-    ),
-  })),
+    );
+    return {
+      transitions: nextTransitions,
+      ...buildDerivedIndexState(
+        state.clips,
+        nextTransitions,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
+    };
+  }),
 
   addMarker: (marker) => {
     const id = marker.id ?? uuidv4();

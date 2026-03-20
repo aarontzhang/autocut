@@ -148,7 +148,7 @@ export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endT
 }
 
 export function actionChangesTimelineStructure(action: EditAction) {
-  return ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip', 'set_clip_speed'].includes(action.type);
+  return ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip', 'set_clip_speed', 'add_transition'].includes(action.type);
 }
 
 function withClearedMarkers(snapshot: EditSnapshot, patch: Partial<EditSnapshot>): EditSnapshot {

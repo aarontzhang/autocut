@@ -13,6 +13,7 @@ const files = [
   // extraction failures we were seeing before /api/transcribe was ever called.
   ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.js', 'ffmpeg-core.js'],
   ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.wasm', 'ffmpeg-core.wasm'],
+  ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.worker.js', 'ffmpeg-core.worker.js'],
 ];
 
 if (!existsSync(dest)) {
