@@ -13,6 +13,7 @@ let activeJobCancel: (() => void) | null = null;
 const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
 const fileDataCache = new WeakMap<File, Promise<Uint8Array>>();
 let lastWrittenInputKey: string | null = null;
+const FFMPEG_ASSET_VERSION = '20260319-esm-core';
 
 function normalizeUnknownError(error: unknown, fallback: string): Error {
   if (error instanceof Error) return error;
@@ -57,14 +58,14 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
 
   loadPromise = (async () => {
     const base = window.location.origin + '/ffmpeg';
+    const assetSuffix = `?v=${FFMPEG_ASSET_VERSION}`;
     // classWorkerURL bypasses Turbopack's static-analysis restriction.
     // All files served from same origin — no CORS/COEP issues, no toBlobURL needed.
     try {
       await ffmpegInstance!.load({
-        classWorkerURL: `${base}/worker.js`,
-        coreURL: `${base}/ffmpeg-core.js`,
-        wasmURL: `${base}/ffmpeg-core.wasm`,
-        workerURL: `${base}/ffmpeg-core.worker.js`,
+        classWorkerURL: `${base}/worker.js${assetSuffix}`,
+        coreURL: `${base}/ffmpeg-core.js${assetSuffix}`,
+        wasmURL: `${base}/ffmpeg-core.wasm${assetSuffix}`,
       });
     } catch (error) {
       resetFFmpeg();

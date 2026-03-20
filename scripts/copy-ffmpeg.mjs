@@ -1,4 +1,4 @@
-import { copyFile, mkdir } from 'fs/promises';
+import { copyFile, mkdir, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -8,12 +8,10 @@ const root = resolve(__dirname, '..');
 const dest = resolve(root, 'public', 'ffmpeg');
 
 const files = [
-  // The single-thread core is slower than the multithreaded build, but it is
-  // much more reliable across deployed browsers and avoids the production-only
-  // extraction failures we were seeing before /api/transcribe was ever called.
-  ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.js', 'ffmpeg-core.js'],
-  ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.wasm', 'ffmpeg-core.wasm'],
-  ['node_modules/@ffmpeg/core-st/dist/ffmpeg-core.worker.js', 'ffmpeg-core.worker.js'],
+  // Use the single-thread ESM core so the module worker used by @ffmpeg/ffmpeg
+  // can import it directly in development and production.
+  ['node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js', 'ffmpeg-core.js'],
+  ['node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm', 'ffmpeg-core.wasm'],
 ];
 
 if (!existsSync(dest)) {
@@ -25,4 +23,14 @@ for (const [src, name] of files) {
   const destPath = resolve(dest, name);
   await copyFile(srcPath, destPath);
   console.log(`Copied ${name} to public/ffmpeg/`);
+}
+
+const staleFiles = ['ffmpeg-core.worker.js'];
+
+for (const name of staleFiles) {
+  const destPath = resolve(dest, name);
+  if (existsSync(destPath)) {
+    await rm(destPath, { force: true });
+    console.log(`Removed stale ${name} from public/ffmpeg/`);
+  }
 }
