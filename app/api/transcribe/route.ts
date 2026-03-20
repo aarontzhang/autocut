@@ -7,9 +7,16 @@ import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib
 import { buildSourceIndex } from '@/lib/indexer/sourceIndex';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const TRANSCRIBE_REQUESTS_PER_MINUTE = 25;
 type WhisperWord = { start: number; end: number; word: string };
+
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('Server transcription is not configured. Missing OPENAI_API_KEY.');
+  }
+  return new OpenAI({ apiKey });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -46,7 +53,7 @@ export async function POST(req: NextRequest) {
 
     const file = new File([audio], 'audio.mp3', { type: 'audio/mpeg' });
 
-    const transcription = await openai.audio.transcriptions.create({
+    const transcription = await getOpenAIClient().audio.transcriptions.create({
       file,
       model: 'whisper-1',
       response_format: 'verbose_json',

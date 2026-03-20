@@ -230,7 +230,12 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'done', rawWords);
       } catch (error) {
         console.warn('Background transcription failed:', error);
-        setBackgroundTranscript(null, 'error');
+        setBackgroundTranscript(
+          null,
+          'error',
+          undefined,
+          error instanceof Error ? error.message : 'Audio transcription did not finish.',
+        );
       }
     })();
   }, [aiSettings.captions.wordsPerCaption, playbackActive, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);

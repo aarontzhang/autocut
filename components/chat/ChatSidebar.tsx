@@ -238,6 +238,20 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function formatTranscriptFailureNotice(error: string | null): string {
+  const normalized = error?.trim();
+  if (!normalized) {
+    return 'Audio transcription did not finish, but the assistant is ready to work from the video and visual analysis.';
+  }
+  if (normalized.includes('OPENAI_API_KEY')) {
+    return 'Audio transcription is not configured on this deployment. Missing OPENAI_API_KEY. The assistant is ready to work from the video and visual analysis.';
+  }
+  if (normalized === 'Unauthorized') {
+    return 'Audio transcription was rejected because the current session was not authorized. The assistant is ready to work from the video and visual analysis.';
+  }
+  return `${normalized} The assistant is ready to work from the video and visual analysis.`;
+}
+
 function clampProgress(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
@@ -2085,6 +2099,7 @@ export default function ChatSidebar() {
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
+  const transcriptError = useEditorStore(s => s.transcriptError);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
   const transcriptStartedAtRef = useRef<number | null>(null);
   const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
@@ -2510,7 +2525,7 @@ export default function ChatSidebar() {
   ) => {
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
     const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(latestUserInput) && !!useEditorStore.getState().currentProjectId;
-    let currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
+    const currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
     let producedVisibleResponse = false;
 
     for (let round = 0; round < 2; round++) {
@@ -2740,7 +2755,7 @@ export default function ChatSidebar() {
           : null
     : null;
   const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
-    ? 'Audio transcription did not finish, but the assistant is ready to work from the video and visual analysis.'
+    ? formatTranscriptFailureNotice(transcriptError)
     : null;
   const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
     ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`

@@ -263,6 +263,7 @@ function buildBaseEditorState(input?: {
   | 'playbackActive'
   | 'backgroundTranscript'
   | 'transcriptStatus'
+  | 'transcriptError'
   | 'transcriptProgress'
   | 'sourceTranscriptCaptions'
   | 'sourceOverviewFrames'
@@ -305,6 +306,7 @@ function buildBaseEditorState(input?: {
     playbackActive: false,
     backgroundTranscript: null,
     transcriptStatus: 'idle',
+    transcriptError: null,
     transcriptProgress: null,
     sourceTranscriptCaptions: null,
     sourceOverviewFrames: null,
@@ -350,6 +352,7 @@ interface EditorState {
   playbackActive: boolean;
   backgroundTranscript: string | null;
   transcriptStatus: TranscriptStatus;
+  transcriptError: string | null;
   transcriptProgress: TranscriptProgress;
   sourceTranscriptCaptions: CaptionEntry[] | null;
   sourceOverviewFrames: SourceIndexedFrame[] | null;
@@ -431,7 +434,12 @@ interface EditorState {
   setStoragePath: (path: string) => void;
   setZoom: (zoom: number) => void;
   setPlaybackActive: (active: boolean) => void;
-  setBackgroundTranscript: (text: string | null, status: TranscriptStatus, rawCaptions?: CaptionEntry[]) => void;
+  setBackgroundTranscript: (
+    text: string | null,
+    status: TranscriptStatus,
+    rawCaptions?: CaptionEntry[],
+    errorMessage?: string | null,
+  ) => void;
   setTranscriptProgress: (progress: TranscriptProgress) => void;
   setSourceOverviewFrames: (
     sourceId: string,
@@ -1221,7 +1229,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     confidence: null,
   }),
 
-  setBackgroundTranscript: (text, status, rawCaptions) => set((state) => {
+  setBackgroundTranscript: (text, status, rawCaptions, errorMessage) => set((state) => {
     const normalizedCaptions = rawCaptions
       ?.map((entry) => normalizeCaptionEntry(entry))
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
@@ -1230,6 +1238,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ? buildTranscriptContext(state.clips, normalizedCaptions)
         : text,
       transcriptStatus: status,
+      transcriptError: status === 'error'
+        ? (errorMessage?.trim() || state.transcriptError || 'Audio transcription did not finish.')
+        : null,
       transcriptProgress: status === 'loading' ? state.transcriptProgress : null,
       ...(normalizedCaptions !== undefined ? { sourceTranscriptCaptions: normalizedCaptions } : {}),
       ...(normalizedCaptions !== undefined ? {
