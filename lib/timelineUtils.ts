@@ -15,7 +15,7 @@ import { buildClipSchedule, getTimelineDuration as getRenderTimelineDuration } f
 
 const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
 const DEFAULT_CAPTION_MAX_LINES = 2;
-const DEFAULT_CAPTION_PAUSE_BREAK_SECONDS = 0.45;
+const DEFAULT_CAPTION_PAUSE_BREAK_SECONDS = 0.65;
 const CAPTION_PUNCTUATION_BREAK = /[.!?]$|[,;:]$/;
 
 /**
@@ -370,6 +370,36 @@ function buildBalancedCaptionLines(
   ];
 }
 
+function trimCaptionWordsToWindow(
+  words: CaptionCueWord[],
+  maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
+  maxLines = DEFAULT_CAPTION_MAX_LINES,
+): CaptionCueWord[] {
+  const safeWords = words.map((word) => ({ ...word, text: word.text.trim() })).filter((word) => word.text);
+  if (safeWords.length <= 1) return safeWords;
+
+  let startIndex = 0;
+  let visibleWords = safeWords;
+  let lines = buildBalancedCaptionLines(visibleWords, maxCharsPerLine);
+  let totalChars = lines.join(' ').length;
+
+  while (
+    startIndex < safeWords.length - 1
+    && (
+      lines.length > maxLines
+      || lines.some((line) => line.length > maxCharsPerLine + 8)
+      || totalChars > maxCharsPerLine * maxLines + 12
+    )
+  ) {
+    startIndex += 1;
+    visibleWords = safeWords.slice(startIndex);
+    lines = buildBalancedCaptionLines(visibleWords, maxCharsPerLine);
+    totalChars = lines.join(' ').length;
+  }
+
+  return visibleWords;
+}
+
 function projectCaptionWordsToTimeline(
   clips: VideoClip[],
   rawCaptions: CaptionEntry[],
@@ -434,13 +464,11 @@ export function buildCaptionCues(
       ? word.startTime - activeWords[activeWords.length - 1].endTime
       : 0;
     const candidateWords = [...activeWords, word];
-    const candidateLines = buildBalancedCaptionLines(candidateWords, maxCharsPerLine);
+    const candidateDuration = candidateWords[candidateWords.length - 1].endTime - candidateWords[0].startTime;
     const shouldFlush = activeWords.length > 0 && (
       pauseSinceLast > pauseBreakSeconds
-      || candidateLines.length > maxLines
-      || candidateLines.some((line) => line.length > maxCharsPerLine + 8)
-      || candidateWords.length > 14
-      || candidateWords.map((entry) => entry.text).join(' ').length > maxCharsPerLine * maxLines + 8
+      || candidateWords.length > 22
+      || candidateDuration > 6.2
       || (
         CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
         && pauseSinceLast > 0.12
@@ -460,9 +488,15 @@ export function buildCaptionCues(
 }
 
 export function getCaptionCueDisplay(cue: CaptionCue, currentTime: number): { text: string; lines: string[] } {
+  const maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE;
+  const maxLines = DEFAULT_CAPTION_MAX_LINES;
   const visibleWords = cue.words.filter((word) => currentTime + 0.03 >= word.startTime);
-  const displayWords = visibleWords.length > 0 ? visibleWords : cue.words.slice(0, 1);
-  const lines = buildBalancedCaptionLines(displayWords);
+  const displayWords = trimCaptionWordsToWindow(
+    visibleWords.length > 0 ? visibleWords : cue.words.slice(0, 1),
+    maxCharsPerLine,
+    maxLines,
+  );
+  const lines = buildBalancedCaptionLines(displayWords, maxCharsPerLine).slice(0, maxLines);
   return {
     text: lines.join('\n'),
     lines,

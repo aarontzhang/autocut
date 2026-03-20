@@ -13,7 +13,11 @@ let activeJobCancel: (() => void) | null = null;
 const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
 const fileDataCache = new WeakMap<File, Promise<Uint8Array>>();
 let lastWrittenInputKey: string | null = null;
+let captionFontDataPromise: Promise<Uint8Array> | null = null;
+let recentFFmpegLogs: string[] = [];
 const FFMPEG_ASSET_VERSION = '20260319-esm-core';
+const CAPTION_FONT_PATH = '/fonts/NotoSans-Regular.ttf';
+const CAPTION_FONT_FILE_NAME = 'caption_font.ttf';
 
 function normalizeUnknownError(error: unknown, fallback: string): Error {
   if (error instanceof Error) return error;
@@ -44,6 +48,7 @@ export function resetFFmpeg() {
   loadPromise = null;
   progressHandler = null;
   lastWrittenInputKey = null;
+  recentFFmpegLogs = [];
 }
 
 async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpeg> {
@@ -58,6 +63,11 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
 
   ffmpegInstance.on('progress', ({ progress }) => {
     progressHandler?.(Math.round(progress * 100));
+  });
+  ffmpegInstance.on('log', ({ message }) => {
+    const nextMessage = message.trim();
+    if (!nextMessage) return;
+    recentFFmpegLogs = [...recentFFmpegLogs.slice(-11), nextMessage];
   });
 
   loadPromise = (async () => {
@@ -181,8 +191,35 @@ function toEvenDimension(value: number, fallback: number): number {
 async function execOrThrow(ffmpeg: FFmpeg, args: string[]) {
   const exitCode = await ffmpeg.exec(args);
   if (exitCode !== 0) {
-    throw new Error(`FFmpeg exited with code ${exitCode}.`);
+    const logSuffix = recentFFmpegLogs.length > 0
+      ? `\n${recentFFmpegLogs.slice(-4).join('\n')}`
+      : '';
+    throw new Error(`FFmpeg exited with code ${exitCode}.${logSuffix}`);
   }
+}
+
+async function getCaptionFontData() {
+  if (!captionFontDataPromise) {
+    captionFontDataPromise = (async () => {
+      const response = await fetch(`${CAPTION_FONT_PATH}?v=${FFMPEG_ASSET_VERSION}`);
+      if (!response.ok) {
+        throw new Error(`Failed to load caption font (${response.status}).`);
+      }
+      return new Uint8Array(await response.arrayBuffer() as ArrayBuffer);
+    })();
+  }
+  return captionFontDataPromise;
+}
+
+async function ensureCaptionFontFile(ffmpeg: FFmpeg) {
+  const fontData = await getCaptionFontData();
+  try {
+    await ffmpeg.deleteFile(CAPTION_FONT_FILE_NAME);
+  } catch {
+    // Ignore missing file errors before rewriting the font asset.
+  }
+  await ffmpeg.writeFile(CAPTION_FONT_FILE_NAME, cloneWritableBytes(fontData));
+  return CAPTION_FONT_FILE_NAME;
 }
 
 function isPlainCutClip(clip: VideoClip): boolean {
@@ -340,20 +377,17 @@ async function writeCaptionTextFiles(
 ) {
   const encoder = new TextEncoder();
   const drawTextFilters: string[] = [];
+  const fontFileName = await ensureCaptionFontFile(ffmpeg);
 
   for (let windowIndex = 0; windowIndex < captionWindows.length; windowIndex += 1) {
     const window = captionWindows[windowIndex];
-    const lineCount = window.lines.length;
-    for (let lineIndex = 0; lineIndex < lineCount; lineIndex += 1) {
-      const line = window.lines[lineIndex];
-      const fileName = `caption_${windowIndex}_${lineIndex}.txt`;
-      await ffmpeg.writeFile(fileName, encoder.encode(line));
-      const lineOffset = lineCount - lineIndex - 1;
-      drawTextFilters.push(
-        `drawtext=textfile=${fileName}:font=Arial:fontcolor=white:fontsize=h*0.036:box=1:boxcolor=black@0.74:boxborderw=8:` +
-        `x=(w-text_w)/2:y=h-(h*0.16)-${lineOffset}*(text_h+12):enable='between(t,${window.startTime.toFixed(3)},${window.endTime.toFixed(3)})'`,
-      );
-    }
+    const fileName = `caption_${windowIndex}.txt`;
+    await ffmpeg.writeFile(fileName, encoder.encode(window.lines.join('\n')));
+    drawTextFilters.push(
+      `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=h*0.036:line_spacing=10:` +
+      `box=1:boxcolor=black@0.74:boxborderw=12:x=(w-text_w)/2:y=h-(h*0.14)-text_h:` +
+      `enable='between(t,${window.startTime.toFixed(3)},${window.endTime.toFixed(3)})'`,
+    );
   }
 
   return drawTextFilters;

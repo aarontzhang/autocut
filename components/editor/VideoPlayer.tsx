@@ -121,7 +121,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
-  const [captionsEnabled, setCaptionsEnabled] = useState(true);
 
   const secondaryVideoRef = useRef<HTMLVideoElement>(null);
   const currentTimeRef = useRef(0);
@@ -177,18 +176,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const activeCaptionCue = captionCues.find((cue) => currentTime >= cue.startTime && currentTime < cue.endTime) ?? null;
   const activeCaption = useMemo(() => {
-    if (!captionsEnabled) return null;
     if (activeCaptionCue) {
       return getCaptionCueDisplay(activeCaptionCue, currentTime);
     }
     return null;
-  }, [activeCaptionCue, captionsEnabled, currentTime]);
+  }, [activeCaptionCue, currentTime]);
   const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, videoDimensions),
     [containerSize, videoDimensions],
   );
-  const hasCaptionTrack = captionCues.length > 0;
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -542,29 +539,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             </div>
           )}
 
-          {hasCaptionTrack && (
-            <button
-              type="button"
-              onClick={() => setCaptionsEnabled((current) => !current)}
-              style={{
-                position: 'absolute',
-                top: 12,
-                right: 12,
-                zIndex: 3,
-                border: '1px solid rgba(255,255,255,0.18)',
-                background: captionsEnabled ? 'rgba(0,0,0,0.72)' : 'rgba(0,0,0,0.38)',
-                color: '#fff',
-                borderRadius: 999,
-                padding: '6px 10px',
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              CC
-            </button>
-          )}
-
           {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0) && (
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
               {activeCaption && (
@@ -583,27 +557,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                     boxSizing: 'border-box',
                   }}
                 >
-                  {activeCaption.lines.map((line, index) => (
-                    <div
-                      key={`${line}-${index}`}
-                      style={{
-                        maxWidth: '82%',
-                        padding: '6px 12px',
-                        background: 'rgba(0,0,0,0.74)',
-                        borderRadius: 6,
-                        color: '#fff',
-                        fontSize: Math.max(14, Math.min(24, videoDisplaySize.width * 0.031)),
-                        fontWeight: 800,
-                        lineHeight: 1.18,
-                        textAlign: 'center',
-                        textShadow: '0 2px 10px rgba(0,0,0,0.9)',
-                        whiteSpace: 'pre-wrap',
-                        overflowWrap: 'break-word',
-                      }}
-                    >
-                      {line}
-                    </div>
-                  ))}
+                  <div
+                    style={{
+                      maxWidth: '82%',
+                      padding: '8px 14px',
+                      background: 'rgba(0,0,0,0.74)',
+                      borderRadius: 6,
+                      color: '#fff',
+                      fontSize: Math.max(14, Math.min(24, videoDisplaySize.width * 0.031)),
+                      fontWeight: 800,
+                      lineHeight: 1.18,
+                      textAlign: 'center',
+                      textShadow: '0 2px 10px rgba(0,0,0,0.9)',
+                      whiteSpace: 'pre-wrap',
+                      overflowWrap: 'break-word',
+                    }}
+                  >
+                    {activeCaption.text}
+                  </div>
                 </div>
               )}
 

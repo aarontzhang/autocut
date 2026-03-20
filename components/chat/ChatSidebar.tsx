@@ -2,8 +2,8 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, SourceRangeRef, VisualSearchSession } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceRangeToTimelineRanges, sourceTimeToTimelineOccurrences, subtractSourceRanges } from '@/lib/timelineUtils';
+import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, VisualSearchSession } from '@/lib/types';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
@@ -645,127 +645,32 @@ function getReviewSeekTime(snapshot: EditSnapshot, action: EditAction): number |
   return Math.max(0, anchor - REVIEW_PREROLL_SECONDS);
 }
 
-function resolveReviewStep(
-  baseSnapshot: EditSnapshot,
-  currentSnapshot: EditSnapshot,
-  action: EditAction,
-  acceptedSourceRanges: SourceRangeRef[],
-): { action: EditAction; sourceRanges: SourceRangeRef[] } | null {
-  if (action.type !== 'delete_range') {
-    return {
-      action,
-      sourceRanges: sourceRangesForAction(currentSnapshot.clips, action),
-    };
+function getReviewApplyResult(action: EditAction, reviewCount: number): string {
+  if (action.type === 'add_captions') {
+    const count = action.captions?.length ?? 0;
+    return `Added ${count} caption${count === 1 ? '' : 's'}.`;
   }
 
-  const originalSourceRanges = sourceRangesForAction(baseSnapshot.clips, action);
-  const remainingSourceRanges = originalSourceRanges.flatMap((range) => subtractSourceRanges(range, acceptedSourceRanges));
-  const timelineRanges = remainingSourceRanges
-    .flatMap((range) => sourceRangeToTimelineRanges(currentSnapshot.clips, range.sourceId, range.sourceStart, range.sourceEnd))
-    .filter((range) => range.timelineEnd > range.timelineStart + 1e-3)
-    .sort((a, b) => a.timelineStart - b.timelineStart || a.timelineEnd - b.timelineEnd);
-
-  if (timelineRanges.length === 0) return null;
-
-  if (timelineRanges.length === 1) {
-    return {
-      action: {
-        ...action,
-        deleteStartTime: timelineRanges[0].timelineStart,
-        deleteEndTime: timelineRanges[0].timelineEnd,
-      },
-      sourceRanges: remainingSourceRanges,
-    };
+  if (action.type === 'add_transition') {
+    const count = action.transitions?.length ?? 0;
+    return `Added ${count} transition${count === 1 ? '' : 's'}.`;
   }
 
-  return {
-    action: {
-      type: 'delete_ranges',
-      ranges: timelineRanges.map((range) => ({ start: range.timelineStart, end: range.timelineEnd })),
-      message: action.message,
-    },
-    sourceRanges: remainingSourceRanges,
-  };
-}
-
-function combineResolvedReviewActions(
-  originalAction: EditAction,
-  resolvedActions: EditAction[],
-): EditAction | null {
-  if (resolvedActions.length === 0) return null;
-  if (resolvedActions.length === 1 && originalAction.type !== 'delete_ranges') {
-    return {
-      ...resolvedActions[0],
-      message: originalAction.message,
-    };
+  if (action.type === 'add_markers') {
+    const count = action.markers?.length ?? 0;
+    return `${count} marker${count === 1 ? '' : 's'} added.`;
   }
 
-  if (originalAction.type === 'delete_range' || originalAction.type === 'delete_ranges') {
-    const ranges = resolvedActions.flatMap((action) => {
-      if (action.type === 'delete_range' && action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
-        return [{ start: action.deleteStartTime, end: action.deleteEndTime }];
-      }
-      if (action.type === 'delete_ranges') {
-        return action.ranges ?? [];
-      }
-      return [];
-    });
-    if (ranges.length === 0) return null;
-    if (ranges.length === 1) {
-      return {
-        type: 'delete_range',
-        deleteStartTime: ranges[0].start,
-        deleteEndTime: ranges[0].end,
-        message: originalAction.message,
-      };
-    }
-    return {
-      type: 'delete_ranges',
-      ranges,
-      message: originalAction.message,
-    };
+  if (action.type === 'add_text_overlay') {
+    const count = action.textOverlays?.length ?? 0;
+    return `Added ${count} text overlay${count === 1 ? '' : 's'}.`;
   }
 
-  if (originalAction.type === 'add_captions') {
-    const captions = resolvedActions.flatMap((action) => action.type === 'add_captions' ? action.captions ?? [] : []);
-    return captions.length > 0 ? { type: 'add_captions', captions, message: originalAction.message } : null;
+  if (reviewCount > 1) {
+    return `Committed ${reviewCount} changes.`;
   }
 
-  if (originalAction.type === 'add_transition') {
-    const transitions = resolvedActions.flatMap((action) => action.type === 'add_transition' ? action.transitions ?? [] : []);
-    return transitions.length > 0 ? { type: 'add_transition', transitions, message: originalAction.message } : null;
-  }
-
-  if (originalAction.type === 'add_markers') {
-    const markers = resolvedActions.flatMap((action) => {
-      if (action.type === 'add_marker' && action.marker) return [action.marker];
-      if (action.type === 'add_markers') return action.markers ?? [];
-      return [];
-    });
-    if (markers.length === 0) return null;
-    if (markers.length === 1) {
-      return {
-        type: 'add_marker',
-        marker: markers[0],
-        message: originalAction.message,
-      };
-    }
-    return {
-      type: 'add_markers',
-      markers,
-      message: originalAction.message,
-    };
-  }
-
-  if (originalAction.type === 'add_text_overlay') {
-    const textOverlays = resolvedActions.flatMap((action) => action.type === 'add_text_overlay' ? action.textOverlays ?? [] : []);
-    return textOverlays.length > 0 ? { type: 'add_text_overlay', textOverlays, message: originalAction.message } : null;
-  }
-
-  return {
-    ...resolvedActions[0],
-    message: originalAction.message,
-  };
+  return 'Change applied.';
 }
 
 function formatChatTime(seconds: number): string {
@@ -1024,11 +929,11 @@ function ActionDetails({ action }: { action: EditAction }) {
 
   if (action.type === 'add_captions') {
     return (
-      <div style={{ padding: '6px 12px 8px' }}>
-        {(action.captions ?? []).slice(0, 3).map((c, i) => (
+      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+        {(action.captions ?? []).map((c, i) => (
           <div key={i} style={{
             padding: '3px 0',
-            borderBottom: i < Math.min((action.captions ?? []).length - 1, 2) ? '1px solid rgba(255,255,255,0.04)' : 'none',
+            borderBottom: i < (action.captions ?? []).length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
           }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)', marginRight: 6 }}>
               {formatChatTime(c.startTime)}
@@ -1036,11 +941,6 @@ function ActionDetails({ action }: { action: EditAction }) {
             <span style={{ fontSize: 11, color: 'var(--fg-secondary)' }}>{c.text}</span>
           </div>
         ))}
-        {(action.captions?.length ?? 0) > 3 && (
-          <p style={{ fontSize: 10, color: 'var(--fg-muted)', padding: '3px 0', margin: 0 }}>
-            +{(action.captions?.length ?? 0) - 3} more…
-          </p>
-        )}
       </div>
     );
   }
@@ -1102,9 +1002,12 @@ function ActionDetails({ action }: { action: EditAction }) {
 
   if (action.type === 'add_text_overlay') {
     return (
-      <div style={{ padding: '6px 12px 8px' }}>
-        {(action.textOverlays ?? []).slice(0, 3).map((t, i) => (
-          <div key={i} style={{ padding: '2px 0' }}>
+      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+        {(action.textOverlays ?? []).map((t, i) => (
+          <div key={i} style={{
+            padding: '2px 0',
+            borderBottom: i < (action.textOverlays ?? []).length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+          }}>
             <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)', marginRight: 6 }}>
               {formatChatTime(t.startTime)}–{formatChatTime(t.endTime)}
             </span>
@@ -1345,13 +1248,8 @@ function AssistantMessage({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewBaseSnapshot, setReviewBaseSnapshot] = useState<EditSnapshot | null>(null);
-  const [reviewDraft, setReviewDraft] = useState<EditSnapshot | null>(null);
-  const [reviewIndex, setReviewIndex] = useState(0);
-  const [acceptedSteps, setAcceptedSteps] = useState(0);
-  const [skippedSteps, setSkippedSteps] = useState(0);
+  const [reviewPreviewActive, setReviewPreviewActive] = useState(false);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
-  const [acceptedSourceRanges, setAcceptedSourceRanges] = useState<SourceRangeRef[]>([]);
-  const [acceptedReviewActions, setAcceptedReviewActions] = useState<EditAction[]>([]);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
@@ -1362,16 +1260,7 @@ function AssistantMessage({
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
   const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
-  const reviewInProgress = reviewDraft !== null && reviewIndex < reviewSteps.length;
-  const resolvedReviewStep = useMemo(() => {
-    if (!reviewInProgress || !reviewBaseSnapshot || !reviewDraft) return null;
-    const step = reviewSteps[reviewIndex];
-    if (!step) return null;
-    return resolveReviewStep(reviewBaseSnapshot, reviewDraft, step, acceptedSourceRanges);
-  }, [acceptedSourceRanges, reviewBaseSnapshot, reviewDraft, reviewInProgress, reviewIndex, reviewSteps]);
-  const activeReviewAction = reviewInProgress
-    ? (resolvedReviewStep?.action ?? reviewSteps[reviewIndex] ?? null)
-    : action ?? null;
+  const activeReviewAction = action ?? null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const actionPreviouslyApplied = useMemo(() => (
     !!action && appliedActions.some(record => actionsMatch(record.action, action))
@@ -1381,6 +1270,12 @@ function AssistantMessage({
     || msg.autoApplied
     || actionPreviouslyApplied;
   const isDeleteAction = !!action && (action.type === 'delete_range' || action.type === 'delete_ranges');
+  const reviewableAction = !!action
+    && action.type !== 'none'
+    && action.type !== 'transcribe_request'
+    && action.type !== 'update_ai_settings'
+    && !isDeleteAction;
+  const batchReviewActive = reviewPreviewActive && reviewableAction;
   const deleteRanges = action ? getDeleteRangesFromAction(action) : null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const actionResultText = msg.actionResult ?? (
@@ -1412,42 +1307,10 @@ function AssistantMessage({
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
   }, [actionPreviouslyApplied, actionResultText, msg.actionStatus, msg.id, updateMessage]);
 
-  const finalizeReview = useCallback((
-    draft: EditSnapshot,
-    accepted: number,
-    skipped: number,
-    committedSourceRanges: SourceRangeRef[],
-    committedReviewActions: EditAction[],
-  ) => {
-    clearPreviewSnapshot(msg.id);
-    if (accepted > 0) {
-      commitPreviewSnapshot(draft);
-      if (action) {
-        const committedAction = combineResolvedReviewActions(action, committedReviewActions) ?? action;
-        recordAppliedAction(committedAction, committedAction.message, { sourceRanges: committedSourceRanges });
-      }
-    }
-    const result = accepted > 0 ? `Committed ${accepted} change${accepted === 1 ? '' : 's'}.` : 'No changes applied.';
-    updateMessage(msg.id, {
-      actionStatus: 'completed',
-      actionResult: result,
-    });
-    setReviewBaseSnapshot(null);
-    setReviewDraft(null);
-    setReviewIndex(reviewSteps.length);
-    setAcceptedSteps(accepted);
-    setSkippedSteps(skipped);
-    setAcceptedSourceRanges([]);
-    setAcceptedReviewActions([]);
-    setReviewResult(result);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewSteps.length, updateMessage]);
-
   const startReview = useCallback(() => {
     if (
       !action
-      || action.type === 'none'
-      || action.type === 'transcribe_request'
-      || action.type === 'update_ai_settings'
+      || !reviewableAction
       || anotherReviewActive
     ) return;
     const state = useEditorStore.getState();
@@ -1458,85 +1321,37 @@ function AssistantMessage({
       markers: state.markers,
       textOverlays: state.textOverlays,
     };
-    const firstStep = reviewSteps[0];
-    if (!firstStep) return;
-    const firstResolvedStep = resolveReviewStep(baseSnapshot, baseSnapshot, firstStep, []);
-    if (!firstResolvedStep) return;
     setReviewBaseSnapshot(baseSnapshot);
-    setReviewDraft(baseSnapshot);
-    setReviewIndex(0);
-    setAcceptedSteps(0);
-    setSkippedSteps(0);
-    setAcceptedSourceRanges([]);
-    setAcceptedReviewActions([]);
+    setReviewPreviewActive(true);
     setReviewResult(null);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, firstResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(baseSnapshot, firstResolvedStep.action);
+    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, action));
+    const reviewSeekTime = getReviewSeekTime(baseSnapshot, action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [action, anotherReviewActive, msg.id, requestSeek, reviewSteps, setPreviewSnapshot]);
-
-  const handleApplyStep = useCallback(() => {
-    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
-    const resolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, reviewSteps[reviewIndex], acceptedSourceRanges);
-    if (!resolvedStep) return;
-    const stepAction = resolvedStep.action;
-    const nextCommittedSourceRanges = [...acceptedSourceRanges, ...resolvedStep.sourceRanges];
-    const nextCommittedReviewActions = [...acceptedReviewActions, stepAction];
-    const nextDraft = applyActionToSnapshot(reviewDraft, stepAction);
-    const accepted = acceptedSteps + 1;
-    const nextIndex = reviewIndex + 1;
-    if (nextIndex >= reviewSteps.length) {
-      finalizeReview(nextDraft, accepted, skippedSteps, nextCommittedSourceRanges, nextCommittedReviewActions);
-      return;
-    }
-    const nextStep = reviewSteps[nextIndex];
-    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, nextDraft, nextStep, nextCommittedSourceRanges);
-    if (!nextResolvedStep) {
-      finalizeReview(nextDraft, accepted, skippedSteps + 1, nextCommittedSourceRanges, nextCommittedReviewActions);
-      return;
-    }
-    setReviewDraft(nextDraft);
-    setReviewIndex(nextIndex);
-    setAcceptedSteps(accepted);
-    setAcceptedSourceRanges(nextCommittedSourceRanges);
-    setAcceptedReviewActions(nextCommittedReviewActions);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(nextDraft, nextResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(nextDraft, nextResolvedStep.action);
-    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedReviewActions, acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
-
-  const handleSkipStep = useCallback(() => {
-    if (!reviewBaseSnapshot || !reviewDraft || !reviewSteps[reviewIndex]) return;
-    const skipped = skippedSteps + 1;
-    const nextIndex = reviewIndex + 1;
-    if (nextIndex >= reviewSteps.length) {
-      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges, acceptedReviewActions);
-      return;
-    }
-    const nextStep = reviewSteps[nextIndex];
-    const nextResolvedStep = resolveReviewStep(reviewBaseSnapshot, reviewDraft, nextStep, acceptedSourceRanges);
-    if (!nextResolvedStep) {
-      finalizeReview(reviewDraft, acceptedSteps, skipped, acceptedSourceRanges, acceptedReviewActions);
-      return;
-    }
-    setReviewIndex(nextIndex);
-    setSkippedSteps(skipped);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(reviewDraft, nextResolvedStep.action));
-    const reviewSeekTime = getReviewSeekTime(reviewDraft, nextResolvedStep.action);
-    if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [acceptedReviewActions, acceptedSourceRanges, acceptedSteps, finalizeReview, msg.id, requestSeek, reviewBaseSnapshot, reviewDraft, reviewIndex, reviewSteps, setPreviewSnapshot, skippedSteps]);
+  }, [action, anotherReviewActive, msg.id, requestSeek, reviewableAction, setPreviewSnapshot]);
 
   const cancelReview = useCallback(() => {
     clearPreviewSnapshot(msg.id);
     setReviewBaseSnapshot(null);
-    setReviewDraft(null);
-    setReviewIndex(0);
-    setAcceptedSteps(0);
-    setSkippedSteps(0);
-    setAcceptedSourceRanges([]);
-    setAcceptedReviewActions([]);
+    setReviewPreviewActive(false);
     setReviewResult(null);
   }, [clearPreviewSnapshot, msg.id]);
+
+  const handleApplyReviewedAction = useCallback(() => {
+    if (!action || !reviewBaseSnapshot) return;
+    const nextSnapshot = applyActionToSnapshot(reviewBaseSnapshot, action);
+    clearPreviewSnapshot(msg.id);
+    commitPreviewSnapshot(nextSnapshot);
+    const sourceRanges = sourceRangesForAction(reviewBaseSnapshot.clips, action);
+    recordAppliedAction(action, action.message, { sourceRanges });
+    const result = getReviewApplyResult(action, reviewSteps.length);
+    updateMessage(msg.id, {
+      actionStatus: 'completed',
+      actionResult: result,
+    });
+    setReviewBaseSnapshot(null);
+    setReviewPreviewActive(false);
+    setReviewResult(result);
+  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, recordAppliedAction, reviewBaseSnapshot, reviewSteps.length, updateMessage]);
 
   const handleAcceptAll = useCallback(() => {
     if (!action || !deleteRanges) return;
@@ -1703,14 +1518,14 @@ function AssistantMessage({
             </div>
           ) : (
             <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              {reviewSteps.length > 1 && activeReviewAction && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
+              {reviewableAction && reviewSteps.length > 0 && activeReviewAction && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                  {reviewInProgress
-                    ? `Previewing step ${reviewIndex + 1} of ${reviewSteps.length}. Accepted ${acceptedSteps}, skipped ${skippedSteps}.`
-                    : `Review ${reviewSteps.length} proposed changes.`}
+                  {batchReviewActive
+                    ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Accept applies all of them.`
+                    : `Review ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'} at once.`}
                 </p>
               )}
-              {anotherReviewActive && !reviewInProgress && action?.type !== 'transcribe_request' && action?.type !== 'update_ai_settings' && (
+              {anotherReviewActive && !batchReviewActive && reviewableAction && (
                 <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                   Finish the active review before opening another one.
                 </p>
@@ -1771,10 +1586,10 @@ function AssistantMessage({
                     {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
                   </button>
                 </>
-              ) : reviewInProgress ? (
+              ) : batchReviewActive ? (
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button
-                    onClick={handleApplyStep}
+                    onClick={handleApplyReviewedAction}
                     style={{
                       flex: 1,
                       padding: '5px 0',
@@ -1788,10 +1603,10 @@ function AssistantMessage({
                       fontFamily: 'var(--font-serif)',
                     }}
                   >
-                    Apply
+                    Accept all
                   </button>
                   <button
-                    onClick={handleSkipStep}
+                    onClick={cancelReview}
                     style={{
                       flex: 1,
                       padding: '5px 0',
@@ -1801,20 +1616,6 @@ function AssistantMessage({
                       border: '1px solid rgba(255,255,255,0.08)',
                       color: 'var(--fg-secondary)',
                       borderRadius: 4,
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                    }}
-                  >
-                    Skip
-                  </button>
-                  <button
-                    onClick={cancelReview}
-                    style={{
-                      padding: '5px 10px',
-                      fontSize: 12,
-                      background: 'none',
-                      border: 'none',
-                      color: 'var(--fg-muted)',
                       cursor: 'pointer',
                       fontFamily: 'var(--font-serif)',
                     }}
@@ -1837,7 +1638,7 @@ function AssistantMessage({
                     transition: 'all 0.15s',
                   }}
                 >
-                  {reviewSteps.length > 1 ? 'Start review' : 'Preview edit'}
+                  {reviewSteps.length > 1 ? 'Preview all changes' : 'Preview change'}
                 </button>
               )}
             </div>
