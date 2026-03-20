@@ -99,6 +99,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ### 9b. Markers (add_marker / add_markers / update_marker / remove_marker)
 - Create numbered markers on the timeline to tag candidate moments for review
 - Use markers when the user asks you to find, tag, or point out likely moments before cutting
+- When the user asks where/when a moment happens, treat that as a find request and return add_marker/add_markers with the best supported timestamp instead of prose alone
 - Prefer adding markers first when you found plausible events but the user still needs to review them
 - Marker placement does not need millisecond precision unless the user explicitly asks for it
 - When evidence is suggestive but not exact, place the best-guess marker anyway, keep status open, and include linkedRange/confidence so the user can review it quickly
@@ -777,6 +778,15 @@ function isLikelyContextDependentFollowUp(message: string, previousUserMessage?:
 
   if (
     previousUserMessage
+    && /\b(remove|cut|trim|delete|keep|before|after|between|from|until|up to)\b/.test(normalized)
+    && /\b(?:the|that|this|my)\s+(?:sign|gesture|moment|part|section|clip|frame|scene|shot|bit|thing|one)\b/.test(normalized)
+    && normalized.split(/\s+/).length <= 20
+  ) {
+    return true;
+  }
+
+  if (
+    previousUserMessage
     && isLikelySilenceRequest(previousUserMessage)
     && /\b(before|after|between|from|until|up to)\b/.test(normalized)
     && !isLikelySilenceRequest(normalized)
@@ -840,6 +850,12 @@ function summarizeConversationTaskState(taskState: ConversationTaskState): strin
 
   if (taskState.carriesPriorContext) {
     lines.push('Latest user message is a follow-up refinement. Preserve the unresolved constraints from the earlier task messages unless the latest message clearly replaces them.');
+    const anchorMessage = taskState.activeUserMessages[0];
+    if (anchorMessage) {
+      lines.push(
+        `If the latest message uses shorthand like "it", "them", "the sign", "that moment", or "before/after it", resolve that reference against this earlier user request first: "${sanitizeInlineUntrustedText(anchorMessage, 180)}".`,
+      );
+    }
   }
 
   if (taskState.latestAssistantActionSummary) {
@@ -1278,6 +1294,79 @@ function buildBestEffortMarkerFallback(
   return null;
 }
 
+function isLocateMomentRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(where|when)\b/.test(normalized)
+    || /\bwhere\s+(?:do|does|did|is|are|was|were|can)\b/.test(normalized)
+    || /\bwhen\s+(?:do|does|did|is|are|was|were|can)\b/.test(normalized);
+}
+
+function messagePromisesMarkerAction(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (!/\b(marker|bookmark|tag)\b/.test(normalized)) return false;
+  return /\bi(?:'ll| will)\s+(?:place|add|drop|set|put|leave)\b/.test(normalized)
+    || /\b(?:placing|added|dropped|set|put|left|tagged|marked)\b/.test(normalized);
+}
+
+function chooseNarratedMarkerTime(
+  explicitTimes: number[],
+  range: { start: number; end: number } | null,
+): number | null {
+  if (range) {
+    const interiorTime = [...explicitTimes]
+      .reverse()
+      .find((time) => time > range.start + 0.05 && time < range.end - 0.05);
+    if (typeof interiorTime === 'number' && Number.isFinite(interiorTime)) {
+      return interiorTime;
+    }
+    return (range.start + range.end) / 2;
+  }
+
+  const lastTime = explicitTimes[explicitTimes.length - 1];
+  return typeof lastTime === 'number' && Number.isFinite(lastTime) ? lastTime : null;
+}
+
+function buildCommittedMarkerFallback(params: {
+  latestUserMessage: string;
+  assistantMessage: string;
+  currentAction: EditAction | null;
+  videoDuration: number;
+}): EditAction | null {
+  if (params.currentAction && params.currentAction.type !== 'none') return null;
+
+  const shouldPlaceMarker = messagePromisesMarkerAction(params.assistantMessage)
+    || isLocateMomentRequest(params.latestUserMessage);
+  if (!shouldPlaceMarker) return null;
+
+  const narratedRanges = extractExplicitTimeRanges(params.assistantMessage, params.videoDuration);
+  const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
+  const explicitTimes = extractExplicitTimelineReferences(params.assistantMessage);
+  const timelineTime = chooseNarratedMarkerTime(explicitTimes, narratedRange);
+  if (timelineTime === null) return null;
+
+  return {
+    type: 'add_marker',
+    marker: {
+      timelineTime,
+      label: buildMarkerLabelFromQuery(params.latestUserMessage),
+      createdBy: 'ai',
+      status: 'open',
+      linkedRange: narratedRange
+        ? {
+            startTime: narratedRange.start,
+            endTime: narratedRange.end,
+          }
+        : undefined,
+      confidence: narratedRange ? 0.68 : 0.6,
+      note: params.latestUserMessage,
+    },
+    message: messagePromisesMarkerAction(params.assistantMessage)
+      ? 'Placed a marker for review.'
+      : 'Tagged the likely moment for review.',
+  };
+}
+
 function parseRetryAfterSeconds(value: string | null | undefined): number | null {
   if (!value) return null;
   const numeric = Number(value);
@@ -1612,13 +1701,26 @@ Honor these defaults unless the user explicitly asks for something different in 
       validateEditAction(parsedAction, validationContext),
       validationContext.videoDuration,
     );
+    const committedMarkerFallback = validateEditAction(
+      buildCommittedMarkerFallback({
+        latestUserMessage: effectiveLatestUserMessage,
+        assistantMessage: message,
+        currentAction: action,
+        videoDuration: validationContext.videoDuration,
+      }),
+      validationContext,
+    );
     const fallbackMarkerAction = validateEditAction(
-      buildBestEffortMarkerFallback(effectiveLatestUserMessage, action, priorVisualSearch),
+      buildBestEffortMarkerFallback(
+        effectiveLatestUserMessage,
+        committedMarkerFallback ?? action,
+        priorVisualSearch,
+      ),
       validationContext,
     );
     return NextResponse.json({
-      message: fallbackMarkerAction?.message ?? message,
-      action: fallbackMarkerAction ?? action,
+      message: fallbackMarkerAction?.message ?? committedMarkerFallback?.message ?? message,
+      action: fallbackMarkerAction ?? committedMarkerFallback ?? action,
     });
   } catch (err) {
     const upstreamErrorResponse = buildUpstreamErrorResponse(err);

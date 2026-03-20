@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
-const client = new Anthropic();
-const FRAME_DESCRIPTION_MODEL = process.env.ANTHROPIC_FRAME_DESCRIPTION_MODEL ?? 'claude-haiku-4-5-20251001';
+const FRAME_DESCRIPTION_MODEL = process.env.OPENAI_FRAME_DESCRIPTION_MODEL?.trim() || 'gpt-4o-mini';
 
 type FrameRequest = {
   image: string;
@@ -48,6 +47,14 @@ function parseDescriptions(text: string): FrameDescription[] | null {
   return null;
 }
 
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('Frame description is not configured. Missing OPENAI_API_KEY.');
+  }
+  return new OpenAI({ apiKey });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const csrfError = enforceSameOrigin(req);
@@ -84,35 +91,38 @@ export async function POST(req: NextRequest) {
       return buildBetaLimitExceededResponse('frame_descriptions', usage);
     }
 
-    const content: Anthropic.ContentBlockParam[] = [
-      {
-        type: 'text',
-        text:
-          'Describe each video frame in one short sentence for retrieval. ' +
-          'Focus on visible subjects, actions, text on screen, scene changes, and standout objects. ' +
-          'Do not speculate beyond what is visible. ' +
-          'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
-      },
-    ];
+    const input = [{
+      role: 'user' as const,
+      content: [
+        {
+          type: 'input_text' as const,
+          text:
+            'Describe each video frame in one short sentence for retrieval. ' +
+            'Focus on visible subjects, actions, text on screen, scene changes, and standout objects. ' +
+            'Do not speculate beyond what is visible. ' +
+            'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
+        },
+        ...frames.flatMap((frame, index) => ([
+          {
+            type: 'input_text' as const,
+            text: `Frame ${index}: timeline ${frame.timelineTime.toFixed(2)}s, source ${frame.sourceTime.toFixed(2)}s.`,
+          },
+          {
+            type: 'input_image' as const,
+            image_url: `data:image/jpeg;base64,${frame.image}`,
+            detail: 'auto' as const,
+          },
+        ])),
+      ],
+    }];
 
-    frames.forEach((frame, index) => {
-      content.push({
-        type: 'text',
-        text: `Frame ${index}: timeline ${frame.timelineTime.toFixed(2)}s, source ${frame.sourceTime.toFixed(2)}s.`,
-      });
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: 'image/jpeg', data: frame.image },
-      });
-    });
-
-    const response = await client.messages.create({
+    const response = await getOpenAIClient().responses.create({
       model: FRAME_DESCRIPTION_MODEL,
-      max_tokens: 1800,
-      messages: [{ role: 'user', content }],
+      input,
+      max_output_tokens: 1800,
     });
 
-    const rawText = response.content.find(block => block.type === 'text')?.text ?? '';
+    const rawText = response.output_text ?? '';
     const parsed = parseDescriptions(rawText);
 
     if (!parsed) {
