@@ -21,12 +21,6 @@ const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const DEFAULT_DENSE_MAX_SPACING_SECONDS = 1;
-const AGENT_MENU_ITEMS = [
-  { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
-  { id: 'highlights', label: 'Highlights Assistant', status: 'coming_soon' as const },
-  { id: 'story', label: 'Story Assistant', status: 'coming_soon' as const },
-  { id: 'sound', label: 'Sound Assistant', status: 'coming_soon' as const },
-];
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -2115,7 +2109,6 @@ function EmptyState({
 // ─── Main sidebar ──────────────────────────────────────────────────────────────
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
-  const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
   const [activeMarkerMention, setActiveMarkerMention] = useState<ActiveMarkerMention | null>(null);
   const [highlightedMarkerIndex, setHighlightedMarkerIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -2124,7 +2117,6 @@ export default function ChatSidebar() {
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
   const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
-  const agentMenuRef = useRef<HTMLDivElement>(null);
   const syncingTaggedMarkersRef = useRef(false);
   const previousTaggedMarkerIdsRef = useRef<string[]>([]);
 
@@ -2268,17 +2260,6 @@ export default function ChatSidebar() {
   useEffect(() => {
     setHighlightedMarkerIndex(0);
   }, [activeMarkerMention?.query, markerSuggestions.length]);
-
-  useEffect(() => {
-    if (!isAgentMenuOpen) return;
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!agentMenuRef.current?.contains(event.target as Node)) {
-        setIsAgentMenuOpen(false);
-      }
-    };
-    window.addEventListener('mousedown', handlePointerDown);
-    return () => window.removeEventListener('mousedown', handlePointerDown);
-  }, [isAgentMenuOpen]);
 
   // Source overview indexing runs only when a source is missing canonical frame data.
   useEffect(() => {
@@ -3137,86 +3118,10 @@ export default function ChatSidebar() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <AutocutMark size={24} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
-              Cut Agent
+              Auto
             </span>
-            <div ref={agentMenuRef} style={{ position: 'relative' }}>
-              <button
-                onClick={() => setIsAgentMenuOpen((open) => !open)}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '4px 8px',
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  borderRadius: 999,
-                  color: 'var(--fg-secondary)',
-                  fontSize: 10,
-                  fontFamily: 'var(--font-serif)',
-                  cursor: 'pointer',
-                }}
-              >
-                <span>Agents</span>
-                <svg
-                  width="10"
-                  height="10"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  style={{ transform: isAgentMenuOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }}
-                >
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-              {isAgentMenuOpen && (
-                <div style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 8px)',
-                  right: 0,
-                  width: 210,
-                  maxWidth: 'calc(100vw - 32px)',
-                  padding: 6,
-                  borderRadius: 10,
-                  background: 'rgba(14,14,16,0.98)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  boxShadow: '0 18px 30px rgba(0,0,0,0.28)',
-                  zIndex: 20,
-                }}>
-                  {AGENT_MENU_ITEMS.map((agent) => {
-                    const active = agent.status === 'active';
-                    return (
-                      <div
-                        key={agent.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          gap: 12,
-                          padding: '9px 10px',
-                          borderRadius: 8,
-                          background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
-                          color: active ? 'var(--fg-primary)' : 'rgba(255,255,255,0.38)',
-                        }}
-                      >
-                        <span style={{ fontSize: 11, fontFamily: 'var(--font-serif)', fontWeight: active ? 600 : 500 }}>
-                          {agent.label}
-                        </span>
-                        <span style={{
-                          fontSize: 10,
-                          fontFamily: 'var(--font-serif)',
-                          color: active ? 'var(--accent-strong)' : 'rgba(255,255,255,0.34)',
-                        }}>
-                          {active ? 'Available now' : 'In progress'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
             <button
               type="button"
               onClick={handleClearChat}
