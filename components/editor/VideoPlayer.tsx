@@ -8,6 +8,7 @@ import {
 } from '@/lib/playbackEngine';
 import { buildCaptionCues, getCaptionCueDisplay } from '@/lib/timelineUtils';
 import type { RenderTimelineEntry, ResolvedTransitionBoundary, VideoClip } from '@/lib/types';
+import { resolveProjectSources } from '@/lib/sourceMedia';
 
 export interface VideoPlayerHandle {
   seekTo: (timelineTime: number) => void;
@@ -123,6 +124,16 @@ function getTransitionMix(boundary: ResolvedTransitionBoundary, timelineTime: nu
   };
 }
 
+function ensureVideoElementSource(video: HTMLVideoElement, nextUrl: string) {
+  if (!nextUrl) return;
+  const currentUrl = video.currentSrc || video.src;
+  const normalizedCurrent = currentUrl ? new URL(currentUrl, window.location.href).href : '';
+  const normalizedNext = new URL(nextUrl, window.location.href).href;
+  if (normalizedCurrent === normalizedNext) return;
+  video.src = nextUrl;
+  video.load();
+}
+
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
@@ -137,12 +148,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoFrameRequestRef = useRef<number | null>(null);
   const playbackTickRef = useRef<() => void>(() => {});
 
-  const setVideoDuration = useEditorStore((s) => s.setVideoDuration);
+  const setSourceDuration = useEditorStore((s) => s.setSourceDuration);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const setPlaybackActive = useEditorStore((s) => s.setPlaybackActive);
   const requestedSeekTime = useEditorStore((s) => s.requestedSeekTime);
   const clearRequestedSeek = useEditorStore((s) => s.clearRequestedSeek);
+  const sources = useEditorStore((s) => s.sources);
+  const sourceRuntimeById = useEditorStore((s) => s.sourceRuntimeById);
   const videoUrl = useEditorStore((s) => s.videoUrl);
+  const processingVideoUrl = useEditorStore((s) => s.processingVideoUrl);
+  const videoFile = useEditorStore((s) => s.videoFile);
+  const videoData = useEditorStore((s) => s.videoData);
   const currentTime = useEditorStore((s) => s.currentTime);
   const videoDuration = useEditorStore((s) => s.videoDuration);
   const pendingDeleteRanges = useEditorStore((s) => s.pendingDeleteRanges);
@@ -160,6 +176,18 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   ));
 
   const clipById = useMemo(() => new Map(clips.map((clip) => [clip.id, clip])), [clips]);
+  const resolvedSources = useMemo(() => resolveProjectSources({
+    sources,
+    runtimeBySourceId: sourceRuntimeById,
+    primaryFallback: {
+      videoData,
+      videoFile,
+      videoUrl,
+      processingVideoUrl,
+      videoDuration,
+    },
+  }), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
+  const sourceById = useMemo(() => new Map(resolvedSources.map((source) => [source.sourceId, source])), [resolvedSources]);
   const renderTimeline = useMemo(() => buildRenderTimeline(clips, transitions), [clips, transitions]);
   const totalTimelineDuration = renderTimeline.length > 0
     ? renderTimeline[renderTimeline.length - 1].timelineEnd
@@ -175,6 +203,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const incomingEntry = activeEntries[1];
     return incomingEntry?.transitionIn ?? null;
   }, [currentTime, renderTimeline]);
+  const activeEntriesAtCurrentTime = useMemo(
+    () => findRenderEntriesAtTime(renderTimeline, currentTime),
+    [currentTime, renderTimeline],
+  );
+  const primaryLayerSourceId = activeEntriesAtCurrentTime[0]?.sourceId ?? renderTimeline[0]?.sourceId ?? null;
+  const secondaryLayerSourceId = activeEntriesAtCurrentTime[1]?.sourceId ?? null;
+  const primaryLayerSourceUrl = primaryLayerSourceId ? (sourceById.get(primaryLayerSourceId)?.playerUrl ?? '') : '';
+  const secondaryLayerSourceUrl = secondaryLayerSourceId ? (sourceById.get(secondaryLayerSourceId)?.playerUrl ?? '') : '';
 
   const transitionMix = useMemo(
     () => currentTransition ? getTransitionMix(currentTransition, currentTime) : null,
@@ -246,7 +282,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (!primaryEntry) return;
 
     const primaryClip = clipById.get(primaryEntry.clipId);
+    const primarySource = sourceById.get(primaryEntry.sourceId);
     if (!primaryClip) return;
+    if (primarySource?.playerUrl) {
+      ensureVideoElementSource(primaryVideo, primarySource.playerUrl);
+    }
 
     const primarySourceTime = getEntrySourceTime(primaryEntry, timelineTime);
     if (Math.abs(primaryVideo.currentTime - primarySourceTime) > SEEK_EPSILON) {
@@ -262,12 +302,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const incomingEntry = activeEntries[1];
     const boundary = incomingEntry?.transitionIn;
     const incomingClip = incomingEntry ? clipById.get(incomingEntry.clipId) : null;
+    const incomingSource = incomingEntry ? sourceById.get(incomingEntry.sourceId) : null;
     const secondaryVideo = secondaryVideoRef.current;
 
     if (!boundary || !incomingEntry || !incomingClip || !secondaryVideo) {
       applyClipEffects(primaryVideo, primaryClip, 1);
       pauseSecondaryVideo();
       return;
+    }
+
+    if (incomingSource?.playerUrl) {
+      ensureVideoElementSource(secondaryVideo, incomingSource.playerUrl);
     }
 
     const incomingSourceTime = getEntrySourceTime(incomingEntry, timelineTime);
@@ -289,7 +334,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     } else {
       secondaryVideo.pause();
     }
-  }, [applyClipEffects, clipById, pauseSecondaryVideo, renderTimeline, videoRef]);
+  }, [applyClipEffects, clipById, pauseSecondaryVideo, renderTimeline, sourceById, videoRef]);
 
   const seekToTimelineTime = useCallback((timelineTime: number) => {
     if (renderTimeline.length === 0) return;
@@ -515,7 +560,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         >
           <video
             ref={videoRef}
-            src={videoUrl}
+            src={primaryLayerSourceUrl}
             style={{
               position: 'absolute',
               inset: 0,
@@ -528,7 +573,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
               setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
-              setVideoDuration(el.duration);
+              if (primaryLayerSourceId) {
+                setSourceDuration(primaryLayerSourceId, el.duration);
+              }
               setIsVideoReady(el.readyState >= 2);
               seekToTimelineTime(currentTimeRef.current);
             }}
@@ -543,7 +590,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
           <video
             ref={secondaryVideoRef}
-            src={videoUrl}
+            src={secondaryLayerSourceUrl}
             style={{
               position: 'absolute',
               inset: 0,
@@ -558,6 +605,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             playsInline
             preload="auto"
             crossOrigin="anonymous"
+            onLoadedMetadata={(event) => {
+              if (secondaryLayerSourceId) {
+                setSourceDuration(secondaryLayerSourceId, event.currentTarget.duration);
+              }
+            }}
           />
 
           {transitionMix && transitionMix.blackOpacity > 0 && (

@@ -5,6 +5,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { buildCaptionCues, getCaptionCueDisplay, invertSegments } from './timelineUtils';
 import { normalizeTransitionEntries } from './playbackEngine';
 import { CaptionCue, CaptionEntry, TransitionEntry, VideoClip } from './types';
+import { MAIN_SOURCE_ID } from './sourceUtils';
 
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<void> | null = null;
@@ -248,6 +249,7 @@ function mergeAdjacentCopyClips(clips: VideoClip[]): VideoClip[] {
       last
       && isPlainCutClip(last)
       && isPlainCutClip(clip)
+      && last.sourceId === clip.sourceId
       && Math.abs((last.sourceStart + last.sourceDuration) - clip.sourceStart) < 0.001
     ) {
       last.sourceDuration += clip.sourceDuration;
@@ -565,7 +567,7 @@ export async function cutSegments({
 }
 
 export interface ExportClipsOptions {
-  source: Uint8Array | File | string;
+  sourcesById: Record<string, Uint8Array | File | string | null | undefined>;
   clips: VideoClip[];
   captions?: CaptionEntry[];
   transitions?: TransitionEntry[];
@@ -575,7 +577,7 @@ export interface ExportClipsOptions {
 }
 
 export async function exportClips({
-  source,
+  sourcesById,
   clips,
   captions = [],
   transitions = [],
@@ -597,6 +599,14 @@ export async function exportClips({
   });
   const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0;
 
+  const getSourceInput = (sourceId: string) => {
+    const source = sourcesById[sourceId];
+    if (!source) {
+      throw new Error(`Missing media for source ${sourceId}.`);
+    }
+    return source;
+  };
+
   try {
     onStage?.('Loading FFmpeg…');
     const ffmpeg = await getFFmpeg((progress) => {
@@ -607,12 +617,18 @@ export async function exportClips({
 
     if (!requiresFullRender && clips.every(isPlainCutClip)) {
       const mergedClips = mergeAdjacentCopyClips(clips);
-      const inputName = 'input_export_fast.mp4';
+      const inputNameBySourceId = new Map<string, string>();
+      const uniqueSourceIds = Array.from(new Set(mergedClips.map((clip) => clip.sourceId)));
 
       onStage?.('Reading source media…');
-      const inputData = await readMediaInput(source);
-      job.throwIfCancelled();
-      await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+      for (let index = 0; index < uniqueSourceIds.length; index += 1) {
+        const sourceId = uniqueSourceIds[index];
+        const inputName = `input_export_fast_${index}.mp4`;
+        const inputData = await readMediaInput(getSourceInput(sourceId));
+        job.throwIfCancelled();
+        await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+        inputNameBySourceId.set(sourceId, inputName);
+      }
       reportOverallProgress(15);
 
       const segFiles: string[] = [];
@@ -625,6 +641,10 @@ export async function exportClips({
         phaseStart = 15 + (segmentSpan * index);
         phaseSpan = segmentSpan;
         onStage?.(`Fast exporting clip ${index + 1} of ${mergedClips.length}…`);
+        const inputName = inputNameBySourceId.get(clip.sourceId);
+        if (!inputName) {
+          throw new Error(`Missing input for source ${clip.sourceId}.`);
+        }
         await execOrThrow(ffmpeg, [
           '-ss', String(clip.sourceStart),
           '-t', String(clip.sourceDuration),
@@ -670,15 +690,24 @@ export async function exportClips({
     }
 
     onStage?.('Reading source media…');
-    const inputName = 'input_export.mp4';
-    const [inputData, dimensions] = await Promise.all([
-      readMediaInput(source),
-      probeMediaInput(source).catch(() => ({ width: 0, height: 0 })),
-    ]);
-    job.throwIfCancelled();
-    await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+    const uniqueSourceIds = Array.from(new Set(clips.map((clip) => clip.sourceId)));
+    const inputNameBySourceId = new Map<string, string>();
+    for (let index = 0; index < uniqueSourceIds.length; index += 1) {
+      const sourceId = uniqueSourceIds[index];
+      const inputName = `input_export_${index}.mp4`;
+      const inputData = await readMediaInput(getSourceInput(sourceId));
+      job.throwIfCancelled();
+      await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+      inputNameBySourceId.set(sourceId, inputName);
+    }
     reportOverallProgress(15);
 
+    const dimensionProbeSourceId = sourcesById[MAIN_SOURCE_ID]
+      ? MAIN_SOURCE_ID
+      : clips[0]?.sourceId;
+    const dimensions = dimensionProbeSourceId
+      ? await probeMediaInput(getSourceInput(dimensionProbeSourceId)).catch(() => ({ width: 0, height: 0 }))
+      : { width: 0, height: 0 };
     const targetWidth = toEvenDimension(dimensions.width || 1280, 1280);
     const targetHeight = toEvenDimension(dimensions.height || 720, 720);
 
@@ -689,6 +718,10 @@ export async function exportClips({
       const transitionByClipId = new Map(normalizedTransitions.map((transition) => [transition.afterClipId, transition]));
 
       for (const clip of clips) {
+        const inputName = inputNameBySourceId.get(clip.sourceId);
+        if (!inputName) {
+          throw new Error(`Missing input for source ${clip.sourceId}.`);
+        }
         args.push('-ss', String(clip.sourceStart), '-t', String(clip.sourceDuration), '-i', inputName);
       }
 
@@ -776,6 +809,10 @@ export async function exportClips({
         job.throwIfCancelled();
         const clip = clips[i];
         const segName = `export_seg${i}.mp4`;
+        const inputName = inputNameBySourceId.get(clip.sourceId);
+        if (!inputName) {
+          throw new Error(`Missing input for source ${clip.sourceId}.`);
+        }
         const args: string[] = [
           '-ss', String(clip.sourceStart),
           '-t', String(clip.sourceDuration),

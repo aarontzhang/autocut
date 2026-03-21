@@ -33,6 +33,7 @@ export function useAutoSave() {
   const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const transcriptError = useEditorStore(s => s.transcriptError);
+  const sources = useEditorStore(s => s.sources);
   const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
@@ -69,6 +70,7 @@ export function useAutoSave() {
           backgroundTranscript: state.backgroundTranscript,
           transcriptStatus: state.transcriptStatus,
           transcriptError: state.transcriptError,
+          sources: state.sources,
           sourceTranscriptCaptions: state.sourceTranscriptCaptions,
           sourceOverviewFrames: (state.sourceOverviewFrames ?? [])
             .filter(frame => !!frame.description?.trim() || !!frame.image)
@@ -95,5 +97,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, transcriptError, sourceTranscriptCaptions, sourceOverviewFrames, sourceIndexFreshBySourceId, sourceIndex, videoDuration, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, transcriptError, sources, sourceTranscriptCaptions, sourceOverviewFrames, sourceIndexFreshBySourceId, sourceIndex, videoDuration, currentProjectId, setSaveStatus]);
 }

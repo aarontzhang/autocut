@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode, RefObject, MutableRefObject } from 'reac
 import { useEditorStore } from '@/lib/useEditorStore';
 import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
 import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 
@@ -22,11 +23,13 @@ type PlayheadDragInfo = {
 interface TimelineProps {
   videoRef: RefObject<HTMLVideoElement | null>;
   playerRef?: RefObject<VideoPlayerHandle | null>;
+  onImportSources?: (files: File[], insertionMode: 'insert', insertAtTime: number) => void | Promise<void>;
 }
 
 export default function Timeline({
   videoRef,
   playerRef,
+  onImportSources,
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean } | null>(null);
@@ -52,6 +55,7 @@ export default function Timeline({
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
+  const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -196,6 +200,23 @@ export default function Timeline({
     if (panRef.current?.moved) return;
     seekToTimelineTime(pxToTimelineTime(clientX, containerEl));
   }, [pxToTimelineTime, seekToTimelineTime]);
+
+  const handleTrackDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    const container = scrollRef.current;
+    if (!container) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const timelineTime = pxToTimelineTime(event.clientX, container);
+    const sourceId = event.dataTransfer.getData('application/x-autocut-source-id');
+    if (sourceId) {
+      insertClipFromSource(sourceId, timelineTime);
+      return;
+    }
+    const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith('video/'));
+    if (files.length > 0 && onImportSources) {
+      void onImportSources(files, 'insert', timelineTime);
+    }
+  }, [insertClipFromSource, onImportSources, pxToTimelineTime]);
 
   const scrubPlayhead = useCallback((clientX: number, dragInfo: PlayheadDragInfo) => {
     const el = scrollRef.current;
@@ -470,7 +491,16 @@ export default function Timeline({
             })}
           </div>
 
-          <TrackRow height={TRACK_HEIGHT} onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}>
+          <TrackRow
+            height={TRACK_HEIGHT}
+            onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}
+            onDrop={handleTrackDrop}
+            onDragOver={(event) => {
+              if (Array.from(event.dataTransfer.types).includes('application/x-autocut-source-id') || event.dataTransfer.files.length > 0) {
+                event.preventDefault();
+              }
+            }}
+          >
             {videoDuration > 0 && schedule.map((entry, index) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;
@@ -500,11 +530,17 @@ export default function Timeline({
               if (!clip) return null;
               const clipLeft = tPx(entry.timelineStart);
               const clipWidth = tPx(entry.timelineEnd) - clipLeft;
-              const startFrac = clip.sourceStart / videoDuration;
-              const endFrac = (clip.sourceStart + clip.sourceDuration) / videoDuration;
-              const startBar = Math.floor(startFrac * waveform.length);
-              const endBar = Math.ceil(endFrac * waveform.length);
-              const clipWaveform = waveform.slice(startBar, endBar);
+              const clipWaveform = clip.sourceId === MAIN_SOURCE_ID
+                ? (() => {
+                    const startFrac = clip.sourceStart / videoDuration;
+                    const endFrac = (clip.sourceStart + clip.sourceDuration) / videoDuration;
+                    const startBar = Math.floor(startFrac * waveform.length);
+                    const endBar = Math.ceil(endFrac * waveform.length);
+                    return waveform.slice(startBar, endBar);
+                  })()
+                : Array.from({ length: Math.max(12, Math.floor(Math.max(24, clipWidth) / 6)) }, (_, index) => (
+                    0.35 + ((index % 5) / 10)
+                  ));
               const isClipSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
               return (
                 <div
@@ -735,9 +771,11 @@ const zoomButtonStyle: CSSProperties = {
   justifyContent: 'center',
 };
 
-function TrackRow({ height, onSeek, children }: {
+function TrackRow({ height, onSeek, onDrop, onDragOver, children }: {
   height: number;
   onSeek: (e: React.MouseEvent) => void;
+  onDrop?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragOver?: (e: React.DragEvent<HTMLDivElement>) => void;
   children: ReactNode;
 }) {
   return (
@@ -751,6 +789,8 @@ function TrackRow({ height, onSeek, children }: {
         overflow: 'hidden',
       }}
       onClick={onSeek}
+      onDrop={onDrop}
+      onDragOver={onDragOver}
     >
       {children}
     </div>

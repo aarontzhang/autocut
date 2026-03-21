@@ -16,15 +16,10 @@ import { createSignedUrls, uploadProjectMedia } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
+import { resolvePrimaryProjectSource } from '@/lib/sourceMedia';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
-const MULTI_FILE_NOTICE = 'Capped out at one video for now. Multi-file support coming soon.';
-const BLOB_URL_PREFIX = 'blob:';
-
-function isBlobUrl(url: string | undefined | null) {
-  return Boolean(url && url.startsWith(BLOB_URL_PREFIX));
-}
 
 export default function EditorLayout({ projectId }: { projectId?: string | null } = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -96,12 +91,15 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
-  const setProjectVideoFile = useEditorStore(s => s.setProjectVideoFile);
+  const sources = useEditorStore(s => s.sources);
+  const sourceRuntimeById = useEditorStore(s => s.sourceRuntimeById);
+  const importSourceDrafts = useEditorStore(s => s.importSources);
+  const updateSource = useEditorStore(s => s.updateSource);
+  const updateSourceRuntime = useEditorStore(s => s.updateSourceRuntime);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
   const deleteSelectedItem = useEditorStore(s => s.deleteSelectedItem);
   const videoDuration = useEditorStore(s => s.videoDuration);
-  const setVideoDuration = useEditorStore(s => s.setVideoDuration);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
@@ -113,9 +111,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const resetEditor = useEditorStore(s => s.resetEditor);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
-  const setStoragePath = useEditorStore(s => s.setStoragePath);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
-  const storagePath = useEditorStore(s => s.storagePath);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
 
@@ -123,6 +119,17 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const sourceIndexRes = await fetch(`/api/projects/${targetProjectId}/source-index`, { cache: 'no-store' });
     if (!sourceIndexRes.ok) return null;
     const sourceIndexData = await sourceIndexRes.json();
+    if (Array.isArray(sourceIndexData?.sources)) {
+      for (const source of sourceIndexData.sources) {
+        if (typeof source?.id !== 'string') continue;
+        updateSource(source.id, {
+          storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
+          assetId: typeof source.assetId === 'string' ? source.assetId : null,
+          duration: typeof source.duration === 'number' ? source.duration : undefined,
+          status: source.status,
+        });
+      }
+    }
     hydrateSourceIndex({
       sourceTranscriptCaptions: Array.isArray(sourceIndexData?.sourceTranscriptCaptions)
         ? sourceIndexData.sourceTranscriptCaptions
@@ -134,11 +141,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       analysis: sourceIndexData?.analysis ?? null,
     });
     return sourceIndexData;
-  }, [hydrateSourceIndex]);
+  }, [hydrateSourceIndex, updateSource]);
 
   useAutoSave();
 
-  const hasMainMedia = Boolean(videoFile || videoUrl || storagePath);
+  const hasSources = sources.length > 0;
 
   const handleStorageUploadSuccess = useCallback(() => {
     setStorageNotice(null);
@@ -150,28 +157,22 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     setStorageNotice(message);
   }, []);
 
-  const showSingleSourceNotice = useCallback(() => {
-    setStorageNotice(MULTI_FILE_NOTICE);
-  }, []);
-
-  const refreshSignedMediaUrl = useCallback(async (targetProjectId: string) => {
+  const refreshSignedMediaUrls = useCallback(async (targetProjectId: string) => {
     const state = useEditorStore.getState();
-    if (state.currentProjectId !== targetProjectId || !state.storagePath) return;
-    const signedPaths = await createSignedUrls([state.storagePath]);
-    const processingVideoUrl = signedPaths.get(state.storagePath) ?? '';
-    const nextUrl = `/api/projects/${targetProjectId}/media`;
+    if (state.currentProjectId !== targetProjectId) return;
+    const sourcesWithStorage = state.sources.filter((source) => source.storagePath);
+    if (sourcesWithStorage.length === 0) return;
 
-    useEditorStore.setState((currentState) => {
-      if (currentState.currentProjectId !== targetProjectId || isBlobUrl(currentState.videoUrl)) {
-        return currentState;
-      }
-      return {
-        videoUrl: nextUrl,
-        processingVideoUrl: processingVideoUrl || currentState.processingVideoUrl,
-      };
-    });
+    const signedPaths = await createSignedUrls(sourcesWithStorage.map((source) => source.storagePath!));
+    for (const source of sourcesWithStorage) {
+      const processingUrl = signedPaths.get(source.storagePath!) ?? '';
+      updateSourceRuntime(source.id, {
+        playerUrl: `/api/projects/${targetProjectId}/media?sourceId=${encodeURIComponent(source.id)}`,
+        processingUrl,
+      });
+    }
     lastSignedMediaRefreshAtRef.current = Date.now();
-  }, []);
+  }, [updateSourceRuntime]);
 
   const readVideoDuration = useCallback((sourceUrl: string) => (
     new Promise<number>((resolve) => {
@@ -223,10 +224,18 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   }, [currentTime, deleteSelectedItem, redo, setCurrentTime, undo]);
 
   useEffect(() => {
-    // Prefer a URL string over a File object so readMediaInput can cache the
-    // result across chunks instead of re-reading the entire file from disk
-    // on every 45-second segment.
-    const source = videoData ?? videoFile ?? processingVideoUrl ?? videoUrl;
+    const primarySource = resolvePrimaryProjectSource({
+      sources,
+      runtimeBySourceId: sourceRuntimeById,
+      primaryFallback: {
+        videoData,
+        videoFile,
+        videoUrl,
+        processingVideoUrl,
+        videoDuration,
+      },
+    });
+    const source = primarySource?.source ?? null;
     const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
     if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || transcriptStatus === 'error' || document.hidden || playbackActive) {
       return;
@@ -258,7 +267,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -282,9 +291,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           storagePath: data.video_path ?? null,
           videoFilename: data.video_filename ?? null,
           duration: typeof data.duration === 'number' ? data.duration : undefined,
+          sources: Array.isArray(data.sources) ? data.sources : undefined,
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
         try {
+          await refreshSignedMediaUrls(projectId);
           const sourceIndexData = await refreshSourceIndex(projectId);
           if (projectLoadSequenceRef.current !== loadSequence || !sourceIndexData) {
             return;
@@ -301,7 +312,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         }
       }
     })();
-  }, [loadProject, projectId, refreshSourceIndex, resetEditor]);
+  }, [loadProject, projectId, refreshSignedMediaUrls, refreshSourceIndex, resetEditor]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -358,7 +369,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       ) {
         return;
       }
-      void refreshSignedMediaUrl(projectId).catch((error) => {
+      void refreshSignedMediaUrls(projectId).catch((error) => {
         console.warn('Failed to refresh signed media URL:', error);
       });
     };
@@ -372,69 +383,96 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       window.removeEventListener('focus', maybeRefresh);
       document.removeEventListener('visibilitychange', maybeRefresh);
     };
-  }, [projectId, refreshSignedMediaUrl]);
+  }, [projectId, refreshSignedMediaUrls]);
 
-  const importMainFile = useCallback(async (file: File) => {
-    if (!file.type.startsWith('video/')) return;
-    if (hasMainMedia) {
-      showSingleSourceNotice();
-      return;
-    }
-    const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
-    if (!targetProjectId) return;
-
-    const blobUrl = URL.createObjectURL(file);
-    const duration = await readVideoDuration(blobUrl);
-    URL.revokeObjectURL(blobUrl);
-
-    if (duration > 30 * 60) {
-      setStorageNotice('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
-      return;
-    }
-
-    setProjectVideoFile(file, targetProjectId);
-    if (duration > 0) {
-      setVideoDuration(duration);
-    }
-
-    const { currentProjectId, storagePath: currentStoragePath } = useEditorStore.getState();
-    if (!currentProjectId || !user || currentStoragePath) return;
-    uploadProjectMedia(file, currentProjectId, 'main').then((path) => {
-      setStoragePath(path);
-      handleStorageUploadSuccess();
-    }).catch((error: Error) => {
-      console.warn('Background upload failed:', error.message);
-      handleStorageUploadError(error);
-    });
-  }, [handleStorageUploadError, handleStorageUploadSuccess, hasMainMedia, projectId, readVideoDuration, setProjectVideoFile, setStoragePath, setStorageNotice, setVideoDuration, showSingleSourceNotice, user]);
-
-  const importFiles = useCallback(async (files: File[]) => {
+  const importSources = useCallback(async (
+    files: File[],
+    insertionMode: 'append' | 'insert',
+    insertAtTime?: number,
+  ) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     if (videoFiles.length === 0) return;
-    if (hasMainMedia) {
-      showSingleSourceNotice();
-      return;
+    const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
+    if (!targetProjectId) return;
+    const hadSources = useEditorStore.getState().sources.length > 0;
+    const drafts: Array<{
+      file: File;
+      fileName: string;
+      duration: number;
+      runtime: {
+        file: File;
+        objectUrl: string;
+        playerUrl: string;
+        processingUrl: string;
+      };
+    }> = [];
+
+    for (const file of videoFiles) {
+      const objectUrl = URL.createObjectURL(file);
+      const duration = await readVideoDuration(objectUrl);
+      if (duration > 30 * 60) {
+        URL.revokeObjectURL(objectUrl);
+        setStorageNotice('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
+        continue;
+      }
+      drafts.push({
+        file,
+        fileName: file.name,
+        duration,
+        runtime: {
+          file,
+          objectUrl,
+          playerUrl: objectUrl,
+          processingUrl: objectUrl,
+        },
+      });
     }
-    await importMainFile(videoFiles[0]);
-    if (videoFiles.length > 1) {
-      showSingleSourceNotice();
-    }
-  }, [hasMainMedia, importMainFile, showSingleSourceNotice]);
+
+    if (drafts.length === 0) return;
+
+    const addedSources = importSourceDrafts(
+      drafts.map((draft) => ({
+        fileName: draft.fileName,
+        duration: draft.duration,
+        runtime: draft.runtime,
+      })),
+      {
+        shouldAppendClips: true,
+        insertAtTime: insertionMode === 'insert' ? insertAtTime : undefined,
+      },
+    );
+
+    if (!user) return;
+
+    await Promise.all(addedSources.map(async (source, index) => {
+      const draft = drafts[index];
+      const folder = !hadSources && index === 0 && source.isPrimary ? 'main' : 'sources';
+      try {
+        const uploaded = await uploadProjectMedia(draft.file, targetProjectId, folder);
+        updateSource(source.id, {
+          storagePath: uploaded.storagePath,
+          assetId: uploaded.assetId,
+          status: uploaded.assetId ? 'indexing' : 'pending',
+        });
+        handleStorageUploadSuccess();
+      } catch (error) {
+        console.warn('Background upload failed:', error);
+        updateSource(source.id, { status: 'error' });
+        handleStorageUploadError(error);
+      }
+    }));
+  }, [handleStorageUploadError, handleStorageUploadSuccess, importSourceDrafts, projectId, readVideoDuration, updateSource, user]);
 
   const handleRootDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    if (hasMainMedia) {
-      showSingleSourceNotice();
-      return;
-    }
-    void importFiles(Array.from(e.dataTransfer.files));
-  }, [hasMainMedia, importFiles, showSingleSourceNotice]);
+    void importSources(Array.from(e.dataTransfer.files), 'append');
+  }, [importSources]);
 
   const handleRootDragOver = useCallback((e: React.DragEvent) => {
-    if (!hasMainMedia) {
+    if (!hasSources) {
       e.preventDefault();
     }
-  }, [hasMainMedia]);
+  }, [hasSources]);
 
   const isActiveProjectReady = currentProjectId === projectId;
   const shouldShowProjectLoading = Boolean(projectId) && (isProjectLoading || !isActiveProjectReady);
@@ -442,8 +480,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   return (
     <div
       style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)', overflow: 'hidden' }}
-      onDrop={!hasMainMedia ? handleRootDrop : undefined}
-      onDragOver={!hasMainMedia ? handleRootDragOver : undefined}
+      onDrop={!hasSources ? handleRootDrop : undefined}
+      onDragOver={!hasSources ? handleRootDragOver : undefined}
     >
       <TopBar />
       {(storageNotice || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (
@@ -464,8 +502,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
             <div style={{ width: mediaPanelWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
               <MediaPanel
-                onImportMainFile={importMainFile}
-                canImport={!hasMainMedia}
+                onImportSources={(files) => importSources(files, 'append')}
               />
               <div
                 onMouseDown={startMediaResize}
@@ -482,9 +519,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
               {shouldShowProjectLoading
                 ? <ProjectLoadingState />
-                : hasMainMedia
+                : hasSources
                   ? <VideoPlayer ref={playerRef} videoRef={videoRef} />
-                  : <EmptyDropZone importFiles={importFiles} />
+                  : <EmptyDropZone importSources={(files) => importSources(files, 'append')} />
               }
             </div>
           </div>
@@ -504,6 +541,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               <Timeline
                 videoRef={videoRef}
                 playerRef={playerRef}
+                onImportSources={importSources}
               />
             </div>
           </div>
@@ -552,9 +590,9 @@ function ProjectLoadingState() {
 }
 
 function EmptyDropZone({
-  importFiles,
+  importSources,
 }: {
-  importFiles: (files: File[]) => void | Promise<void>;
+  importSources: (files: File[]) => void | Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -568,7 +606,7 @@ function EmptyDropZone({
           e.preventDefault();
           e.stopPropagation();
           setIsDragging(false);
-          void importFiles(Array.from(e.dataTransfer.files));
+          void importSources(Array.from(e.dataTransfer.files));
         }}
         onClick={() => inputRef.current?.click()}
         style={{
@@ -602,7 +640,7 @@ function EmptyDropZone({
         </div>
         <div style={{ textAlign: 'center' }}>
           <p style={{ fontSize: 15, fontWeight: 500, color: 'var(--fg-primary)', marginBottom: 5 }}>
-            {isDragging ? 'Drop your video' : 'Import video'}
+            {isDragging ? 'Drop your videos' : 'Import videos'}
           </p>
           <p style={{ fontSize: 13, color: 'var(--fg-secondary)' }}>Drag & drop or click to browse</p>
         </div>
@@ -621,9 +659,10 @@ function EmptyDropZone({
           ref={inputRef}
           type="file"
           accept="video/*"
+          multiple
           style={{ display: 'none' }}
           onChange={e => {
-            void importFiles(Array.from(e.target.files ?? []));
+            void importSources(Array.from(e.target.files ?? []));
             e.target.value = '';
           }}
         />

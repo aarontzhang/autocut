@@ -3,6 +3,33 @@ import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/li
 import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
+import type { ProjectSource } from '@/lib/types';
+
+function buildProjectSources(project: {
+  edit_state?: Record<string, unknown> | null;
+  video_path?: string | null;
+  video_filename?: string | null;
+}) {
+  const persistedSources = Array.isArray(project.edit_state?.sources)
+    ? project.edit_state!.sources as ProjectSource[]
+    : [];
+  if (persistedSources.length > 0) {
+    return persistedSources;
+  }
+  if (!project.video_path && !project.video_filename) {
+    return [];
+  }
+  return [{
+    id: MAIN_SOURCE_ID,
+    fileName: project.video_filename?.trim() || 'Main video',
+    storagePath: project.video_path ?? null,
+    assetId: null,
+    duration: 0,
+    status: project.video_path ? 'pending' : 'ready',
+    isPrimary: true,
+  }] satisfies ProjectSource[];
+}
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -33,6 +60,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     ...project,
     signedUrl,
     processingUrl,
+    sources: buildProjectSources(project),
   });
 }
 

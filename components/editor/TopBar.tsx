@@ -6,12 +6,16 @@ import { exportClips, isFFmpegAbortError } from '@/lib/ffmpegClient';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
+import { resolveProjectSources } from '@/lib/sourceMedia';
 
 export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
+  const videoDuration = useEditorStore(s => s.videoDuration);
+  const sources = useEditorStore(s => s.sources);
+  const sourceRuntimeById = useEditorStore(s => s.sourceRuntimeById);
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
@@ -23,13 +27,27 @@ export default function TopBar() {
   const canRedo = useEditorStore(s => s.future.length > 0);
   const { user } = useAuth();
 
-  const exportSource = videoData ?? videoFile ?? processingVideoUrl ?? videoUrl ?? null;
+  const sourcesById = Object.fromEntries(
+    resolveProjectSources({
+      sources,
+      runtimeBySourceId: sourceRuntimeById,
+      primaryFallback: {
+        videoData,
+        videoFile,
+        videoUrl,
+        processingVideoUrl,
+        videoDuration,
+      },
+    }).map((entry) => [entry.sourceId, entry.source]),
+  );
 
   const outputReady = ffmpegJob.status === 'done';
-  const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && !!exportSource;
+  const canExport = clips.length > 0
+    && ffmpegJob.status === 'idle'
+    && clips.every((clip) => !!sourcesById[clip.sourceId]);
 
   const handleExport = useCallback(async () => {
-    if (clips.length === 0 || !exportSource) return;
+    if (clips.length === 0) return;
     const abortController = new AbortController();
     const setRunningJob = (patch: Partial<{ progress: number; stage: string; isCancelling?: boolean }>) => {
       const currentJob = useEditorStore.getState().ffmpegJob;
@@ -41,7 +59,7 @@ export default function TopBar() {
     setFFmpegJob({ status: 'running', progress: 0, stage: 'Initializing…', isCancelling: false });
     try {
       const outputUrl = await exportClips({
-        source: exportSource,
+        sourcesById,
         clips,
         captions,
         transitions,
@@ -58,7 +76,7 @@ export default function TopBar() {
       const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
       setFFmpegJob({ status: 'error', message: msg || 'Unknown error' });
     }
-  }, [captions, clips, exportSource, setFFmpegJob, transitions]);
+  }, [captions, clips, setFFmpegJob, sourcesById, transitions]);
 
   return (
     <div

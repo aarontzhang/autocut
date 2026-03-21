@@ -12,6 +12,7 @@ import {
   EditAction,
   IndexedVideoFrame,
   MarkerEntry,
+  ProjectSource,
   SourceIndex,
   SourceIndexAnalysisState,
   SourceIndexState,
@@ -31,7 +32,8 @@ import {
 } from './editActionUtils';
 import { buildTranscriptContext, formatTimePrecise, projectSourceFramesToTimeline } from './timelineUtils';
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
-import { normalizeTransitionEntries } from './playbackEngine';
+import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
+import type { SourceRuntimeMediaMap } from './sourceMedia';
 
 export type { EditSnapshot } from './editActionUtils';
 
@@ -58,10 +60,21 @@ export type SelectedItem = {
 
 export type PendingDeleteRanges = { ownerId: string; ranges: Array<{ start: number; end: number }> };
 
-function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
+export type ImportedSourceDraft = {
+  id?: string;
+  fileName: string;
+  duration: number;
+  isPrimary?: boolean;
+  status?: ProjectSource['status'];
+  storagePath?: string | null;
+  assetId?: string | null;
+  runtime?: Partial<NonNullable<SourceRuntimeMediaMap[string]>>;
+};
+
+function makeClip(sourceId: string, sourceStart: number, sourceDuration: number): VideoClip {
   return {
     id: uuidv4(),
-    sourceId: MAIN_SOURCE_ID,
+    sourceId,
     sourceStart,
     sourceDuration,
     speed: 1,
@@ -72,23 +85,125 @@ function makeClip(sourceStart: number, sourceDuration: number): VideoClip {
   };
 }
 
+function createProjectSource(input: ImportedSourceDraft): ProjectSource {
+  return {
+    id: input.id ?? uuidv4(),
+    fileName: input.fileName,
+    storagePath: input.storagePath ?? null,
+    assetId: input.assetId ?? null,
+    duration: Math.max(0, input.duration),
+    status: input.status ?? 'pending',
+    isPrimary: input.isPrimary === true,
+  };
+}
+
+function normalizeProjectSource(
+  value: Partial<ProjectSource> | null | undefined,
+  fallback: {
+    id: string;
+    fileName: string;
+    duration: number;
+    isPrimary: boolean;
+    storagePath?: string | null;
+  },
+): ProjectSource {
+  const fileName = typeof value?.fileName === 'string' && value.fileName.trim().length > 0
+    ? value.fileName.trim()
+    : fallback.fileName;
+  const status = value?.status === 'pending' || value?.status === 'indexing' || value?.status === 'ready' || value?.status === 'error'
+    ? value.status
+    : (fallback.storagePath ? 'pending' : 'ready');
+
+  return {
+    id: normalizeSourceId(value?.id) ?? fallback.id,
+    fileName,
+    storagePath: typeof value?.storagePath === 'string' && value.storagePath.trim().length > 0
+      ? value.storagePath.trim()
+      : (fallback.storagePath ?? null),
+    assetId: normalizeSourceId(value?.assetId) ?? null,
+    duration: Number.isFinite(value?.duration) && value!.duration! > 0 ? Number(value!.duration) : Math.max(0, fallback.duration),
+    status,
+    isPrimary: value?.isPrimary === true || fallback.isPrimary,
+  };
+}
+
+function buildHydratedSources(input: {
+  persistedSources?: unknown[];
+  projectStoragePath?: string | null;
+  projectVideoFilename?: string | null;
+  projectDuration?: number;
+}): ProjectSource[] {
+  const persisted = Array.isArray(input.persistedSources)
+    ? input.persistedSources
+        .map((entry, index) => normalizeProjectSource(
+          (entry && typeof entry === 'object' ? entry : null) as Partial<ProjectSource> | null,
+          {
+            id: index === 0 ? MAIN_SOURCE_ID : uuidv4(),
+            fileName: index === 0
+              ? (input.projectVideoFilename?.trim() || 'Main video')
+              : `Source ${index + 1}`,
+            duration: input.projectDuration ?? 0,
+            isPrimary: index === 0,
+          },
+        ))
+        .filter((source, index, sources) => (
+          sources.findIndex((candidate) => candidate.id === source.id) === index
+        ))
+    : [];
+
+  if (persisted.length > 0) {
+    const hasPrimary = persisted.some((source) => source.isPrimary);
+    return persisted.map((source, index) => {
+      const isPrimary = source.id === MAIN_SOURCE_ID || source.isPrimary || (!hasPrimary && index === 0);
+      return {
+        ...source,
+        id: isPrimary ? MAIN_SOURCE_ID : source.id,
+        isPrimary,
+      };
+    });
+  }
+
+  if (!input.projectStoragePath && !(input.projectDuration && input.projectDuration > 0) && !input.projectVideoFilename) {
+    return [];
+  }
+
+  return [createProjectSource({
+    id: MAIN_SOURCE_ID,
+    fileName: input.projectVideoFilename?.trim() || 'Main video',
+    duration: input.projectDuration ?? 0,
+    isPrimary: true,
+    storagePath: input.projectStoragePath ?? null,
+    status: input.projectStoragePath ? 'pending' : 'ready',
+  })];
+}
+
+function getPrimarySource(sources: ProjectSource[]): ProjectSource | null {
+  return sources.find((source) => source.id === MAIN_SOURCE_ID)
+    ?? sources.find((source) => source.isPrimary)
+    ?? sources[0]
+    ?? null;
+}
+
+function getKnownSourceId(
+  value: unknown,
+  validSourceIds: Set<string>,
+  fallbackSourceId: string,
+) {
+  const sourceId = normalizeSourceId(value);
+  return sourceId && validSourceIds.has(sourceId) ? sourceId : fallbackSourceId;
+}
+
 function normalizeLoadedClip(
   clip: Partial<VideoClip> & { sourcePath?: unknown },
-  mainSourcePath?: string | null,
+  validSourceIds: Set<string>,
+  fallbackSourceId: string,
 ): VideoClip | null {
-  const clipSourceId = normalizeSourceId(clip.sourceId);
-  const clipSourcePath = typeof clip.sourcePath === 'string' ? clip.sourcePath.trim() : null;
-  const isLegacySecondarySource = (
-    (clipSourceId && clipSourceId !== MAIN_SOURCE_ID)
-    || (clipSourcePath && mainSourcePath && clipSourcePath !== mainSourcePath)
-  );
-  if (isLegacySecondarySource) return null;
   if (typeof clip.id !== 'string') return null;
   if (!Number.isFinite(clip.sourceStart) || !Number.isFinite(clip.sourceDuration)) return null;
 
   return {
     id: clip.id,
-    sourceId: MAIN_SOURCE_ID,
+    sourceId: getKnownSourceId(clip.sourceId, validSourceIds, fallbackSourceId),
     sourceStart: clip.sourceStart!,
     sourceDuration: clip.sourceDuration!,
     speed: Number.isFinite(clip.speed) && clip.speed! > 0 ? clip.speed! : 1,
@@ -99,15 +214,17 @@ function normalizeLoadedClip(
   };
 }
 
-function normalizeCaptionEntry(entry: Partial<CaptionEntry>): CaptionEntry | null {
-  const sourceId = normalizeSourceId(entry.sourceId);
-  if (sourceId && sourceId !== MAIN_SOURCE_ID) return null;
+function normalizeCaptionEntry(
+  entry: Partial<CaptionEntry>,
+  validSourceIds: Set<string>,
+  fallbackSourceId: string,
+): CaptionEntry | null {
   if (!Number.isFinite(entry.startTime) || !Number.isFinite(entry.endTime) || typeof entry.text !== 'string') {
     return null;
   }
   return {
     id: typeof entry.id === 'string' ? entry.id : undefined,
-    sourceId: sourceId ?? undefined,
+    sourceId: getKnownSourceId(entry.sourceId, validSourceIds, fallbackSourceId),
     startTime: entry.startTime!,
     endTime: entry.endTime!,
     text: entry.text!,
@@ -146,12 +263,14 @@ function normalizeTransitionState(
   );
 }
 
-function normalizeOverviewFrame(entry: Partial<SourceIndexedFrame>): SourceIndexedFrame | null {
-  const sourceId = normalizeSourceId(entry.sourceId);
-  if (sourceId && sourceId !== MAIN_SOURCE_ID) return null;
+function normalizeOverviewFrame(
+  entry: Partial<SourceIndexedFrame>,
+  validSourceIds: Set<string>,
+  fallbackSourceId: string,
+): SourceIndexedFrame | null {
   if (!Number.isFinite(entry.sourceTime)) return null;
   return {
-    sourceId: MAIN_SOURCE_ID,
+    sourceId: getKnownSourceId(entry.sourceId, validSourceIds, fallbackSourceId),
     sourceTime: entry.sourceTime!,
     description: typeof entry.description === 'string' ? entry.description : undefined,
     image: typeof entry.image === 'string' ? entry.image : undefined,
@@ -193,34 +312,51 @@ function normalizeSourceIndexAnalysisState(
 }
 
 function buildInitialSourceIndexState(
+  sources: ProjectSource[] = [],
   overrides?: SourceIndexStateMap,
 ): SourceIndexStateMap {
-  return {
-    [MAIN_SOURCE_ID]: overrides?.[MAIN_SOURCE_ID] ?? {
+  const keys = sources.length > 0 ? sources.map((source) => source.id) : [MAIN_SOURCE_ID];
+  return keys.reduce<SourceIndexStateMap>((acc, sourceId) => {
+    acc[sourceId] = overrides?.[sourceId] ?? {
       overview: false,
       transcript: false,
       version: SOURCE_INDEX_VERSION,
-    },
-  };
+    };
+    return acc;
+  }, {});
 }
 
 function patchSourceIndexState(
   current: SourceIndexStateMap,
+  sourceId: string,
   patch: Partial<SourceIndexState>,
 ): SourceIndexStateMap {
-  const existing = current[MAIN_SOURCE_ID] ?? {
+  const existing = current[sourceId] ?? {
     overview: false,
     transcript: false,
     version: SOURCE_INDEX_VERSION,
   };
   return {
     ...current,
-    [MAIN_SOURCE_ID]: {
+    [sourceId]: {
       ...existing,
       ...patch,
       version: patch.version ?? existing.version ?? SOURCE_INDEX_VERSION,
     },
   };
+}
+
+function mergeSourceIndexStateMap(
+  current: SourceIndexStateMap,
+  incoming: SourceIndexStateMap | null | undefined,
+  sources: ProjectSource[],
+): SourceIndexStateMap {
+  let next = buildInitialSourceIndexState(sources, current);
+  if (!incoming) return next;
+  for (const sourceId of Object.keys(incoming)) {
+    next = patchSourceIndexState(next, sourceId, incoming[sourceId] ?? {});
+  }
+  return next;
 }
 
 function buildDerivedIndexState(
@@ -241,6 +377,34 @@ function buildDerivedIndexState(
     projectedOverviewFrames: projectedOverviewFrames.length > 0 ? projectedOverviewFrames : null,
     timelineProjectionFresh: true,
   };
+}
+
+function replaceEntriesForSource<T extends { sourceId?: string | null }>(
+  current: T[] | null,
+  sourceId: string,
+  incoming: T[] | null,
+): T[] | null {
+  const preserved = (current ?? []).filter((entry) => normalizeSourceId(entry.sourceId) !== sourceId);
+  const merged = [...preserved, ...(incoming ?? [])];
+  return merged.length > 0 ? merged : null;
+}
+
+function replaceEntriesForSources<T extends { sourceId?: string | null }>(
+  current: T[] | null,
+  incoming: T[] | null,
+): T[] | null {
+  if (!incoming) return current;
+  const sourceIds = new Set(
+    incoming
+      .map((entry) => normalizeSourceId(entry.sourceId))
+      .filter((sourceId): sourceId is string => !!sourceId),
+  );
+  const preserved = (current ?? []).filter((entry) => {
+    const sourceId = normalizeSourceId(entry.sourceId);
+    return !sourceId || !sourceIds.has(sourceId);
+  });
+  const merged = [...preserved, ...incoming];
+  return merged.length > 0 ? merged : null;
 }
 
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
@@ -299,6 +463,9 @@ function buildBaseEditorState(input?: {
   videoName?: string;
   currentProjectId?: string | null;
   storagePath?: string | null;
+  sources?: ProjectSource[];
+  sourceRuntimeById?: SourceRuntimeMediaMap;
+  videoDuration?: number;
 }): Pick<
   EditorState,
   | 'videoFile'
@@ -307,6 +474,8 @@ function buildBaseEditorState(input?: {
   | 'videoName'
   | 'videoData'
   | 'videoDuration'
+  | 'sources'
+  | 'sourceRuntimeById'
   | 'currentTime'
   | 'requestedSeekTime'
   | 'pendingAction'
@@ -351,7 +520,9 @@ function buildBaseEditorState(input?: {
     processingVideoUrl: input?.processingVideoUrl ?? input?.videoUrl ?? '',
     videoName: input?.videoName ?? '',
     videoData: null,
-    videoDuration: 0,
+    videoDuration: input?.videoDuration ?? 0,
+    sources: input?.sources ?? [],
+    sourceRuntimeById: input?.sourceRuntimeById ?? {},
     currentTime: 0,
     requestedSeekTime: null,
     pendingAction: null,
@@ -383,7 +554,7 @@ function buildBaseEditorState(input?: {
     sourceTranscriptCaptions: null,
     sourceOverviewFrames: null,
     projectedOverviewFrames: null,
-    sourceIndexFreshBySourceId: buildInitialSourceIndexState(),
+    sourceIndexFreshBySourceId: buildInitialSourceIndexState(input?.sources),
     timelineProjectionFresh: true,
     visualSearchSession: null,
     sourceIndex: null,
@@ -399,6 +570,8 @@ interface EditorState {
   videoName: string;
   videoData: Uint8Array | null;
   videoDuration: number;
+  sources: ProjectSource[];
+  sourceRuntimeById: SourceRuntimeMediaMap;
   currentTime: number;
   requestedSeekTime: number | null;
   pendingAction: EditAction | null;
@@ -437,7 +610,17 @@ interface EditorState {
   sourceIndex: SourceIndex | null;
   sourceIndexAnalysis: SourceIndexAnalysisState | null;
   pendingDeleteRanges: PendingDeleteRanges | null;
+  importSources: (
+    sources: ImportedSourceDraft[],
+    options?: { insertAtTime?: number; shouldAppendClips?: boolean },
+  ) => ProjectSource[];
+  appendClipFromSource: (sourceId: string) => void;
+  insertClipFromSource: (sourceId: string, timelineTime: number) => void;
+  insertClipsFromSources: (sourceIds: string[], timelineTime: number) => void;
+  updateSource: (sourceId: string, patch: Partial<ProjectSource>) => void;
+  updateSourceRuntime: (sourceId: string, patch: Partial<NonNullable<SourceRuntimeMediaMap[string]>>) => void;
   setVideoFile: (file: File) => void;
+  setSourceDuration: (sourceId: string, duration: number) => void;
   setVideoDuration: (duration: number) => void;
   setCurrentTime: (time: number) => void;
   requestSeek: (time: number) => void;
@@ -496,6 +679,7 @@ interface EditorState {
       videoFrames?: unknown[];
       videoDuration?: number;
       sourceIndex?: unknown;
+      sources?: unknown[];
     },
     project: {
       projectId: string;
@@ -504,6 +688,7 @@ interface EditorState {
       storagePath: string | null;
       videoFilename?: string | null;
       duration?: number;
+      sources?: unknown[];
     }
   ) => void;
   setUploadProgress: (pct: number | null) => void;
@@ -552,6 +737,72 @@ type EditorStoreWithSnapshot = EditorState & {
   _snapshot: () => EditSnapshot;
 };
 
+function revokeSourceRuntimeUrls(sourceRuntimeById: SourceRuntimeMediaMap) {
+  Object.values(sourceRuntimeById).forEach((runtime) => {
+    if (runtime?.objectUrl) {
+      URL.revokeObjectURL(runtime.objectUrl);
+    }
+  });
+}
+
+function buildPrimaryMirrorState(
+  sources: ProjectSource[],
+  sourceRuntimeById: SourceRuntimeMediaMap,
+  currentProjectId: string | null,
+): Pick<EditorState, 'videoFile' | 'videoUrl' | 'processingVideoUrl' | 'videoName' | 'videoDuration' | 'storagePath' | 'sources' | 'sourceRuntimeById' | 'currentProjectId'> {
+  const primarySource = getPrimarySource(sources);
+  const runtime = primarySource ? sourceRuntimeById[primarySource.id] : undefined;
+  return {
+    videoFile: runtime?.file ?? null,
+    videoUrl: runtime?.objectUrl || runtime?.playerUrl || '',
+    processingVideoUrl: runtime?.processingUrl || runtime?.objectUrl || runtime?.playerUrl || '',
+    videoName: primarySource?.fileName ?? '',
+    videoDuration: primarySource?.duration ?? 0,
+    storagePath: primarySource?.storagePath ?? null,
+    sources,
+    sourceRuntimeById,
+    currentProjectId,
+  };
+}
+
+function findInsertionIndex(
+  clips: VideoClip[],
+  transitions: TransitionEntry[],
+  timelineTime: number,
+) {
+  const clipSchedule = buildClipSchedule(clips, transitions);
+  const epsilon = 1e-6;
+  for (let index = 0; index < clipSchedule.length; index += 1) {
+    const entry = clipSchedule[index];
+    if (timelineTime <= entry.timelineStart + epsilon) {
+      return index;
+    }
+  }
+  return clips.length;
+}
+
+function insertClipsAtTimelineTime(
+  clips: VideoClip[],
+  transitions: TransitionEntry[],
+  sourceIds: string[],
+  sourceById: Map<string, ProjectSource>,
+  timelineTime: number,
+): VideoClip[] {
+  const splitClips = splitClipsAtTime(clips, timelineTime);
+  const insertionIndex = findInsertionIndex(splitClips, transitions, timelineTime);
+  const insertedClips = sourceIds
+    .map((sourceId) => sourceById.get(sourceId))
+    .filter((source): source is ProjectSource => !!source && source.duration > 0)
+    .map((source) => makeClip(source.id, 0, source.duration));
+
+  if (insertedClips.length === 0) return splitClips;
+  return [
+    ...splitClips.slice(0, insertionIndex),
+    ...insertedClips,
+    ...splitClips.slice(insertionIndex),
+  ];
+}
+
 export const useEditorStore = create<EditorState>((set, get) => ({
   ...buildBaseEditorState(),
   messages: [],
@@ -568,32 +819,222 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     };
   },
 
+  importSources: (drafts, options) => {
+    if (drafts.length === 0) return [];
+
+    const currentState = get();
+    const snap = (currentState as EditorStoreWithSnapshot)._snapshot();
+    const nextSources = [...currentState.sources];
+    const nextRuntimeById: SourceRuntimeMediaMap = { ...currentState.sourceRuntimeById };
+    const addedSources: ProjectSource[] = [];
+    const hadSources = currentState.sources.length > 0;
+
+    drafts.forEach((draft, index) => {
+      const shouldBePrimary = (!hadSources && nextSources.length === 0 && index === 0) || draft.isPrimary === true;
+      const source = createProjectSource({
+        ...draft,
+        id: shouldBePrimary ? MAIN_SOURCE_ID : draft.id,
+        isPrimary: shouldBePrimary,
+        status: draft.status ?? (draft.runtime?.file ? 'pending' : 'ready'),
+      });
+      if (nextSources.some((existing) => existing.id === source.id)) {
+        return;
+      }
+      if (shouldBePrimary) {
+        for (const existing of nextSources) {
+          existing.isPrimary = false;
+        }
+      }
+      nextSources.push(source);
+      nextRuntimeById[source.id] = {
+        file: draft.runtime?.file ?? null,
+        objectUrl: draft.runtime?.objectUrl ?? '',
+        playerUrl: draft.runtime?.playerUrl ?? '',
+        processingUrl: draft.runtime?.processingUrl ?? draft.runtime?.objectUrl ?? '',
+      };
+      addedSources.push(source);
+    });
+
+    if (addedSources.length === 0) return [];
+
+    const sourceById = new Map(nextSources.map((source) => [source.id, source]));
+    const insertedSourceIds = addedSources.map((source) => source.id);
+    const shouldAppendClips = options?.shouldAppendClips !== false;
+    const nextClips = shouldAppendClips
+      ? (Number.isFinite(options?.insertAtTime)
+          ? insertClipsAtTimelineTime(currentState.clips, currentState.transitions, insertedSourceIds, sourceById, options!.insertAtTime!)
+          : [...currentState.clips, ...insertedSourceIds
+              .map((sourceId) => sourceById.get(sourceId))
+              .filter((source): source is ProjectSource => !!source && source.duration > 0)
+              .map((source) => makeClip(source.id, 0, source.duration))])
+      : currentState.clips;
+    const nextTransitions = shouldAppendClips
+      ? normalizeTransitionState(nextClips, currentState.transitions)
+      : currentState.transitions;
+    const nextSourceIndexState = buildInitialSourceIndexState(nextSources, currentState.sourceIndexFreshBySourceId);
+    const primaryMirror = buildPrimaryMirrorState(nextSources, nextRuntimeById, currentState.currentProjectId);
+
+    set((state) => ({
+      ...primaryMirror,
+      clips: nextClips,
+      transitions: nextTransitions,
+      history: shouldAppendClips && state.clips.length > 0 ? [...state.history, snap] : state.history,
+      future: shouldAppendClips ? [] : state.future,
+      markers: shouldAppendClips ? [] : state.markers,
+      taggedMarkerIds: shouldAppendClips ? [] : state.taggedMarkerIds,
+      selectedItem: shouldAppendClips && state.selectedItem?.type === 'marker' ? null : state.selectedItem,
+      sourceIndexFreshBySourceId: nextSourceIndexState,
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
+    }));
+
+    return addedSources;
+  },
+
+  appendClipFromSource: (sourceId) => {
+    const state = get();
+    const source = state.sources.find((entry) => entry.id === sourceId);
+    if (!source || source.duration <= 0) return;
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextClips = [...state.clips, makeClip(source.id, 0, source.duration)];
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: nextClips,
+      transitions: nextTransitions,
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: current.selectedItem?.type === 'marker' ? null : current.selectedItem,
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.aiSettings,
+        current.sourceTranscriptCaptions,
+        current.sourceOverviewFrames,
+      ),
+    }));
+  },
+
+  insertClipFromSource: (sourceId, timelineTime) => {
+    get().insertClipsFromSources([sourceId], timelineTime);
+  },
+
+  insertClipsFromSources: (sourceIds, timelineTime) => {
+    const state = get();
+    const sourceById = new Map(state.sources.map((source) => [source.id, source]));
+    const nextClips = insertClipsAtTimelineTime(state.clips, state.transitions, sourceIds, sourceById, timelineTime);
+    if (nextClips === state.clips) return;
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: nextClips,
+      transitions: nextTransitions,
+      markers: [],
+      taggedMarkerIds: [],
+      selectedItem: current.selectedItem?.type === 'marker' ? null : current.selectedItem,
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.aiSettings,
+        current.sourceTranscriptCaptions,
+        current.sourceOverviewFrames,
+      ),
+    }));
+  },
+
+  updateSource: (sourceId, patch) => {
+    const state = get();
+    const normalizedPatch = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined),
+    ) as Partial<ProjectSource>;
+    const nextSources = state.sources.map((source) => (
+      source.id === sourceId
+        ? { ...source, ...normalizedPatch, id: source.id, isPrimary: normalizedPatch.isPrimary ?? source.isPrimary }
+        : { ...source, isPrimary: normalizedPatch.isPrimary === true ? false : source.isPrimary }
+    ));
+    const primaryMirror = buildPrimaryMirrorState(nextSources, state.sourceRuntimeById, state.currentProjectId);
+    set({
+      ...primaryMirror,
+      sourceIndexFreshBySourceId: mergeSourceIndexStateMap(state.sourceIndexFreshBySourceId, null, nextSources),
+    });
+  },
+
+  updateSourceRuntime: (sourceId, patch) => {
+    const state = get();
+    const previousRuntime = state.sourceRuntimeById[sourceId];
+    if (patch.objectUrl && previousRuntime?.objectUrl && previousRuntime.objectUrl !== patch.objectUrl) {
+      URL.revokeObjectURL(previousRuntime.objectUrl);
+    }
+    const nextRuntimeById: SourceRuntimeMediaMap = {
+      ...state.sourceRuntimeById,
+      [sourceId]: {
+        file: patch.file ?? previousRuntime?.file ?? null,
+        objectUrl: patch.objectUrl ?? previousRuntime?.objectUrl ?? '',
+        playerUrl: patch.playerUrl ?? previousRuntime?.playerUrl ?? '',
+        processingUrl: patch.processingUrl ?? previousRuntime?.processingUrl ?? '',
+      },
+    };
+    const primaryMirror = buildPrimaryMirrorState(state.sources, nextRuntimeById, state.currentProjectId);
+    set(primaryMirror);
+  },
+
   setVideoFile: (file) => {
+    revokeSourceRuntimeUrls(get().sourceRuntimeById);
     const url = URL.createObjectURL(file);
+    const source = createProjectSource({
+      id: MAIN_SOURCE_ID,
+      fileName: file.name,
+      duration: 0,
+      isPrimary: true,
+      status: 'pending',
+    });
     set((state) => ({
       ...buildBaseEditorState({
-        videoFile: file,
-        videoUrl: url,
-        processingVideoUrl: url,
-        videoName: file.name,
+        ...buildPrimaryMirrorState([source], {
+          [MAIN_SOURCE_ID]: {
+            file,
+            objectUrl: url,
+            playerUrl: url,
+            processingUrl: url,
+          },
+        }, state.currentProjectId),
       }),
       messages: state.messages,
     }));
   },
 
+  setSourceDuration: (sourceId, duration) => set((state) => {
+    const nextSources = state.sources.map((source) => (
+      source.id === sourceId ? { ...source, duration } : source
+    ));
+    const primaryMirror = buildPrimaryMirrorState(nextSources, state.sourceRuntimeById, state.currentProjectId);
+    const clipsAreEmpty = state.clips.length === 0 && sourceId === MAIN_SOURCE_ID && duration > 0;
+    const nextClips = clipsAreEmpty ? [makeClip(MAIN_SOURCE_ID, 0, duration)] : state.clips;
+    const nextTransitions = clipsAreEmpty ? normalizeTransitionState(nextClips, state.transitions) : state.transitions;
+    return {
+      ...primaryMirror,
+      clips: nextClips,
+      transitions: nextTransitions,
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        state.aiSettings,
+        state.sourceTranscriptCaptions,
+        state.sourceOverviewFrames,
+      ),
+    };
+  }),
+
   setVideoDuration: (duration) => {
-    const { clips, transitions, aiSettings, sourceTranscriptCaptions, sourceOverviewFrames } = get();
-    if (clips.length === 0 && duration > 0) {
-      const nextClips = [makeClip(0, duration)];
-      set({
-        videoDuration: duration,
-        clips: nextClips,
-        transitions: normalizeTransitionState(nextClips, transitions),
-        ...buildDerivedIndexState(nextClips, normalizeTransitionState(nextClips, transitions), aiSettings, sourceTranscriptCaptions, sourceOverviewFrames),
-      });
-      return;
-    }
-    set({ videoDuration: duration });
+    get().setSourceDuration(MAIN_SOURCE_ID, duration);
   },
 
   setCurrentTime: (time) => set({ currentTime: time }),
@@ -987,7 +1428,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
 
   clearMessages: () => set((state) => {
-    const nextClips = state.videoDuration > 0 ? [makeClip(0, state.videoDuration)] : [];
+    const nextClips = state.videoDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, state.videoDuration)] : [];
     return {
       messages: [],
       appliedActions: [],
@@ -1037,29 +1478,51 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setFFmpegJob: (job) => set({ ffmpegJob: job }),
 
   setVideoCloud: (file, blobUrl, storagePath, projectId) => {
+    revokeSourceRuntimeUrls(get().sourceRuntimeById);
+    const source = createProjectSource({
+      id: MAIN_SOURCE_ID,
+      fileName: file.name,
+      duration: 0,
+      isPrimary: true,
+      status: 'pending',
+      storagePath,
+    });
     set((state) => ({
       ...buildBaseEditorState({
-        videoFile: file,
-        videoUrl: blobUrl,
-        processingVideoUrl: blobUrl,
-        videoName: file.name,
-        currentProjectId: projectId,
-        storagePath,
+        ...buildPrimaryMirrorState([source], {
+          [MAIN_SOURCE_ID]: {
+            file,
+            objectUrl: blobUrl,
+            playerUrl: blobUrl,
+            processingUrl: blobUrl,
+          },
+        }, projectId),
       }),
       messages: state.messages,
     }));
   },
 
   setProjectVideoFile: (file, projectId, storagePath = null) => {
+    revokeSourceRuntimeUrls(get().sourceRuntimeById);
     const url = URL.createObjectURL(file);
+    const source = createProjectSource({
+      id: MAIN_SOURCE_ID,
+      fileName: file.name,
+      duration: 0,
+      isPrimary: true,
+      status: 'pending',
+      storagePath,
+    });
     set((state) => ({
       ...buildBaseEditorState({
-        videoFile: file,
-        videoUrl: url,
-        processingVideoUrl: url,
-        videoName: file.name,
-        currentProjectId: projectId,
-        storagePath,
+        ...buildPrimaryMirrorState([source], {
+          [MAIN_SOURCE_ID]: {
+            file,
+            objectUrl: url,
+            playerUrl: url,
+            processingUrl: url,
+          },
+        }, projectId),
       }),
       messages: state.messages,
     }));
@@ -1068,34 +1531,59 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   loadProject: (editState, project) => {
     const { videoUrl, processingVideoUrl, storagePath, projectId, videoFilename, duration } = project;
     const existingState = get();
-    const canReuseLocalVideo = (
-      existingState.currentProjectId === projectId
-      && existingState.videoFile !== null
-      && (
-        !storagePath
-        || !existingState.storagePath
-        || existingState.storagePath === storagePath
-      )
-    );
-    const resolvedVideoFile = canReuseLocalVideo ? existingState.videoFile : null;
-    const resolvedVideoUrl = canReuseLocalVideo && existingState.videoUrl
-      ? existingState.videoUrl
-      : videoUrl;
-    const resolvedProcessingVideoUrl = canReuseLocalVideo && existingState.processingVideoUrl
-      ? existingState.processingVideoUrl
-      : (processingVideoUrl ?? videoUrl);
-    const resolvedVideoName = canReuseLocalVideo && existingState.videoFile
-      ? existingState.videoFile.name
-      : videoFilename?.trim() || 'Main video';
-    const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
-    const clips = sanitizeTimelineClips(rawClips
-      .map((clip) => normalizeLoadedClip(clip as Partial<VideoClip> & { sourcePath?: unknown }, storagePath))
-      .filter((clip): clip is VideoClip => !!clip));
     const persistedDuration = typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0;
     const effectiveDuration = (typeof duration === 'number' && duration > 0) ? duration : persistedDuration;
+    const hydratedSources = buildHydratedSources({
+      persistedSources: Array.isArray(editState.sources) ? editState.sources : project.sources,
+      projectStoragePath: storagePath,
+      projectVideoFilename: videoFilename ?? null,
+      projectDuration: effectiveDuration,
+    });
+    const validSourceIds = new Set(hydratedSources.map((source) => source.id));
+    const fallbackSourceId = getPrimarySource(hydratedSources)?.id ?? MAIN_SOURCE_ID;
+    const nextRuntimeById: SourceRuntimeMediaMap = {};
+
+    for (const source of hydratedSources) {
+      const existingSource = existingState.sources.find((entry) => entry.id === source.id);
+      const existingRuntime = existingState.currentProjectId === projectId
+        ? existingState.sourceRuntimeById[source.id]
+        : undefined;
+      const canReuseLocalSource = Boolean(
+        existingRuntime
+        && (
+          !source.storagePath
+          || !existingSource?.storagePath
+          || existingSource.storagePath === source.storagePath
+        ),
+      );
+      const fallbackPlayerUrl = source.storagePath
+        ? `/api/projects/${projectId}/media?sourceId=${encodeURIComponent(source.id)}`
+        : '';
+      const primaryProcessingUrl = source.id === MAIN_SOURCE_ID ? (processingVideoUrl ?? videoUrl) : '';
+
+      nextRuntimeById[source.id] = {
+        file: canReuseLocalSource ? existingRuntime?.file ?? null : null,
+        objectUrl: canReuseLocalSource ? existingRuntime?.objectUrl ?? '' : '',
+        playerUrl: canReuseLocalSource && existingRuntime?.objectUrl
+          ? existingRuntime.objectUrl
+          : (existingRuntime?.playerUrl || fallbackPlayerUrl),
+        processingUrl: canReuseLocalSource
+          ? (existingRuntime?.processingUrl || existingRuntime?.objectUrl || '')
+          : (existingRuntime?.processingUrl || primaryProcessingUrl),
+      };
+    }
+
+    const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
+    const clips = sanitizeTimelineClips(rawClips
+      .map((clip) => normalizeLoadedClip(
+        clip as Partial<VideoClip> & { sourcePath?: unknown },
+        validSourceIds,
+        fallbackSourceId,
+      ))
+      .filter((clip): clip is VideoClip => !!clip));
     const hydratedClips = clips.length > 0
       ? clips
-      : (effectiveDuration > 0 ? [makeClip(0, effectiveDuration)] : []);
+      : (effectiveDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, effectiveDuration)] : []);
 
     const rawTranscriptCaptions = Array.isArray(editState.sourceTranscriptCaptions)
       ? editState.sourceTranscriptCaptions
@@ -1103,7 +1591,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ? editState.rawTranscriptCaptions
         : null;
     const sourceTranscriptCaptions = rawTranscriptCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry as Partial<CaptionEntry>))
+      ?.map((entry) => normalizeCaptionEntry(
+        entry as Partial<CaptionEntry>,
+        validSourceIds,
+        fallbackSourceId,
+      ))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
 
     const rawOverviewFrames = Array.isArray(editState.sourceOverviewFrames)
@@ -1121,28 +1613,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             }))
         : null;
     const sourceOverviewFrames = rawOverviewFrames
-      ?.map((entry) => normalizeOverviewFrame(entry as Partial<SourceIndexedFrame>))
+      ?.map((entry) => normalizeOverviewFrame(
+        entry as Partial<SourceIndexedFrame>,
+        validSourceIds,
+        fallbackSourceId,
+      ))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
 
-    const persistedFreshness = (
-      editState.sourceIndexFreshBySourceId
-      && typeof editState.sourceIndexFreshBySourceId === 'object'
-      && (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]
-    )
-      ? {
-          [MAIN_SOURCE_ID]: {
-            overview: (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]?.overview === true,
-            transcript: (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]?.transcript === true,
-            version: typeof (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]?.version === 'string'
-              ? (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]!.version!
-              : SOURCE_INDEX_VERSION,
-            assetId: normalizeSourceId((editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]?.assetId) ?? null,
-            indexedAt: typeof (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]?.indexedAt === 'string'
-              ? (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[MAIN_SOURCE_ID]!.indexedAt!
-              : null,
-          },
-        }
-      : buildInitialSourceIndexState();
+    const persistedFreshness = buildInitialSourceIndexState(hydratedSources);
+    if (editState.sourceIndexFreshBySourceId && typeof editState.sourceIndexFreshBySourceId === 'object') {
+      for (const source of hydratedSources) {
+        const rawEntry = (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[source.id];
+        if (!rawEntry) continue;
+        persistedFreshness[source.id] = {
+          overview: rawEntry.overview === true,
+          transcript: rawEntry.transcript === true,
+          version: typeof rawEntry.version === 'string' ? rawEntry.version : SOURCE_INDEX_VERSION,
+          assetId: normalizeSourceId(rawEntry.assetId) ?? null,
+          indexedAt: typeof rawEntry.indexedAt === 'string' ? rawEntry.indexedAt : null,
+        };
+      }
+    }
 
     const aiSettings = mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined);
     const normalizedTransitions = normalizeTransitionState(
@@ -1160,17 +1651,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const persistedTranscriptError = typeof editState.transcriptError === 'string'
       ? editState.transcriptError
       : null;
+    const nextFreshness = mergeSourceIndexStateMap(persistedFreshness, null, hydratedSources);
+    for (const source of hydratedSources) {
+      nextFreshness[source.id] = {
+        ...nextFreshness[source.id],
+        overview: nextFreshness[source.id]?.overview
+          || !!sourceOverviewFrames?.some((frame) => frame.sourceId === source.id),
+        transcript: nextFreshness[source.id]?.transcript
+          || !!sourceTranscriptCaptions?.some((caption) => caption.sourceId === source.id),
+      };
+    }
+    const primaryMirror = buildPrimaryMirrorState(hydratedSources, nextRuntimeById, projectId);
 
     set({
       ...buildBaseEditorState({
-        videoFile: resolvedVideoFile,
-        videoUrl: resolvedVideoUrl,
-        processingVideoUrl: resolvedProcessingVideoUrl,
-        videoName: resolvedVideoName,
-        currentProjectId: projectId,
-        storagePath,
+        ...primaryMirror,
       }),
-      videoDuration: duration ?? (typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0),
       clips: hydratedClips,
       captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
       transitions: normalizedTransitions,
@@ -1195,10 +1691,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceTranscriptCaptions,
       sourceOverviewFrames: sourceOverviewFrames && sourceOverviewFrames.length > 0 ? sourceOverviewFrames : null,
       projectedOverviewFrames: derivedIndexState.projectedOverviewFrames,
-      sourceIndexFreshBySourceId: patchSourceIndexState(persistedFreshness, {
-        overview: persistedFreshness[MAIN_SOURCE_ID]?.overview || !!(sourceOverviewFrames && sourceOverviewFrames.length > 0),
-        transcript: persistedFreshness[MAIN_SOURCE_ID]?.transcript || !!(sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0),
-      }),
+      sourceIndexFreshBySourceId: nextFreshness,
       timelineProjectionFresh: derivedIndexState.timelineProjectionFresh,
       sourceIndex: (editState.sourceIndex as SourceIndex | null | undefined) ?? null,
     });
@@ -1206,14 +1699,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setUploadProgress: (pct) => set({ uploadProgress: pct }),
   setSaveStatus: (status) => set({ saveStatus: status }),
-  setStoragePath: (path) => set({ storagePath: path }),
+  setStoragePath: (path) => set((state) => {
+    const nextSources = state.sources.map((source) => (
+      source.id === MAIN_SOURCE_ID ? { ...source, storagePath: path } : source
+    ));
+    return buildPrimaryMirrorState(nextSources, state.sourceRuntimeById, state.currentProjectId);
+  }),
   setZoom: (zoom) => set({ zoom: Math.max(0.25, Math.min(20, zoom)) }),
   setPlaybackActive: (active) => set({ playbackActive: active }),
 
   resetEditor: () => {
-    const { videoUrl, processingVideoUrl } = get();
-    if (videoUrl) URL.revokeObjectURL(videoUrl);
-    if (processingVideoUrl && processingVideoUrl !== videoUrl) URL.revokeObjectURL(processingVideoUrl);
+    revokeSourceRuntimeUrls(get().sourceRuntimeById);
     set({
       ...buildBaseEditorState(),
       messages: [],
@@ -1389,35 +1885,54 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   }),
 
   setBackgroundTranscript: (text, status, rawCaptions, errorMessage, options) => set((state) => {
+    const validSourceIds = new Set(state.sources.map((source) => source.id));
+    const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const normalizedCaptions = rawCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
     const shouldMarkTranscriptFresh = options?.markFresh ?? (normalizedCaptions !== undefined);
+    const nextSourceTranscriptCaptions = normalizedCaptions !== undefined
+      ? replaceEntriesForSources(state.sourceTranscriptCaptions, normalizedCaptions)
+      : state.sourceTranscriptCaptions;
+    let nextFreshness = state.sourceIndexFreshBySourceId;
+    if (normalizedCaptions !== undefined && shouldMarkTranscriptFresh) {
+      const sourceIds = new Set(
+        normalizedCaptions
+          .map((entry) => entry.sourceId)
+          .filter((sourceId): sourceId is string => typeof sourceId === 'string' && sourceId.length > 0),
+      );
+      for (const sourceId of sourceIds) {
+        nextFreshness = patchSourceIndexState(nextFreshness, sourceId, { transcript: true });
+      }
+    }
     return {
-      backgroundTranscript: normalizedCaptions !== undefined
-        ? buildTranscriptContext(state.clips, normalizedCaptions, state.transitions)
+      backgroundTranscript: nextSourceTranscriptCaptions !== undefined && nextSourceTranscriptCaptions !== null
+        ? buildTranscriptContext(state.clips, nextSourceTranscriptCaptions, state.transitions)
         : text,
       transcriptStatus: status,
       transcriptError: status === 'error'
         ? (errorMessage?.trim() || state.transcriptError || 'Audio transcription did not finish.')
         : null,
       transcriptProgress: status === 'loading' ? state.transcriptProgress : null,
-      ...(normalizedCaptions !== undefined ? { sourceTranscriptCaptions: normalizedCaptions } : {}),
+      ...(normalizedCaptions !== undefined ? { sourceTranscriptCaptions: nextSourceTranscriptCaptions } : {}),
       ...(normalizedCaptions !== undefined && shouldMarkTranscriptFresh ? {
-        sourceIndexFreshBySourceId: patchSourceIndexState(state.sourceIndexFreshBySourceId, { transcript: true }),
+        sourceIndexFreshBySourceId: nextFreshness,
       } : {}),
     };
   }),
 
   setTranscriptProgress: (progress) => set({ transcriptProgress: progress }),
 
-  setSourceOverviewFrames: (_sourceId, frames, options) => set((state) => {
+  setSourceOverviewFrames: (sourceId, frames, options) => set((state) => {
+    const validSourceIds = new Set(state.sources.map((source) => source.id));
+    const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const normalizedFrames = frames
-      ?.map((entry) => normalizeOverviewFrame(entry))
+      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
+    const nextSourceOverviewFrames = replaceEntriesForSource(state.sourceOverviewFrames, sourceId, normalizedFrames);
     return {
-      sourceOverviewFrames: normalizedFrames,
-      sourceIndexFreshBySourceId: patchSourceIndexState(state.sourceIndexFreshBySourceId, {
+      sourceOverviewFrames: nextSourceOverviewFrames,
+      sourceIndexFreshBySourceId: patchSourceIndexState(state.sourceIndexFreshBySourceId, sourceId, {
         overview: options?.fresh ?? false,
         assetId: options?.assetId,
         indexedAt: options?.indexedAt,
@@ -1427,22 +1942,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         state.transitions,
         state.aiSettings,
         state.sourceTranscriptCaptions,
-        normalizedFrames,
+        nextSourceOverviewFrames,
       ),
     };
   }),
 
   hydrateSourceIndex: (payload) => set((state) => {
+    const validSourceIds = new Set(state.sources.map((source) => source.id));
+    const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const sourceTranscriptCaptions = payload.sourceTranscriptCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
       .filter((entry): entry is CaptionEntry => !!entry) ?? state.sourceTranscriptCaptions;
     const sourceOverviewFrames = payload.sourceOverviewFrames
-      ?.map((entry) => normalizeOverviewFrame(entry))
+      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? state.sourceOverviewFrames;
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
-    const sourceIndexFreshBySourceId = payload.sourceIndexFreshBySourceId?.[MAIN_SOURCE_ID]
-      ? patchSourceIndexState(state.sourceIndexFreshBySourceId, payload.sourceIndexFreshBySourceId[MAIN_SOURCE_ID]!)
-      : state.sourceIndexFreshBySourceId;
+    const sourceIndexFreshBySourceId = mergeSourceIndexStateMap(
+      state.sourceIndexFreshBySourceId,
+      payload.sourceIndexFreshBySourceId,
+      state.sources,
+    );
     const transcriptStatus = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
       ? (analysis?.status === 'running' ? 'loading' : 'done')
       : analysis?.status === 'queued' || analysis?.status === 'running'

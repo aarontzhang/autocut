@@ -51,7 +51,14 @@ export async function uploadProjectMedia(
   });
   if (!finalizeRes.ok) throw new Error(await readErrorMessage(finalizeRes));
 
-  return storagePath;
+  const finalized = await finalizeRes.json();
+
+  return {
+    storagePath,
+    assetId: typeof finalized?.assetId === 'string' ? finalized.assetId : null,
+    uploadedSize: typeof finalized?.uploadedSize === 'number' ? finalized.uploadedSize : null,
+    quota: finalized?.quota ?? null,
+  };
 }
 
 export async function createSignedUrls(paths: string[]) {

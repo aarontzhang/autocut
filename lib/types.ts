@@ -136,6 +136,16 @@ export interface AppliedActionRecord {
 
 export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error';
 
+export interface ProjectSource {
+  id: string;
+  fileName: string;
+  storagePath: string | null;
+  assetId: string | null;
+  duration: number;
+  status: MediaAssetStatus;
+  isPrimary: boolean;
+}
+
 export interface MediaAsset {
   id: string;
   projectId: string;
