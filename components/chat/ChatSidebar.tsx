@@ -1453,7 +1453,10 @@ function AutoAvatar({ size = 28 }: { size?: number }) {
       boxShadow: '0 10px 24px rgba(0,0,0,0.18)',
       flexShrink: 0,
     }}>
-      <AutocutMark size={Math.max(12, Math.round(size * 0.58))} />
+      <AutocutMark
+        size={Math.max(16, Math.round(size * 0.72))}
+        withTile={false}
+      />
     </div>
   );
 }
@@ -1491,9 +1494,9 @@ function AutoIdentity({
 // ─── Message bubbles ───────────────────────────────────────────────────────────
 function UserMessage({ msg }: { msg: ChatMessageType }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 2 }}>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%', marginBottom: 8 }}>
       <div style={{
-        maxWidth: '85%',
+        maxWidth: '72%',
         background: 'rgba(255,255,255,0.06)',
         border: '1px solid rgba(255,255,255,0.08)',
         borderRadius: '10px 10px 2px 10px',
@@ -1502,6 +1505,8 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
         color: 'var(--fg-primary)',
         lineHeight: 1.55,
         fontFamily: 'var(--font-serif)',
+        marginLeft: 'auto',
+        textAlign: 'left',
       }}>
         <MarkerAwareText text={msg.content} />
       </div>
@@ -1742,9 +1747,9 @@ function AssistantMessage({
   }, [action, applyStoredAction, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%', marginBottom: 10 }}>
       <AutoAvatar />
-      <div style={{ minWidth: 0, flex: 1 }}>
+      <div style={{ minWidth: 0, flex: 1, maxWidth: 'calc(100% - 38px)' }}>
         <div style={{ marginBottom: 6 }}>
           <AutoIdentity />
         </div>
@@ -1948,9 +1953,9 @@ function AssistantMessage({
 // ─── Thinking indicator ────────────────────────────────────────────────────────
 function ThinkingIndicator({ status }: { status?: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%' }}>
       <AutoAvatar />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, maxWidth: 'calc(100% - 38px)' }}>
         <AutoIdentity subtitle="Typing..." />
         <div style={{
           display: 'inline-flex',
