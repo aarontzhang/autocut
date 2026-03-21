@@ -158,6 +158,11 @@ export interface AssetTranscriptWord {
   confidence?: number | null;
 }
 
+export type SourceIndexedFrameSampleKind =
+  | 'coarse_window_rep'
+  | 'scene_rep'
+  | 'window_250ms';
+
 export interface SourceIndexedFrame {
   sourceId: string;
   sourceTime: number;
@@ -165,6 +170,9 @@ export interface SourceIndexedFrame {
   image?: string;
   assetId?: string | null;
   indexedAt?: string | null;
+  sampleKind?: SourceIndexedFrameSampleKind;
+  score?: number | null;
+  sceneId?: string | null;
 }
 
 export interface SourceIndexState {
@@ -186,6 +194,36 @@ export interface IndexedVideoFrame {
   description?: string;
   projectedTimelineTime?: number | null;
   visibleOnTimeline?: boolean;
+  sampleKind?: SourceIndexedFrameSampleKind;
+  score?: number | null;
+  sceneId?: string | null;
+}
+
+export type AnalysisJobStage =
+  | 'queued'
+  | 'preparing_media'
+  | 'transcribing_audio'
+  | 'detecting_scenes'
+  | 'choosing_representative_frames'
+  | 'describing_representative_frames'
+  | 'dense_refinement'
+  | 'extracting_frames'
+  | 'describing_frames'
+  | 'transcribing';
+
+export interface AnalysisProgress {
+  stage: AnalysisJobStage;
+  completed: number;
+  total: number;
+  label?: string | null;
+  etaSeconds?: number | null;
+}
+
+export interface SourceIndexAnalysisState {
+  jobId?: string | null;
+  status: 'queued' | 'running' | 'completed' | 'failed' | null;
+  error?: string | null;
+  progress: AnalysisProgress | null;
 }
 
 export type VisualConfidenceBand = 'low' | 'medium' | 'high';

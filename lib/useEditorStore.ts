@@ -3,6 +3,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  AnalysisProgress,
   AppliedActionRecord,
   AIEditingSettings,
   CaptionEntry,
@@ -12,6 +13,7 @@ import {
   IndexedVideoFrame,
   MarkerEntry,
   SourceIndex,
+  SourceIndexAnalysisState,
   SourceIndexState,
   SourceIndexedFrame,
   TextOverlayEntry,
@@ -39,7 +41,7 @@ export type TranscriptProgress = {
   total: number;
 } | null;
 
-export const SOURCE_INDEX_VERSION = 'source-index-v1';
+export const SOURCE_INDEX_VERSION = 'source-index-v2';
 export type SourceIndexStateMap = Record<string, SourceIndexState>;
 
 export type FFmpegJob =
@@ -155,6 +157,38 @@ function normalizeOverviewFrame(entry: Partial<SourceIndexedFrame>): SourceIndex
     image: typeof entry.image === 'string' ? entry.image : undefined,
     assetId: normalizeSourceId(entry.assetId) ?? null,
     indexedAt: typeof entry.indexedAt === 'string' ? entry.indexedAt : null,
+    sampleKind: entry.sampleKind === 'scene_rep' || entry.sampleKind === 'coarse_window_rep' || entry.sampleKind === 'window_250ms'
+      ? entry.sampleKind
+      : undefined,
+    score: Number.isFinite(entry.score) ? entry.score : null,
+    sceneId: typeof entry.sceneId === 'string' ? entry.sceneId : null,
+  };
+}
+
+function normalizeAnalysisProgress(entry: Partial<AnalysisProgress> | null | undefined): AnalysisProgress | null {
+  if (!entry || typeof entry !== 'object') return null;
+  if (typeof entry.stage !== 'string') return null;
+  if (!Number.isFinite(entry.completed) || !Number.isFinite(entry.total)) return null;
+  return {
+    stage: entry.stage as AnalysisProgress['stage'],
+    completed: Number(entry.completed),
+    total: Math.max(1, Number(entry.total)),
+    label: typeof entry.label === 'string' ? entry.label : null,
+    etaSeconds: Number.isFinite(entry.etaSeconds) ? Number(entry.etaSeconds) : null,
+  };
+}
+
+function normalizeSourceIndexAnalysisState(
+  value: Partial<SourceIndexAnalysisState> | null | undefined,
+): SourceIndexAnalysisState | null {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    jobId: typeof value.jobId === 'string' ? value.jobId : null,
+    status: value.status === 'queued' || value.status === 'running' || value.status === 'completed' || value.status === 'failed'
+      ? value.status
+      : null,
+    error: typeof value.error === 'string' ? value.error : null,
+    progress: normalizeAnalysisProgress(value.progress ?? null),
   };
 }
 
@@ -218,8 +252,8 @@ export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   },
   frameInspection: {
     defaultFrameCount: 30,
-    overviewIntervalSeconds: 2,
-    maxOverviewFrames: 1800,
+    overviewIntervalSeconds: 5,
+    maxOverviewFrames: 720,
   },
   captions: {
     wordsPerCaption: 4,
@@ -308,6 +342,7 @@ function buildBaseEditorState(input?: {
   | 'timelineProjectionFresh'
   | 'visualSearchSession'
   | 'sourceIndex'
+  | 'sourceIndexAnalysis'
   | 'pendingDeleteRanges'
 > {
   return {
@@ -352,6 +387,7 @@ function buildBaseEditorState(input?: {
     timelineProjectionFresh: true,
     visualSearchSession: null,
     sourceIndex: null,
+    sourceIndexAnalysis: null,
     pendingDeleteRanges: null,
   };
 }
@@ -399,6 +435,7 @@ interface EditorState {
   timelineProjectionFresh: boolean;
   visualSearchSession: VisualSearchSession | null;
   sourceIndex: SourceIndex | null;
+  sourceIndexAnalysis: SourceIndexAnalysisState | null;
   pendingDeleteRanges: PendingDeleteRanges | null;
   setVideoFile: (file: File) => void;
   setVideoDuration: (duration: number) => void;
@@ -491,7 +528,9 @@ interface EditorState {
     sourceTranscriptCaptions?: CaptionEntry[] | null;
     sourceOverviewFrames?: SourceIndexedFrame[] | null;
     sourceIndexFreshBySourceId?: SourceIndexStateMap;
+    analysis?: SourceIndexAnalysisState | null;
   }) => void;
+  setSourceIndexAnalysis: (analysis: SourceIndexAnalysisState | null) => void;
   setVisualSearchSession: (session: VisualSearchSession | null) => void;
   setSourceIndex: (index: SourceIndex | null) => void;
   addMarker: (marker: Omit<MarkerEntry, 'id' | 'number'> & { id?: string; number?: number }) => string;
@@ -1400,13 +1439,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const sourceOverviewFrames = payload.sourceOverviewFrames
       ?.map((entry) => normalizeOverviewFrame(entry))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? state.sourceOverviewFrames;
+    const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
     const sourceIndexFreshBySourceId = payload.sourceIndexFreshBySourceId?.[MAIN_SOURCE_ID]
       ? patchSourceIndexState(state.sourceIndexFreshBySourceId, payload.sourceIndexFreshBySourceId[MAIN_SOURCE_ID]!)
       : state.sourceIndexFreshBySourceId;
+    const transcriptStatus = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
+      ? (analysis?.status === 'running' ? 'loading' : 'done')
+      : analysis?.status === 'queued' || analysis?.status === 'running'
+        ? 'loading'
+        : analysis?.status === 'completed'
+          ? 'done'
+        : state.transcriptStatus;
     return {
       sourceTranscriptCaptions,
       sourceOverviewFrames,
       sourceIndexFreshBySourceId,
+      sourceIndexAnalysis: analysis ?? state.sourceIndexAnalysis,
       ...buildDerivedIndexState(
         state.clips,
         state.transitions,
@@ -1414,8 +1462,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         sourceTranscriptCaptions,
         sourceOverviewFrames,
       ),
-      transcriptStatus: sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0 ? 'done' : state.transcriptStatus,
+      transcriptStatus,
     };
+  }),
+
+  setSourceIndexAnalysis: (analysis) => set({
+    sourceIndexAnalysis: normalizeSourceIndexAnalysisState(analysis),
   }),
 
   setVisualSearchSession: (session) => set({ visualSearchSession: session }),

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import {
   getStorageObjectSize,
   getUserStorageQuotaSnapshot,
@@ -111,6 +111,9 @@ export async function POST(request: NextRequest) {
     try {
       const asset = await ensurePrimaryMediaAssetIfSupported(supabase, projectId, storagePath);
       assetId = asset?.id ?? null;
+      if (asset?.id) {
+        await ensureAssetIndexingJob(supabase, projectId, asset.id);
+      }
     } catch (assetError) {
       console.error('[uploads.finalize] failed to initialize media asset record', assetError);
     }

@@ -194,7 +194,7 @@ function sanitizeSettings(settings: unknown): Partial<AIEditingSettings> | null 
     const partial: Partial<AIEditingSettings['frameInspection']> = {};
     if (Number.isInteger(frameInspection.defaultFrameCount)) partial.defaultFrameCount = clamp(Number(frameInspection.defaultFrameCount), 4, 60);
     if (isFiniteNumber(frameInspection.overviewIntervalSeconds)) partial.overviewIntervalSeconds = clamp(frameInspection.overviewIntervalSeconds, 0.1, 10);
-    if (Number.isInteger(frameInspection.maxOverviewFrames)) partial.maxOverviewFrames = clamp(Number(frameInspection.maxOverviewFrames), 60, 2400);
+    if (Number.isInteger(frameInspection.maxOverviewFrames)) partial.maxOverviewFrames = clamp(Number(frameInspection.maxOverviewFrames), 60, 1200);
     if (Object.keys(partial).length > 0) next.frameInspection = partial as AIEditingSettings['frameInspection'];
   }
 

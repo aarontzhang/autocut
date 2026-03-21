@@ -11,6 +11,7 @@ import {
   TransitionEntry,
   VideoClip,
 } from './types';
+import { getAdaptiveCoarseFrameBudget } from './indexer/representativeFrames';
 import { buildClipSchedule, getTimelineDuration as getRenderTimelineDuration } from './playbackEngine';
 
 const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
@@ -112,11 +113,7 @@ export function formatTimeShort(seconds: number): string {
 }
 
 export function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
-  if (duration <= 0) return 0;
-  const interval = duration <= preferredInterval * maxOverviewFrames
-    ? preferredInterval
-    : duration / maxOverviewFrames;
-  return Math.floor(duration / interval) + 1;
+  return getAdaptiveCoarseFrameBudget(duration, preferredInterval, maxOverviewFrames);
 }
 
 export function getRulerTicks(duration: number, width: number): { time: number; major: boolean }[] {
@@ -598,6 +595,9 @@ export function projectSourceFramesToTimeline(
         sourceId: frame.sourceId,
         kind: 'overview' as const,
         description: frame.description,
+        sampleKind: frame.sampleKind,
+        score: frame.score ?? null,
+        sceneId: frame.sceneId ?? null,
         visibleOnTimeline: true,
       }));
     })

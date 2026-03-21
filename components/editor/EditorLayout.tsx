@@ -18,6 +18,7 @@ import { useStorageQuota } from '@/lib/useStorageQuota';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
 const MULTI_FILE_NOTICE = 'Capped out at one video for now. Multi-file support coming soon.';
 const BLOB_URL_PREFIX = 'blob:';
 
@@ -117,6 +118,23 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const storagePath = useEditorStore(s => s.storagePath);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
+
+  const refreshSourceIndex = useCallback(async (targetProjectId: string) => {
+    const sourceIndexRes = await fetch(`/api/projects/${targetProjectId}/source-index`, { cache: 'no-store' });
+    if (!sourceIndexRes.ok) return null;
+    const sourceIndexData = await sourceIndexRes.json();
+    hydrateSourceIndex({
+      sourceTranscriptCaptions: Array.isArray(sourceIndexData?.sourceTranscriptCaptions)
+        ? sourceIndexData.sourceTranscriptCaptions
+        : null,
+      sourceOverviewFrames: Array.isArray(sourceIndexData?.sourceOverviewFrames)
+        ? sourceIndexData.sourceOverviewFrames
+        : null,
+      sourceIndexFreshBySourceId: sourceIndexData?.sourceIndexFreshBySourceId ?? undefined,
+      analysis: sourceIndexData?.analysis ?? null,
+    });
+    return sourceIndexData;
+  }, [hydrateSourceIndex]);
 
   useAutoSave();
 
@@ -267,20 +285,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
         try {
-          const sourceIndexRes = await fetch(`/api/projects/${projectId}/source-index`);
-          if (sourceIndexRes.ok) {
-            const sourceIndexData = await sourceIndexRes.json();
-            if (projectLoadSequenceRef.current === loadSequence) {
-              hydrateSourceIndex({
-                sourceTranscriptCaptions: Array.isArray(sourceIndexData?.sourceTranscriptCaptions)
-                  ? sourceIndexData.sourceTranscriptCaptions
-                  : null,
-                sourceOverviewFrames: Array.isArray(sourceIndexData?.sourceOverviewFrames)
-                  ? sourceIndexData.sourceOverviewFrames
-                  : null,
-                sourceIndexFreshBySourceId: sourceIndexData?.sourceIndexFreshBySourceId ?? undefined,
-              });
-            }
+          const sourceIndexData = await refreshSourceIndex(projectId);
+          if (projectLoadSequenceRef.current !== loadSequence || !sourceIndexData) {
+            return;
           }
         } catch (error) {
           console.warn('Failed to hydrate source index:', error);
@@ -294,7 +301,51 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         }
       }
     })();
-  }, [hydrateSourceIndex, loadProject, projectId, resetEditor]);
+  }, [loadProject, projectId, refreshSourceIndex, resetEditor]);
+
+  useEffect(() => {
+    if (!projectId) return;
+
+    let cancelled = false;
+    let intervalId: number | null = null;
+
+    const refresh = async () => {
+      try {
+        const sourceIndexData = await refreshSourceIndex(projectId);
+        const status = sourceIndexData?.analysis?.status;
+        if (!cancelled && (status === 'queued' || status === 'running')) {
+          if (intervalId === null) {
+            intervalId = window.setInterval(() => {
+              void refresh();
+            }, SOURCE_INDEX_POLL_INTERVAL_MS);
+          }
+        } else if (intervalId !== null) {
+          window.clearInterval(intervalId);
+          intervalId = null;
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('Failed to refresh source index:', error);
+        }
+      }
+    };
+
+    void refresh();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [projectId, refreshSourceIndex]);
 
   useEffect(() => {
     if (!projectId) return;

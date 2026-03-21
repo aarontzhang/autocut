@@ -95,6 +95,14 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Use when user asks about what is said/spoken, needs content searched, or says "transcribe"
 - After transcription, the transcript is available in context for follow-up queries
 
+### 8. Request Dense Frames (request_frames)
+- Request denser local visual sampling for one narrowed timeline window
+- Use only after the transcript plus coarse representative frames suggest a promising range but you still need tighter visual evidence
+- frameRequest.startTime and frameRequest.endTime must describe a narrow window, not the full video
+- Prefer sub-second or about 1s spacing only inside the narrowed range
+- Never request dense frames across the whole upload
+- After dense frames arrive, continue the same user request and answer from those frames instead of asking again
+
 ### 9. Transitions (add_transition)
 - Add a transition effect at a specific timeline time
 - Types: "crossfade", "fade_black", "dissolve", "wipe"
@@ -213,8 +221,9 @@ No action:
 - Use type:none only when you want to explicitly report that you checked something and there is no edit to make. Ordinary conversational replies can omit the action block entirely.
 
 ## Visual and audio context
-You may be provided with sampled frames from the user's video as text summaries and/or a full audio transcript.
-- Overview frame summaries are provided upfront. Use them along with the transcript to reason about content before editing.
+You may be provided with representative frames from the user's video as text summaries and/or a full audio transcript.
+- Representative frame summaries are a coarse pass, not exhaustive coverage. Use them along with the transcript to reason about content before editing.
+- Default retrieval flow: use transcript plus coarse representative frames to find candidate windows first, then request dense local frames only if confidence is mixed or the query is strongly visual.
 - For visually triggered edits, prioritize the visual evidence over the transcript when they disagree. Spoken words can lead or lag what appears on screen.
 - For visual events like gestures, objects, or on-screen actions, transcript mentions are only hints about where to look. Do not conclude the visual moment was already cut just because the spoken mention maps to removed source time.
 - If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching in the remaining visible footage instead of asking whether you should continue.
@@ -241,8 +250,8 @@ const DEFAULT_SETTINGS: AIEditingSettings = {
   },
   frameInspection: {
     defaultFrameCount: 30,
-    overviewIntervalSeconds: 1,
-    maxOverviewFrames: 1800,
+    overviewIntervalSeconds: 5,
+    maxOverviewFrames: 720,
   },
   captions: {
     wordsPerCaption: 4,
@@ -1242,7 +1251,7 @@ export async function POST(req: NextRequest) {
 - Silence removal: trim ${settings.silenceRemoval.paddingSeconds}s from each silent gap edge; skip any silent gap shorter than ${settings.silenceRemoval.minDurationSeconds}s after trimming
 - Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
-- Overview frame sampling: every ${settings.frameInspection.overviewIntervalSeconds}s, capped at ${settings.frameInspection.maxOverviewFrames} frames
+- Coarse representative frames: taper toward about one frame every ${settings.frameInspection.overviewIntervalSeconds}s on long videos, capped at ${settings.frameInspection.maxOverviewFrames} frames
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
 
@@ -1448,8 +1457,8 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Minimum silence duration after padding: ${settings.silenceRemoval.minDurationSeconds}s\n` +
       `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
       `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
-      `- Overview frame interval: ${settings.frameInspection.overviewIntervalSeconds}s\n` +
-      `- Max overview frames: ${settings.frameInspection.maxOverviewFrames}\n` +
+      `- Long-video coarse frame spacing target: ~${settings.frameInspection.overviewIntervalSeconds}s\n` +
+      `- Max coarse representative frames: ${settings.frameInspection.maxOverviewFrames}\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
     );
@@ -1473,9 +1482,12 @@ Honor these defaults unless the user explicitly asks for something different in 
     const frames = requestFrames;
     const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
     const overviewFrameNote = overviewFrames.length > 0
-      ? `\n[Overview frame summaries: showing ${overviewFrames.length} most relevant]\n` +
+      ? `\n[Representative frame summaries: showing ${overviewFrames.length} coarse frames]\n` +
         overviewFrames.map((frame, index) =>
-          `Overview frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}` +
+          `Representative frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}` +
+          (frame.sampleKind ? `, sample kind: ${frame.sampleKind}` : '') +
+          (typeof frame.score === 'number' ? `, score: ${frame.score.toFixed(3)}` : '') +
+          (frame.sceneId ? `, scene: ${sanitizeInlineUntrustedText(frame.sceneId, 60)}` : '') +
           (frame.description ? `, summary: ${sanitizeInlineUntrustedText(frame.description, 240)}` : '')
         ).join('\n')
       : '';

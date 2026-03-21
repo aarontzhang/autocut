@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { ensureAssetIndexingJob, getLatestAnalysisJobForAsset } from '@/lib/analysisJobs';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import type { CaptionEntry, SourceIndexState } from '@/lib/types';
@@ -22,6 +23,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       sourceTranscriptCaptions: [],
       sourceOverviewFrames: [],
       sourceIndexFreshBySourceId: {},
+      analysis: null,
       sources: [],
     });
   }
@@ -42,11 +44,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         [MAIN_SOURCE_ID]: {
           overview: false,
           transcript: false,
-          version: 'source-index-v1',
+          version: 'source-index-v2',
           assetId: null,
           indexedAt: null,
         } satisfies SourceIndexState,
       },
+      analysis: null,
       sources: [{
         sourceId: MAIN_SOURCE_ID,
         assetId: null,
@@ -55,6 +58,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       }],
     });
   }
+
+  const analysis = await getLatestAnalysisJobForAsset(supabase, id, asset.id)
+    ?? ((asset.status !== 'ready' || !asset.indexed_at)
+      ? await ensureAssetIndexingJob(supabase, id, asset.id)
+      : null);
 
   const { data: transcriptRows, error: transcriptError } = await supabase
     .from('asset_transcript_words')
@@ -66,11 +74,22 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: transcriptError.message }, { status: 500 });
   }
 
+  const { data: visualRows, error: visualError } = await supabase
+    .from('asset_visual_index')
+    .select('source_time, sample_kind, metadata')
+    .eq('asset_id', asset.id)
+    .in('sample_kind', ['coarse_window_rep', 'scene_rep'])
+    .order('source_time', { ascending: true });
+
+  if (visualError) {
+    return NextResponse.json({ error: visualError.message }, { status: 500 });
+  }
+
   const sourceIndexFreshBySourceId: Record<string, SourceIndexState> = {
     [MAIN_SOURCE_ID]: {
       overview: false,
       transcript: false,
-      version: 'source-index-v1',
+      version: 'source-index-v2',
       assetId: asset.id,
       indexedAt: asset.indexed_at ?? null,
     },
@@ -85,7 +104,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .map((row) => {
       sourceIndexFreshBySourceId[MAIN_SOURCE_ID] = {
         ...sourceIndexFreshBySourceId[MAIN_SOURCE_ID],
-        transcript: true,
+        transcript: asset.status === 'ready',
       };
       return {
         sourceId: MAIN_SOURCE_ID,
@@ -95,10 +114,41 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       };
     });
 
+  const sourceOverviewFrames = ((visualRows ?? []) as Array<{
+    source_time: number;
+    sample_kind: string;
+    metadata?: Record<string, unknown> | null;
+  }>)
+    .map((row) => {
+      const metadata = row.metadata && typeof row.metadata === 'object'
+        ? row.metadata as Record<string, unknown>
+        : {};
+      return {
+        sourceId: MAIN_SOURCE_ID,
+        sourceTime: Number(row.source_time ?? 0),
+        description: typeof metadata.description === 'string' ? metadata.description : undefined,
+        assetId: asset.id,
+        indexedAt: asset.indexed_at ?? null,
+        sampleKind: row.sample_kind === 'scene_rep' || row.sample_kind === 'coarse_window_rep'
+          ? row.sample_kind
+          : 'coarse_window_rep',
+        score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
+        sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
+      };
+    });
+
+  if (sourceOverviewFrames.length > 0) {
+    sourceIndexFreshBySourceId[MAIN_SOURCE_ID] = {
+      ...sourceIndexFreshBySourceId[MAIN_SOURCE_ID],
+      overview: asset.status === 'ready',
+    };
+  }
+
   return NextResponse.json({
     sourceTranscriptCaptions,
-    sourceOverviewFrames: [],
+    sourceOverviewFrames,
     sourceIndexFreshBySourceId,
+    analysis,
     sources: [{
       sourceId: MAIN_SOURCE_ID,
       assetId: asset.id,

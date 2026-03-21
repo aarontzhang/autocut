@@ -2,12 +2,13 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, VisualSearchSession } from '@/lib/types';
+import { AnalysisProgress, ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, VisualSearchSession } from '@/lib/types';
 import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
+import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
 import { resolveMainTrackSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import AutocutMark from '@/components/branding/AutocutMark';
@@ -19,6 +20,7 @@ const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
+const DEFAULT_DENSE_MAX_SPACING_SECONDS = 1;
 const AGENT_MENU_ITEMS = [
   { id: 'cut', label: 'Cut Assistant', status: 'active' as const },
   { id: 'highlights', label: 'Highlights Assistant', status: 'coming_soon' as const },
@@ -60,13 +62,7 @@ type ChatRequestMessage = {
   autoApplied?: boolean;
 };
 
-type IndexingProgress = {
-  stage: 'extracting_frames' | 'describing_frames' | 'transcribing';
-  completed: number;
-  total: number;
-  label: string;
-  etaSeconds?: number | null;
-};
+type IndexingProgress = AnalysisProgress;
 
 type ProgressCardTone = 'active' | 'completed';
 
@@ -347,10 +343,24 @@ function getIndexingStageTitle(progress: IndexingProgress | null, fallback?: str
   if (!progress) return 'Preparing media…';
 
   switch (progress.stage) {
+    case 'queued':
+      return 'Queued…';
+    case 'preparing_media':
+      return 'Preparing media…';
+    case 'transcribing_audio':
+      return 'Transcribing audio…';
+    case 'detecting_scenes':
+      return 'Detecting scenes…';
+    case 'choosing_representative_frames':
+      return 'Choosing representative frames…';
+    case 'describing_representative_frames':
+      return 'Describing representative frames…';
+    case 'dense_refinement':
+      return 'Dense local refinement…';
     case 'extracting_frames':
-      return 'Sampling video frames…';
+      return 'Choosing representative frames…';
     case 'describing_frames':
-      return 'Analyzing sampled frames…';
+      return 'Describing representative frames…';
     case 'transcribing':
       return 'Transcribing audio…';
     default:
@@ -366,14 +376,6 @@ function buildCompletedProgress(stage: IndexingProgress['stage']): IndexingProgr
     label: 'Completed',
     etaSeconds: 0,
   };
-}
-
-function getOverviewFrameTarget(duration: number, preferredInterval: number, maxOverviewFrames: number): number {
-  if (duration <= 0) return 0;
-  const interval = duration <= preferredInterval * maxOverviewFrames
-    ? preferredInterval
-    : duration / maxOverviewFrames;
-  return Math.floor(duration / interval) + 1;
 }
 
 function estimateTranscriptSeconds(duration: number): number {
@@ -409,6 +411,105 @@ function estimateRemainingSecondsFromObservedRate(
   }
 
   return remaining / unitsPerSecond;
+}
+
+async function measureFrameHeuristics(imageBase64: string): Promise<{
+  brightness: number;
+  contrast: number;
+  edgeDensity: number;
+  sharpness: number;
+  darknessScore: number;
+  textUiScore: number;
+}> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const nextImage = new Image();
+    nextImage.onload = () => resolve(nextImage);
+    nextImage.onerror = () => reject(new Error('Failed to load extracted frame.'));
+    nextImage.src = `data:image/jpeg;base64,${imageBase64}`;
+  });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, image.naturalWidth || image.width || 320);
+  canvas.height = Math.max(1, image.naturalHeight || image.height || 180);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error('Canvas context unavailable for frame scoring.');
+  }
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const pixelCount = Math.max(1, width * height);
+  const gray = new Float32Array(pixelCount);
+  let brightnessSum = 0;
+  let brightnessSqSum = 0;
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const offset = index * 4;
+    const luma = (0.2126 * data[offset] + 0.7152 * data[offset + 1] + 0.0722 * data[offset + 2]) / 255;
+    gray[index] = luma;
+    brightnessSum += luma;
+    brightnessSqSum += luma * luma;
+  }
+
+  const brightness = brightnessSum / pixelCount;
+  const variance = Math.max(0, brightnessSqSum / pixelCount - brightness * brightness);
+  const contrast = Math.min(1, Math.sqrt(variance) / 0.5);
+
+  let edgeSum = 0;
+  let strongEdges = 0;
+  let horizontalLineEvidence = 0;
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = y * width + x;
+      const gx = Math.abs(gray[index + 1] - gray[index - 1]);
+      const gy = Math.abs(gray[index + width] - gray[index - width]);
+      const laplacian = Math.abs((4 * gray[index]) - gray[index - 1] - gray[index + 1] - gray[index - width] - gray[index + width]);
+      edgeSum += laplacian;
+      if (gx + gy > 0.18) strongEdges += 1;
+      if (gx > 0.12 && gy < 0.08) horizontalLineEvidence += 1;
+    }
+  }
+
+  const edgeDensity = Math.min(1, strongEdges / pixelCount * 8);
+  const sharpness = Math.min(1, edgeSum / pixelCount * 3.5);
+  const darknessScore = brightness < 0.16 ? (0.16 - brightness) / 0.16 : 0;
+  const textUiScore = Math.min(1, horizontalLineEvidence / pixelCount * 18 + edgeDensity * 0.35);
+
+  return {
+    brightness,
+    contrast,
+    edgeDensity,
+    sharpness,
+    darknessScore,
+    textUiScore,
+  };
+}
+
+function scoreFrameHeuristics(
+  metrics: {
+    brightness: number;
+    contrast: number;
+    edgeDensity: number;
+    sharpness: number;
+    darknessScore: number;
+    textUiScore: number;
+  },
+  sceneBoundaryDistanceSeconds: number,
+): number {
+  const exposureScore = 1 - Math.min(1, Math.abs(metrics.brightness - 0.52) / 0.52);
+  const washedOutPenalty = metrics.contrast < 0.16 ? (0.16 - metrics.contrast) / 0.16 : 0;
+  const transitionPenalty = sceneBoundaryDistanceSeconds < 0.18
+    ? 1 - sceneBoundaryDistanceSeconds / 0.18
+    : 0;
+  return (
+    metrics.sharpness * 0.36 +
+    metrics.edgeDensity * 0.22 +
+    metrics.textUiScore * 0.16 +
+    exposureScore * 0.18 +
+    metrics.contrast * 0.08 -
+    metrics.darknessScore * 0.18 -
+    washedOutPenalty * 0.12 -
+    transitionPenalty * 0.45
+  );
 }
 
 function serializeActionForComparison(value: unknown): string {
@@ -539,6 +640,43 @@ function mergeFrameDescriptions(
       ...nextFrames[targetIndex],
       description: item.description.trim(),
     };
+  }
+  return nextFrames;
+}
+
+async function describeIndexedFrames(
+  frames: IndexedVideoFrame[],
+  onProgress?: (progress: { completed: number; total: number }) => void,
+): Promise<IndexedVideoFrame[]> {
+  if (frames.length === 0) return frames;
+
+  let nextFrames = [...frames];
+  const batches: FrameDescriptionBatch[] = [];
+  for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
+    const batchFrames = nextFrames
+      .slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE)
+      .filter((frame): frame is IndexedVideoFrame & { image: string } => typeof frame.image === 'string' && frame.image.length > 0)
+      .map((frame) => ({
+        image: frame.image,
+        timelineTime: frame.timelineTime,
+        sourceTime: frame.sourceTime,
+      }));
+    if (batchFrames.length === 0) continue;
+    batches.push({ start, batchFrames });
+  }
+
+  let completed = 0;
+  const total = nextFrames.length;
+  onProgress?.({ completed, total });
+  const errors = await runFrameDescriptionBatches(batches, {
+    onBatchComplete: (result) => {
+      nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
+      completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+      onProgress?.({ completed, total });
+    },
+  });
+  if (errors.length > 0) {
+    throw errors[0];
   }
   return nextFrames;
 }
@@ -1023,7 +1161,8 @@ function ActionDetails({ action }: { action: EditAction }) {
       settings?.silenceRemoval?.paddingSeconds !== undefined ? `silence padding ${settings.silenceRemoval.paddingSeconds}s` : '',
       settings?.silenceRemoval?.minDurationSeconds !== undefined ? `min silence ${settings.silenceRemoval.minDurationSeconds}s` : '',
       settings?.frameInspection?.defaultFrameCount !== undefined ? `inspect ${settings.frameInspection.defaultFrameCount} frames` : '',
-      settings?.frameInspection?.overviewIntervalSeconds !== undefined ? `overview every ${settings.frameInspection.overviewIntervalSeconds}s` : '',
+      settings?.frameInspection?.overviewIntervalSeconds !== undefined ? `long-video coarse spacing ~${settings.frameInspection.overviewIntervalSeconds}s` : '',
+      settings?.frameInspection?.maxOverviewFrames !== undefined ? `max ${settings.frameInspection.maxOverviewFrames} coarse frames` : '',
       settings?.captions?.wordsPerCaption !== undefined ? `${settings.captions.wordsPerCaption} words per caption` : '',
       settings?.transitions?.defaultDuration !== undefined ? `${settings.transitions.defaultDuration}s transitions` : '',
       settings?.textOverlays?.defaultFontSize !== undefined ? `${settings.textOverlays.defaultFontSize}px text` : '',
@@ -1101,11 +1240,6 @@ type TimelineFrameSample = {
   sourceId: string;
 };
 
-type SourceFrameSample = {
-  index: number;
-  sourceTime: number;
-};
-
 async function extractSourceOverviewFrames(
   input: {
     sourceId: string;
@@ -1119,25 +1253,22 @@ async function extractSourceOverviewFrames(
   if (input.duration <= 0) return [];
 
   const preferredInterval = Math.max(0.1, input.overviewIntervalSeconds);
-  const frameTarget = getOverviewFrameTarget(input.duration, preferredInterval, input.maxOverviewFrames);
-  const interval = input.duration <= preferredInterval * input.maxOverviewFrames
-    ? preferredInterval
-    : input.duration / input.maxOverviewFrames;
-  const sampleEnd = Math.max(input.duration - 0.05, 0);
-  const sampleTimes: number[] = [];
-  for (let t = 0; t < sampleEnd; t += interval) {
-    sampleTimes.push(t);
-  }
-  if (sampleTimes.length === 0 || sampleTimes[sampleTimes.length - 1] < sampleEnd) {
-    sampleTimes.push(sampleEnd);
-  }
+  const windows = buildCoarseRepresentativeWindows(input.duration, preferredInterval, input.maxOverviewFrames);
+  if (windows.length === 0) return [];
 
-  const samples: SourceFrameSample[] = sampleTimes.slice(0, frameTarget).map((t, i) => ({ index: i, sourceTime: t }));
-  if (samples.length === 0) return [];
+  const candidateSamples = windows.flatMap((window) => (
+    buildRepresentativeCandidateTimes(window).map((sourceTime) => ({
+      windowIndex: window.index,
+      sourceTime,
+      windowStart: window.startTime,
+      windowEnd: window.endTime,
+    }))
+  ));
+  if (candidateSamples.length === 0) return [];
 
   const images = await extractVideoFrames(
     input.source,
-    samples.map((sample) => sample.sourceTime),
+    candidateSamples.map((sample) => sample.sourceTime),
     {
       concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
       onProgress: ({ completed, total }) => {
@@ -1146,11 +1277,34 @@ async function extractSourceOverviewFrames(
     },
   );
 
-  return samples.map((sample, index) => ({
-    sourceId: input.sourceId,
-    sourceTime: sample.sourceTime,
-    image: images[index],
+  const scoredCandidates = await Promise.all(candidateSamples.map(async (sample, index) => {
+    const image = images[index];
+    const metrics = await measureFrameHeuristics(image);
+    const score = scoreFrameHeuristics(metrics, Number.POSITIVE_INFINITY);
+    return {
+      ...sample,
+      image,
+      score,
+    };
   }));
+
+  const bestByWindow = new Map<number, (typeof scoredCandidates)[number]>();
+  for (const candidate of scoredCandidates) {
+    const currentBest = bestByWindow.get(candidate.windowIndex);
+    if (!currentBest || candidate.score > currentBest.score) {
+      bestByWindow.set(candidate.windowIndex, candidate);
+    }
+  }
+
+  return [...bestByWindow.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, candidate]) => ({
+      sourceId: input.sourceId,
+      sourceTime: candidate.sourceTime,
+      image: candidate.image,
+      sampleKind: 'coarse_window_rep',
+      score: Number(candidate.score.toFixed(4)),
+    }));
 }
 
 async function extractTimelineFramesFromSources(
@@ -1982,9 +2136,11 @@ export default function ChatSidebar() {
   const transcriptStartedAtRef = useRef<number | null>(null);
   const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
+  const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
+  const storagePath = useEditorStore(s => s.storagePath);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
   const applyStoredAction = useEditorStore(s => s.applyAction);
@@ -2002,6 +2158,7 @@ export default function ChatSidebar() {
       videoDuration,
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, videoData, videoDuration, videoFile, videoUrl]);
+  const useServerSourceIndex = Boolean(currentProjectId && storagePath);
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
   ), [availableSources, sourceIndexFreshBySourceId]);
@@ -2107,6 +2264,7 @@ export default function ChatSidebar() {
 
   // Source overview indexing runs only when a source is missing canonical frame data.
   useEffect(() => {
+    if (useServerSourceIndex) return;
     if ((!videoFile && !videoUrl && !videoData) || videoDuration <= 0) return;
     if (document.hidden || playbackActive || missingOverviewSources.length === 0) return;
     void (async () => {
@@ -2117,7 +2275,7 @@ export default function ChatSidebar() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missingOverviewSources, playbackActive, videoData, videoDuration, videoFile, videoUrl]);
+  }, [missingOverviewSources, playbackActive, useServerSourceIndex, videoData, videoDuration, videoFile, videoUrl]);
 
   const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
     if (!force && extractionPromiseRef.current) return extractionPromiseRef.current;
@@ -2138,12 +2296,12 @@ export default function ChatSidebar() {
 
       let completedFrames = 0;
       const totalTargetFrames = sourcesToIndex.reduce(
-        (sum, entry) => sum + getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames),
+        (sum, entry) => sum + getAdaptiveCoarseFrameBudget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames),
         0,
       );
 
       for (const entry of sourcesToIndex) {
-        const frameCount = getOverviewFrameTarget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames);
+        const frameCount = getAdaptiveCoarseFrameBudget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames);
         const extractionStartedAt = performance.now();
         const extractionFallbackPerFrame = estimateFrameExtractionSeconds(frameCount) / Math.max(frameCount, 1);
         let lastProgressPaintAt = 0;
@@ -2151,7 +2309,7 @@ export default function ChatSidebar() {
           stage: 'extracting_frames',
           completed: completedFrames,
           total: Math.max(totalTargetFrames, 1),
-          label: `Sampling source frames`,
+          label: `Choosing representative frames`,
           etaSeconds: estimateFrameExtractionSeconds(frameCount),
         });
 
@@ -2169,7 +2327,7 @@ export default function ChatSidebar() {
               stage: 'extracting_frames',
               completed: completedFrames + completed,
               total: Math.max(totalTargetFrames, 1),
-              label: `Sampling frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
+              label: `Choosing representative frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
               etaSeconds: estimateRemainingSecondsFromObservedRate(
                 extractionStartedAt,
                 completedFrames + completed,
@@ -2192,7 +2350,7 @@ export default function ChatSidebar() {
         stage: 'extracting_frames',
         completed: totalTargetFrames,
         total: Math.max(totalTargetFrames, 1),
-        label: `Sampled source frames`,
+        label: `Representative frames ready`,
         etaSeconds: 0,
       });
       return refreshedState.projectedOverviewFrames ?? [];
@@ -2211,6 +2369,77 @@ export default function ChatSidebar() {
       }
     }
   }, [availableSources, setSourceOverviewFrames]);
+
+  const extractDenseFramesForRange = useCallback(async (
+    frameRequest: { startTime: number; endTime: number; count?: number },
+  ): Promise<IndexedVideoFrame[]> => {
+    const requestedDuration = Math.max(0, frameRequest.endTime - frameRequest.startTime);
+    const timelineTimestamps = buildDenseTimelineTimestamps(
+      frameRequest.startTime,
+      frameRequest.endTime,
+      Math.max(
+        frameRequest.count ?? useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount,
+        Math.ceil(requestedDuration / DEFAULT_DENSE_MAX_SPACING_SECONDS) + 1,
+      ),
+      DEFAULT_DENSE_MAX_SPACING_SECONDS,
+    );
+    if (timelineTimestamps.length === 0) return [];
+
+    const extractionStartedAt = performance.now();
+    setFrameIndexingProgress({
+      stage: 'dense_refinement',
+      completed: 0,
+      total: timelineTimestamps.length,
+      label: `Dense local refinement 0/${timelineTimestamps.length}`,
+      etaSeconds: estimateFrameExtractionSeconds(timelineTimestamps.length),
+    });
+
+    const denseFrames = await extractTimelineFramesFromSources({
+      clips: useEditorStore.getState().clips,
+      videoData,
+      videoFile,
+      videoUrl: processingVideoUrl || videoUrl,
+      videoDuration,
+      timelineTimestamps,
+      kind: 'dense',
+      onProgress: ({ completed, total }) => {
+        setFrameIndexingProgress({
+          stage: 'dense_refinement',
+          completed,
+          total,
+          label: `Dense local refinement ${completed}/${total}`,
+          etaSeconds: estimateRemainingSecondsFromObservedRate(
+            extractionStartedAt,
+            completed,
+            total,
+            estimateFrameExtractionSeconds(total) / Math.max(total, 1),
+          ),
+        });
+      },
+    });
+
+    const describedDenseFrames = await describeIndexedFrames(denseFrames, ({ completed, total }) => {
+      setFrameIndexingProgress({
+        stage: 'dense_refinement',
+        completed,
+        total,
+        label: `Dense local refinement ${completed}/${total}`,
+        etaSeconds: estimateRemainingSecondsFromObservedRate(
+          extractionStartedAt,
+          completed,
+          total,
+          estimateFrameDescriptionSeconds(total) / Math.max(total, 1),
+        ),
+      });
+    });
+
+    setFrameIndexingProgress(null);
+    return describedDenseFrames.map((frame) => ({
+      ...frame,
+      rangeStart: frameRequest.startTime,
+      rangeEnd: frameRequest.endTime,
+    }));
+  }, [processingVideoUrl, videoData, videoDuration, videoFile, videoUrl]);
 
   async function ensureFrameDescriptions(
     frames: SourceIndexedFrame[],
@@ -2403,11 +2632,14 @@ export default function ChatSidebar() {
     ctrl: AbortController,
   ) => {
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
-    const preferSourceVisualRetrieval = looksLikeVisualSearchQuery(latestUserInput) && !!useEditorStore.getState().currentProjectId;
-    const currentFrames = preferSourceVisualRetrieval ? [] : await ensureFramesExtracted();
+    const baseFrames = useServerSourceIndex
+      ? (useEditorStore.getState().projectedOverviewFrames ?? [])
+      : await ensureFramesExtracted();
+    let currentFrames = [...baseFrames];
+    let nextHistory = [...history];
     let producedVisibleResponse = false;
 
-    for (let round = 0; round < 2; round++) {
+    for (let round = 0; round < 3; round++) {
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
       const currentClips = freshState.clips;
@@ -2415,7 +2647,7 @@ export default function ChatSidebar() {
       const silenceCandidates = buildSilenceCandidatePayload();
 
       const { message = '', action, visualSearch } = await postChatRequest({
-        messages: history,
+        messages: nextHistory,
         context: {
           projectId: freshState.currentProjectId,
           visualSearchSession: freshState.visualSearchSession,
@@ -2457,6 +2689,30 @@ export default function ChatSidebar() {
           frames: buildFrameContextPayload(currentFrames, currentClips),
         },
       }, ctrl);
+
+      if (action?.type === 'request_frames' && action.frameRequest && round < 2) {
+        setLoadingStatus('Dense local refinement…');
+        const denseFrames = await extractDenseFramesForRange(action.frameRequest);
+        currentFrames = [...baseFrames, ...denseFrames];
+        nextHistory = [
+          ...nextHistory,
+          {
+            role: 'assistant',
+            content: action.message,
+            action,
+            actionType: action.type,
+            actionMessage: action.message,
+            actionStatus: 'completed',
+            actionResult: 'Dense local frame refinement ready.',
+          },
+          {
+            role: 'user',
+            content: `[${denseFrames.length} dense frames extracted from ${formatTime(action.frameRequest.startTime)} to ${formatTime(action.frameRequest.endTime)}, now answer with these frames.]`,
+          },
+        ];
+        continue;
+      }
+
       setVisualSearchSession(visualSearch ?? null);
       const markerAction = isMarkerMutationAction(action);
       if (!markerAction) {
@@ -2504,7 +2760,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFramesExtracted, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers, useServerSourceIndex]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -2645,10 +2901,16 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = !!(videoFile || videoUrl || videoData);
+  const usingServerSourceIndex = useServerSourceIndex;
+  const coarseFramesAvailable = (projectedOverviewFrames ?? []).some((frame) => hasUsableFrameDescription(frame.description));
   const frameAnalysisReady = projectedOverviewFrames !== null && frameDescriptionsReady;
-  const framesReady = frameAnalysisError !== null || frameAnalysisReady;
+  const framesReady = usingServerSourceIndex
+    ? frameAnalysisError !== null || frameAnalysisReady || coarseFramesAvailable
+    : frameAnalysisError !== null || frameAnalysisReady;
   const transcriptFailed = transcriptStatus === 'error';
-  const agentContextReady = framesReady && (transcriptStatus === 'done' || transcriptFailed);
+  const agentContextReady = usingServerSourceIndex
+    ? true
+    : framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const estimatedTranscriptRemainingEta =
     transcriptProgress && transcriptProgress.total > 0 && transcriptStartedAtRef.current !== null
@@ -2664,27 +2926,46 @@ export default function ChatSidebar() {
     : null;
   const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
     ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`
+    : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
+      ? `${sourceIndexAnalysis.error} The assistant will keep working with any transcript and representative frames that already finished.`
     : null;
-  const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && !!currentProjectId;
+  const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && usingServerSourceIndex;
   const canSendDespiteIndexing = pendingVisualQuery;
   const isAnalyzingSampledFrames = hasVideoSource
     && (transcriptStatus === 'done' || transcriptFailed)
     && projectedOverviewFrames !== null
     && frameAnalysisError === null
     && !frameDescriptionsReady;
-  const mediaPreparationBlockingSend = hasVideoSource
+  const mediaPreparationBlockingSend = !usingServerSourceIndex && hasVideoSource
     && !agentContextReady
     && !canSendDespiteIndexing
     && !isAnalyzingSampledFrames;
-  const secondaryIndexingProgress: IndexingProgress | null = (transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
+  const secondaryIndexingProgress: IndexingProgress | null = (!usingServerSourceIndex && transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
     ? frameIndexingProgress
     : null;
-  const indexingDetail = (!framesReady && !secondaryIndexingProgress)
-    ? 'Deep indexing can take a while on longer videos.'
+  const indexingDetail = (!usingServerSourceIndex && !framesReady && !secondaryIndexingProgress)
+    ? 'Coarse indexing can take a while on longer videos.'
     : null;
   const analysisStatusCards: AnalysisStatusCard[] = [];
   if (hasVideoSource) {
-    if (transcriptStatus === 'loading') {
+    if (usingServerSourceIndex) {
+      if (sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running') {
+        analysisStatusCards.push({
+          key: 'coarse-indexing',
+          title: 'Coarse indexing',
+          progress: sourceIndexAnalysis.progress,
+          detail: 'Transcript and representative frames become usable as they arrive.',
+          secondaryLabel: getIndexingStageTitle(sourceIndexAnalysis.progress, null),
+        });
+      } else if (sourceIndexAnalysis?.status === 'completed' && (coarseFramesAvailable || transcriptStatus === 'done')) {
+        analysisStatusCards.push({
+          key: 'coarse-indexing',
+          title: 'Coarse indexing',
+          progress: buildCompletedProgress('describing_representative_frames'),
+          tone: 'completed',
+        });
+      }
+    } else if (transcriptStatus === 'loading') {
       analysisStatusCards.push({
         key: 'audio-analysis',
         title: 'Audio analysis',
@@ -2699,7 +2980,7 @@ export default function ChatSidebar() {
         },
         secondaryLabel: 'Transcribing audio…',
       });
-    } else if (transcriptStatus === 'done') {
+    } else if (!usingServerSourceIndex && transcriptStatus === 'done') {
       analysisStatusCards.push({
         key: 'audio-analysis',
         title: 'Audio analysis',
@@ -2708,18 +2989,25 @@ export default function ChatSidebar() {
       });
     }
 
-    if (frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
+    if (frameIndexingProgress && frameIndexingProgress.stage === 'dense_refinement' && frameAnalysisError === null) {
+      analysisStatusCards.push({
+        key: 'dense-refinement',
+        title: 'Dense refinement',
+        progress: frameIndexingProgress,
+        secondaryLabel: 'Local follow-up only inside the narrowed range.',
+      });
+    } else if (!usingServerSourceIndex && frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
       analysisStatusCards.push({
         key: 'frame-analysis',
-        title: 'Frame analysis',
+        title: 'Representative frames',
         progress: frameIndexingProgress,
         detail: indexingDetail,
         secondaryLabel: getIndexingStageTitle(frameIndexingProgress, null),
       });
-    } else if (frameAnalysisReady) {
+    } else if (!usingServerSourceIndex && frameAnalysisReady) {
       analysisStatusCards.push({
         key: 'frame-analysis',
-        title: 'Frame analysis',
+        title: 'Representative frames',
         progress: buildCompletedProgress('describing_frames'),
         tone: 'completed',
       });
@@ -3132,7 +3420,7 @@ export default function ChatSidebar() {
                 : isChatLoading
                   ? 'Autocut is working…'
                   : isAnalyzingSampledFrames
-                    ? 'Autocut is analyzing frames. You can send now…'
+                    ? 'Autocut is describing representative frames. You can send now…'
                   : mediaPreparationBlockingSend
                     ? 'Autocut is preparing the media. You can keep typing…'
                   : 'Find events, reference markers, and review cuts…'
