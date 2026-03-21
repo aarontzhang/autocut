@@ -6,7 +6,6 @@ import {
   EditAction,
   IndexedVideoFrame,
   SilenceCandidate,
-  VideoClip,
   VisualSearchSession,
 } from '@/lib/types';
 import { formatTimePrecise } from '@/lib/timelineUtils';
@@ -19,7 +18,6 @@ import {
   validateEditAction,
 } from '@/lib/server/llmGuardrails';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
-import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
 const client = new Anthropic();
 const MIN_CHAT_CLIP_DURATION_SECONDS = 0.05;
@@ -206,6 +204,9 @@ No action:
 - Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
+- Resolve short follow-ups like "do it", "place a marker", "cut it", "caption that", "move it earlier", or "remove it" against the active conversation task and the latest assistant evidence window provided in context before asking for clarification.
+- If a previous assistant reply already identified a likely moment or time window and the user asks you to tag, mark, cut, caption, or otherwise act on that same moment, emit the concrete action directly instead of restating the evidence.
+- Prefer reasoning from the structured conversation state in context over keyword matching. Use earlier user goals, the latest unresolved proposal, markers, and the latest assistant evidence together to infer intent.
 - If the latest user message contains a clear edit request, always attempt it — use the transcript and frame summaries to gather evidence. Never ask the user to clarify when you can investigate yourself.
 - When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
@@ -512,67 +513,6 @@ function resolveTranscriptWindow(params: {
   }
 
   return null;
-}
-
-function selectRelevantOverviewFrames(
-  frames: IndexedVideoFrame[],
-  messages: ChatTurn[],
-  maxFrames = 60,
-): IndexedVideoFrame[] {
-  if (frames.length <= maxFrames) return frames;
-
-  const recentUserText = messages
-    .filter((message) => message.role === 'user')
-    .slice(-3)
-    .map((message) => message.content)
-    .join(' ');
-  const queryTokens = new Set(tokenizeForRetrieval(recentUserText));
-
-  if (queryTokens.size === 0) {
-    const stride = Math.ceil(frames.length / maxFrames);
-    return frames.filter((_, index) => index % stride === 0).slice(0, maxFrames);
-  }
-
-  const scored = frames.map((frame, index) => {
-    const descriptionTokens = new Set(tokenizeForRetrieval(frame.description ?? ''));
-    let score = 0;
-    for (const token of queryTokens) {
-      if (descriptionTokens.has(token)) score += 1;
-    }
-    return { frame, index, score };
-  });
-
-  const topMatches = scored
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, Math.max(1, Math.floor(maxFrames / 3)));
-
-  if (topMatches.length === 0) {
-    const stride = Math.ceil(frames.length / maxFrames);
-    return frames.filter((_, index) => index % stride === 0).slice(0, maxFrames);
-  }
-
-  const selectedIndexes = new Set<number>();
-  for (const match of topMatches) {
-    for (let offset = -1; offset <= 1; offset += 1) {
-      const candidate = match.index + offset;
-      if (candidate >= 0 && candidate < frames.length) {
-        selectedIndexes.add(candidate);
-      }
-    }
-  }
-
-  if (selectedIndexes.size < maxFrames) {
-    const stride = Math.max(1, Math.floor(frames.length / maxFrames));
-    for (let index = 0; index < frames.length && selectedIndexes.size < maxFrames; index += stride) {
-      selectedIndexes.add(index);
-    }
-  }
-
-  return [...selectedIndexes]
-    .sort((a, b) => a - b)
-    .slice(0, maxFrames)
-    .map((index) => frames[index]);
 }
 
 function sourceTimeToTimelineFromContext(clips: ClipSummary[], sourceTime: number): number | null {
@@ -1142,22 +1082,6 @@ function extractMentionedMarkers(
   return explicitMarkers;
 }
 
-function toProjectionClips(clips: ClipSummary[]): VideoClip[] {
-  return clips
-    .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS)
-    .map((clip, index) => ({
-      id: `clip-${clip.index ?? index}`,
-      sourceId: clip.sourceId ?? MAIN_SOURCE_ID,
-      sourceStart: clip.sourceStart,
-      sourceDuration: clip.sourceDuration,
-      speed: clip.speed ?? 1,
-      volume: 1,
-      filter: null,
-      fadeIn: 0,
-      fadeOut: 0,
-    }));
-}
-
 function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (seconds: number) => string): string[] {
   const lines = [
     `Latest source visual retrieval query (untrusted user request): "${sanitizeInlineUntrustedText(session.query, 180)}" (${session.confidenceBand} confidence)`,
@@ -1194,205 +1118,13 @@ function isMarkerPlacementRequest(message: string): boolean {
     && /\b(add|create|drop|find|help|locate|mark|place|point|set|tag|put)\b/.test(normalized);
 }
 
-function extractExplicitTimelineReferences(message: string): number[] {
-  const matches: number[] = [];
-  const seen = new Set<number>();
-  const timePattern = /\b(?:(\d+):([0-5]\d)|(\d+(?:\.\d+)?)\s*seconds?)\b/gi;
-  let match: RegExpExecArray | null;
-
-  while ((match = timePattern.exec(message)) !== null) {
-    const seconds = match[1] !== undefined
-      ? parseInt(match[1], 10) * 60 + parseInt(match[2] ?? '0', 10)
-      : parseFloat(match[3] ?? '0');
-    if (!Number.isFinite(seconds) || seen.has(seconds)) continue;
-    seen.add(seconds);
-    matches.push(seconds);
-  }
-
-  return matches;
-}
-
-function formatMinutesSeconds(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.floor(seconds % 60);
-  return `${minutes}:${remainder.toString().padStart(2, '0')}`;
-}
-
-function buildMarkerLabelFromQuery(query: string): string {
-  const cleaned = query
-    .replace(/\b(?:please|could you|can you|would you|for me)\b/gi, ' ')
-    .replace(/\b(?:add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/gi, ' ')
-    .replace(/\b(?:a|an|the)\s+(?:marker|bookmark|tag)\b/gi, ' ')
-    .replace(/\b(?:marker|bookmark|tag)\b/gi, ' ')
-    .replace(/\b(?:where|when|that|this|there|here)\b/gi, ' ')
-    .replace(/["']/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!cleaned) return 'Likely match';
-  if (cleaned.length <= 48) return cleaned;
-  return `${cleaned.slice(0, 45).trimEnd()}...`;
-}
-
-function queriesLikelyReferToSameMoment(a: string, b: string): boolean {
-  const normalize = (value: string) => value.trim().toLowerCase();
-  const left = normalize(a);
-  const right = normalize(b);
-  if (!left || !right) return false;
-  if (left === right || left.includes(right) || right.includes(left)) return true;
-
-  const leftTokens = new Set(left.split(/[^a-z0-9]+/g).filter((token) => token.length >= 3));
-  const rightTokens = new Set(right.split(/[^a-z0-9]+/g).filter((token) => token.length >= 3));
-  let overlap = 0;
-  for (const token of leftTokens) {
-    if (rightTokens.has(token)) overlap += 1;
-  }
-  return overlap >= Math.min(2, Math.max(1, Math.min(leftTokens.size, rightTokens.size)));
-}
-
-function buildMarkerActionFromTimelineRanges(
-  query: string,
-  ranges: Array<{ timelineStart: number; timelineEnd: number; markerTime?: number }>,
-  confidence: number,
-  message: string,
-): EditAction | null {
-  const validRanges = ranges.filter((range) => range.timelineEnd > range.timelineStart);
-  if (validRanges.length === 0) return null;
-
-  const label = buildMarkerLabelFromQuery(query);
-  const markers = validRanges.map((range, index) => ({
-    timelineTime: range.markerTime ?? range.timelineStart,
-    label: validRanges.length === 1 ? label : `${label} ${index + 1}`,
-    createdBy: 'ai' as const,
-    status: 'open' as const,
-    linkedRange: {
-      startTime: range.timelineStart,
-      endTime: range.timelineEnd,
-    },
-    confidence,
-    note: query,
-  }));
-
-  if (markers.length === 1) {
-    return {
-      type: 'add_marker',
-      marker: markers[0],
-      message,
-    };
-  }
-
-  return {
-    type: 'add_markers',
-    markers,
-    message,
-  };
-}
-
-function buildBestEffortMarkerFallback(
-  latestUserMessage: string,
-  currentAction: EditAction | null,
-  priorVisualSearch: VisualSearchSession | null,
-): EditAction | null {
-  if (currentAction && currentAction.type !== 'none') return null;
-  if (!isMarkerPlacementRequest(latestUserMessage)) return null;
-
-  const proposalRanges = queriesLikelyReferToSameMoment(latestUserMessage, priorVisualSearch?.query ?? '')
-    ? (priorVisualSearch?.proposal?.timelineRanges ?? [])
-    : [];
-  if (proposalRanges.length > 0) {
-    return buildMarkerActionFromTimelineRanges(
-      latestUserMessage,
-      proposalRanges,
-      priorVisualSearch?.confidenceBand === 'high' ? 0.9 : priorVisualSearch?.confidenceBand === 'medium' ? 0.72 : 0.55,
-      proposalRanges.length === 1
-        ? 'Tagged the strongest likely moment for review.'
-        : `Tagged ${proposalRanges.length} likely moments for review.`,
-    );
-  }
-
-  return null;
-}
-
-function isLocateMomentRequest(message: string): boolean {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-  return /^(where|when)\b/.test(normalized)
-    || /\bwhere\s+(?:do|does|did|is|are|was|were|can)\b/.test(normalized)
-    || /\bwhen\s+(?:do|does|did|is|are|was|were|can)\b/.test(normalized);
-}
-
-function messagePromisesMarkerAction(message: string): boolean {
-  const normalized = message.toLowerCase();
-  if (!/\b(marker|bookmark|tag)\b/.test(normalized)) return false;
-  return /\bi(?:'ll| will)\s+(?:place|add|drop|set|put|leave)\b/.test(normalized)
-    || /\b(?:placing|added|dropped|set|put|left|tagged|marked)\b/.test(normalized);
-}
-
-function chooseNarratedMarkerTime(
-  explicitTimes: number[],
-  range: { start: number; end: number } | null,
-): number | null {
-  if (range) {
-    const interiorTime = [...explicitTimes]
-      .reverse()
-      .find((time) => time > range.start + 0.05 && time < range.end - 0.05);
-    if (typeof interiorTime === 'number' && Number.isFinite(interiorTime)) {
-      return interiorTime;
-    }
-    return (range.start + range.end) / 2;
-  }
-
-  const lastTime = explicitTimes[explicitTimes.length - 1];
-  return typeof lastTime === 'number' && Number.isFinite(lastTime) ? lastTime : null;
-}
-
-function buildCommittedMarkerFallback(params: {
-  latestUserMessage: string;
-  assistantMessage: string;
-  currentAction: EditAction | null;
-  videoDuration: number;
-}): EditAction | null {
-  if (params.currentAction && params.currentAction.type !== 'none') return null;
-
-  const shouldPlaceMarker = messagePromisesMarkerAction(params.assistantMessage)
-    || isLocateMomentRequest(params.latestUserMessage);
-  if (!shouldPlaceMarker) return null;
-
-  const narratedRanges = extractExplicitTimeRanges(params.assistantMessage, params.videoDuration);
-  const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
-  const explicitTimes = extractExplicitTimelineReferences(params.assistantMessage);
-  const timelineTime = chooseNarratedMarkerTime(explicitTimes, narratedRange);
-  if (timelineTime === null) return null;
-
-  return {
-    type: 'add_marker',
-    marker: {
-      timelineTime,
-      label: buildMarkerLabelFromQuery(params.latestUserMessage),
-      createdBy: 'ai',
-      status: 'open',
-      linkedRange: narratedRange
-        ? {
-            startTime: narratedRange.start,
-            endTime: narratedRange.end,
-          }
-        : undefined,
-      confidence: narratedRange ? 0.68 : 0.6,
-      note: params.latestUserMessage,
-    },
-    message: messagePromisesMarkerAction(params.assistantMessage)
-      ? 'Placed a marker for review.'
-      : 'Tagged the likely moment for review.',
-  };
-}
-
-function findLatestAssistantTimingHint(
-  messages: ChatTurn[],
-  videoDuration: number,
-): {
-  timelineTime: number;
+type LatestAssistantEvidence = {
+  content: string;
   range: { start: number; end: number } | null;
-} | null {
+  pointTime: number | null;
+};
+
+function extractLatestAssistantEvidence(messages: ChatTurn[], videoDuration: number): LatestAssistantEvidence | null {
   const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
   if (latestUserIndex <= 0) return null;
 
@@ -1401,14 +1133,15 @@ function findLatestAssistantTimingHint(
     if (message.role !== 'assistant') continue;
 
     const narratedRanges = extractExplicitTimeRanges(message.content, videoDuration);
-    const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
-    const explicitTimes = extractExplicitTimelineReferences(message.content);
-    const timelineTime = chooseNarratedMarkerTime(explicitTimes, narratedRange);
+    const range = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
+    const explicitTimes = extractExplicitTimesFromText(message.content);
+    const pointTime = explicitTimes.length > 0 ? explicitTimes[explicitTimes.length - 1] : null;
 
-    if (timelineTime !== null) {
+    if (range || pointTime !== null) {
       return {
-        timelineTime,
-        range: narratedRange,
+        content: message.content,
+        range,
+        pointTime,
       };
     }
   }
@@ -1416,42 +1149,27 @@ function findLatestAssistantTimingHint(
   return null;
 }
 
-function buildPriorAssistantMarkerFallback(params: {
-  latestUserMessage: string;
-  currentAction: EditAction | null;
-  messages: ChatTurn[];
-  videoDuration: number;
-  taskState: ConversationTaskState | null;
-}): EditAction | null {
-  if (params.currentAction && params.currentAction.type !== 'none') return null;
-  if (!isMarkerPlacementRequest(params.latestUserMessage)) return null;
+function formatLatestAssistantEvidenceContext(
+  evidence: LatestAssistantEvidence | null,
+  fmtSec: (seconds: number) => string,
+): string[] {
+  if (!evidence) return [];
 
-  const timingHint = findLatestAssistantTimingHint(params.messages, params.videoDuration);
-  if (!timingHint) return null;
+  const lines = [
+    `Latest assistant evidence before this user message: "${sanitizeInlineUntrustedText(evidence.content, 220)}"`,
+  ];
 
-  const taskAnchor = params.taskState?.activeUserMessages[0]?.trim();
-  const note = taskAnchor && taskAnchor !== params.latestUserMessage
-    ? taskAnchor
-    : params.latestUserMessage;
+  if (evidence.range) {
+    lines.push(
+      `Latest assistant evidence window: ${fmtSec(evidence.range.start)}-${fmtSec(evidence.range.end)}. If the latest user uses shorthand like "it", "that", "here", or asks to act on the same moment without restating it, prefer this window unless stronger context overrides it.`,
+    );
+  } else if (typeof evidence.pointTime === 'number' && Number.isFinite(evidence.pointTime)) {
+    lines.push(
+      `Latest assistant evidence point: ${fmtSec(evidence.pointTime)}. If the latest user uses shorthand that refers to the same moment, prefer this time unless stronger context overrides it.`,
+    );
+  }
 
-  return {
-    type: 'add_marker',
-    marker: {
-      timelineTime: timingHint.timelineTime,
-      label: buildMarkerLabelFromQuery(note),
-      createdBy: 'ai',
-      status: 'open',
-      linkedRange: timingHint.range
-        ? {
-            startTime: timingHint.range.start,
-            endTime: timingHint.range.end,
-          }
-        : undefined,
-      confidence: timingHint.range ? 0.78 : 0.7,
-      note,
-    },
-    message: 'Placed a marker at the previously identified moment.',
-  };
+  return lines;
 }
 
 function parseRetryAfterSeconds(value: string | null | undefined): number | null {
@@ -1538,7 +1256,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       `Video duration: ${(context?.videoDuration ?? 0).toFixed(2)} seconds`,
       `Number of clips: ${clipSummaries.length || context?.clipCount || 1}`,
     ];
-    const projectionClips = toProjectionClips(clipSummaries);
     const priorVisualSearch = isVisualSearchSession(context?.visualSearchSession)
       ? context.visualSearchSession
       : null;
@@ -1589,6 +1306,12 @@ Honor these defaults unless the user explicitly asks for something different in 
     }
 
     contextLines.push(...formatPendingActionContext(latestPendingAssistantAction));
+    contextLines.push(
+      ...formatLatestAssistantEvidenceContext(
+        extractLatestAssistantEvidence(normalizedMessages, Number(context?.videoDuration ?? 0)),
+        fmtSec,
+      ),
+    );
 
     const mentionedTimes = extractMentionedTimes(normalizedMessages, clipSummaries);
     if (mentionedTimes.length > 0) {
@@ -1781,36 +1504,9 @@ Honor these defaults unless the user explicitly asks for something different in 
       validateEditAction(parsedAction, validationContext),
       validationContext.videoDuration,
     );
-    const committedMarkerFallback = validateEditAction(
-      buildCommittedMarkerFallback({
-        latestUserMessage: effectiveLatestUserMessage,
-        assistantMessage: message,
-        currentAction: action,
-        videoDuration: validationContext.videoDuration,
-      }),
-      validationContext,
-    );
-    const fallbackMarkerAction = validateEditAction(
-      buildBestEffortMarkerFallback(
-        effectiveLatestUserMessage,
-        committedMarkerFallback ?? action,
-        priorVisualSearch,
-      ),
-      validationContext,
-    );
-    const priorAssistantMarkerFallback = validateEditAction(
-      buildPriorAssistantMarkerFallback({
-        latestUserMessage: effectiveLatestUserMessage,
-        currentAction: fallbackMarkerAction ?? committedMarkerFallback ?? action,
-        messages: normalizedMessages,
-        videoDuration: validationContext.videoDuration,
-        taskState,
-      }),
-      validationContext,
-    );
     return NextResponse.json({
-      message: priorAssistantMarkerFallback?.message ?? fallbackMarkerAction?.message ?? committedMarkerFallback?.message ?? message,
-      action: priorAssistantMarkerFallback ?? fallbackMarkerAction ?? committedMarkerFallback ?? action,
+      message,
+      action,
     });
   } catch (err) {
     const upstreamErrorResponse = buildUpstreamErrorResponse(err);
