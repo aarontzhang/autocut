@@ -1445,16 +1445,16 @@ function AutoAvatar({ size = 28 }: { size?: number }) {
       width: size,
       height: size,
       borderRadius: 10,
-      background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))',
-      border: '1px solid rgba(255,255,255,0.08)',
+      background: '#0A0A0A',
+      border: '1px solid rgba(255,255,255,0.12)',
       display: 'inline-flex',
       alignItems: 'center',
       justifyContent: 'center',
-      boxShadow: '0 10px 24px rgba(0,0,0,0.18)',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
       flexShrink: 0,
     }}>
       <AutocutMark
-        size={Math.max(16, Math.round(size * 0.72))}
+        size={Math.max(16, Math.round(size * 0.78))}
         withTile={false}
       />
     </div>
@@ -1496,6 +1496,7 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', width: '100%', marginBottom: 8 }}>
       <div style={{
+        display: 'inline-block',
         maxWidth: '72%',
         background: 'rgba(255,255,255,0.06)',
         border: '1px solid rgba(255,255,255,0.08)',
@@ -1749,12 +1750,13 @@ function AssistantMessage({
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%', marginBottom: 10 }}>
       <AutoAvatar />
-      <div style={{ minWidth: 0, flex: 1, maxWidth: 'calc(100% - 38px)' }}>
+      <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', width: '100%', maxWidth: '72%' }}>
         <div style={{ marginBottom: 6 }}>
           <AutoIdentity />
         </div>
 
         <div style={{
+          display: 'inline-block',
           fontSize: 13,
           color: 'var(--fg-secondary)',
           lineHeight: 1.65,
@@ -1763,6 +1765,7 @@ function AssistantMessage({
           borderRadius: '12px 12px 12px 4px',
           background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
           border: '1px solid rgba(255,255,255,0.07)',
+          maxWidth: '100%',
         }}>
           <MarkerAwareText text={msg.content} />
         </div>
@@ -1774,6 +1777,7 @@ function AssistantMessage({
             borderRadius: 7,
             overflow: 'hidden',
             background: 'var(--bg-elevated)',
+            width: '100%',
           }}>
             <div style={{
               padding: '7px 12px',
@@ -1955,7 +1959,7 @@ function ThinkingIndicator({ status }: { status?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%' }}>
       <AutoAvatar />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, maxWidth: 'calc(100% - 38px)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, alignItems: 'flex-start', width: '100%', maxWidth: '72%' }}>
         <AutoIdentity subtitle="Typing..." />
         <div style={{
           display: 'inline-flex',
