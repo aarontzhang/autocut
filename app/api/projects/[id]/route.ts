@@ -20,6 +20,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (error || !project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   const signedUrl = project.video_path
+    ? `/api/projects/${id}/media`
+    : null;
+  const processingUrl = project.video_path
     ? await supabase.storage
         .from('videos')
         .createSignedUrl(project.video_path, 3600)
@@ -29,6 +32,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({
     ...project,
     signedUrl,
+    processingUrl,
   });
 }
 

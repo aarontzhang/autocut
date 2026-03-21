@@ -261,6 +261,7 @@ function normalizeSelectedItem(selectedItem: SelectedItem, markers: MarkerEntry[
 function buildBaseEditorState(input?: {
   videoFile?: File | null;
   videoUrl?: string;
+  processingVideoUrl?: string;
   videoName?: string;
   currentProjectId?: string | null;
   storagePath?: string | null;
@@ -268,6 +269,7 @@ function buildBaseEditorState(input?: {
   EditorState,
   | 'videoFile'
   | 'videoUrl'
+  | 'processingVideoUrl'
   | 'videoName'
   | 'videoData'
   | 'videoDuration'
@@ -311,6 +313,7 @@ function buildBaseEditorState(input?: {
   return {
     videoFile: input?.videoFile ?? null,
     videoUrl: input?.videoUrl ?? '',
+    processingVideoUrl: input?.processingVideoUrl ?? input?.videoUrl ?? '',
     videoName: input?.videoName ?? '',
     videoData: null,
     videoDuration: 0,
@@ -356,6 +359,7 @@ function buildBaseEditorState(input?: {
 interface EditorState {
   videoFile: File | null;
   videoUrl: string;
+  processingVideoUrl: string;
   videoName: string;
   videoData: Uint8Array | null;
   videoDuration: number;
@@ -459,6 +463,7 @@ interface EditorState {
     project: {
       projectId: string;
       videoUrl: string;
+      processingVideoUrl?: string;
       storagePath: string | null;
       videoFilename?: string | null;
       duration?: number;
@@ -530,6 +535,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...buildBaseEditorState({
         videoFile: file,
         videoUrl: url,
+        processingVideoUrl: url,
         videoName: file.name,
       }),
       messages: state.messages,
@@ -996,6 +1002,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...buildBaseEditorState({
         videoFile: file,
         videoUrl: blobUrl,
+        processingVideoUrl: blobUrl,
         videoName: file.name,
         currentProjectId: projectId,
         storagePath,
@@ -1010,6 +1017,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...buildBaseEditorState({
         videoFile: file,
         videoUrl: url,
+        processingVideoUrl: url,
         videoName: file.name,
         currentProjectId: projectId,
         storagePath,
@@ -1019,7 +1027,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   loadProject: (editState, project) => {
-    const { videoUrl, storagePath, projectId, videoFilename, duration } = project;
+    const { videoUrl, processingVideoUrl, storagePath, projectId, videoFilename, duration } = project;
     const existingState = get();
     const canReuseLocalVideo = (
       existingState.currentProjectId === projectId
@@ -1034,6 +1042,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const resolvedVideoUrl = canReuseLocalVideo && existingState.videoUrl
       ? existingState.videoUrl
       : videoUrl;
+    const resolvedProcessingVideoUrl = canReuseLocalVideo && existingState.processingVideoUrl
+      ? existingState.processingVideoUrl
+      : (processingVideoUrl ?? videoUrl);
     const resolvedVideoName = canReuseLocalVideo && existingState.videoFile
       ? existingState.videoFile.name
       : videoFilename?.trim() || 'Main video';
@@ -1115,6 +1126,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...buildBaseEditorState({
         videoFile: resolvedVideoFile,
         videoUrl: resolvedVideoUrl,
+        processingVideoUrl: resolvedProcessingVideoUrl,
         videoName: resolvedVideoName,
         currentProjectId: projectId,
         storagePath,
@@ -1160,8 +1172,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setPlaybackActive: (active) => set({ playbackActive: active }),
 
   resetEditor: () => {
-    const { videoUrl } = get();
+    const { videoUrl, processingVideoUrl } = get();
     if (videoUrl) URL.revokeObjectURL(videoUrl);
+    if (processingVideoUrl && processingVideoUrl !== videoUrl) URL.revokeObjectURL(processingVideoUrl);
     set({
       ...buildBaseEditorState(),
       messages: [],

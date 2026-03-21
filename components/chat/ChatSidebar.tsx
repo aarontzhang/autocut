@@ -1304,6 +1304,7 @@ function AssistantMessage({
   onActionResolved: (messageId: string, action: EditAction, actionResult?: string | null) => Promise<void>;
 }) {
   const videoUrl = useEditorStore(s => s.videoUrl);
+  const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
@@ -1464,6 +1465,7 @@ function AssistantMessage({
         videoData,
         videoFile,
         videoUrl,
+        processingVideoUrl,
         videoDuration: state.videoDuration,
       })[0];
       const rangesBySource = new Map<string, Array<{ startTime: number; endTime: number }>>();
@@ -1513,7 +1515,7 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, clips, existingSourceTranscriptCaptions, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
+  }, [action, addMessage, clips, existingSourceTranscriptCaptions, msg.id, onTranscriptReady, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, updateMessage, videoData, videoFile, videoUrl]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
@@ -1971,6 +1973,7 @@ export default function ChatSidebar() {
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
+  const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoData = useEditorStore(s => s.videoData);
   const videoFile = useEditorStore(s => s.videoFile);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
@@ -1995,9 +1998,10 @@ export default function ChatSidebar() {
       videoData,
       videoFile,
       videoUrl,
+      processingVideoUrl,
       videoDuration,
     }).filter((entry) => entry.source && entry.duration > 0)
-  ), [videoData, videoDuration, videoFile, videoUrl]);
+  ), [processingVideoUrl, videoData, videoDuration, videoFile, videoUrl]);
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
   ), [availableSources, sourceIndexFreshBySourceId]);

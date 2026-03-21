@@ -12,7 +12,7 @@ import ChatSidebar from '../chat/ChatSidebar';
 import ExportProgress from './ExportProgress';
 import { useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
-import { uploadProjectMedia, createSignedUrls } from '@/lib/projectMedia';
+import { createSignedUrls, uploadProjectMedia } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
@@ -111,6 +111,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const hydrateSourceIndex = useEditorStore(s => s.hydrateSourceIndex);
   const resetEditor = useEditorStore(s => s.resetEditor);
   const videoUrl = useEditorStore(s => s.videoUrl);
+  const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const setStoragePath = useEditorStore(s => s.setStoragePath);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const storagePath = useEditorStore(s => s.storagePath);
@@ -139,8 +140,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const state = useEditorStore.getState();
     if (state.currentProjectId !== targetProjectId || !state.storagePath) return;
     const signedPaths = await createSignedUrls([state.storagePath]);
-    const nextUrl = signedPaths.get(state.storagePath);
-    if (!nextUrl) return;
+    const processingVideoUrl = signedPaths.get(state.storagePath) ?? '';
+    const nextUrl = `/api/projects/${targetProjectId}/media`;
 
     useEditorStore.setState((currentState) => {
       if (currentState.currentProjectId !== targetProjectId || isBlobUrl(currentState.videoUrl)) {
@@ -148,6 +149,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       }
       return {
         videoUrl: nextUrl,
+        processingVideoUrl: processingVideoUrl || currentState.processingVideoUrl,
       };
     });
     lastSignedMediaRefreshAtRef.current = Date.now();
@@ -206,7 +208,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     // Prefer a URL string over a File object so readMediaInput can cache the
     // result across chunks instead of re-reading the entire file from disk
     // on every 45-second segment.
-    const source = videoData ?? videoFile ?? videoUrl;
+    const source = videoData ?? videoFile ?? processingVideoUrl ?? videoUrl;
     const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
     if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || transcriptStatus === 'error' || document.hidden || playbackActive) {
       return;
@@ -238,7 +240,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, playbackActive, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -258,6 +260,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         loadProject(editState, {
           projectId,
           videoUrl: data.signedUrl ?? '',
+          processingVideoUrl: data.processingUrl ?? data.signedUrl ?? '',
           storagePath: data.video_path ?? null,
           videoFilename: data.video_filename ?? null,
           duration: typeof data.duration === 'number' ? data.duration : undefined,

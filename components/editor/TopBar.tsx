@@ -11,6 +11,7 @@ export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const videoUrl = useEditorStore(s => s.videoUrl);
+  const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const ffmpegJob = useEditorStore(s => s.ffmpegJob);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
@@ -22,7 +23,7 @@ export default function TopBar() {
   const canRedo = useEditorStore(s => s.future.length > 0);
   const { user } = useAuth();
 
-  const exportSource = videoData ?? videoFile ?? videoUrl ?? null;
+  const exportSource = videoData ?? videoFile ?? processingVideoUrl ?? videoUrl ?? null;
 
   const outputReady = ffmpegJob.status === 'done';
   const canExport = clips.length > 0 && ffmpegJob.status === 'idle' && !!exportSource;
