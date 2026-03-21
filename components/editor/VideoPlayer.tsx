@@ -560,7 +560,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         >
           <video
             ref={videoRef}
-            src={primaryLayerSourceUrl}
+            src={primaryLayerSourceUrl || undefined}
             style={{
               position: 'absolute',
               inset: 0,
@@ -590,7 +590,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
           <video
             ref={secondaryVideoRef}
-            src={secondaryLayerSourceUrl}
+            src={secondaryLayerSourceUrl || undefined}
             style={{
               position: 'absolute',
               inset: 0,
