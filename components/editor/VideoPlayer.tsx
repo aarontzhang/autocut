@@ -37,6 +37,24 @@ type VideoWithFrameCallback = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void;
 };
 
+function fitVideoFrame(
+  container: { width: number; height: number },
+  video: { width: number; height: number } | null,
+) {
+  if (!container.width || !container.height || !video?.width || !video.height) {
+    return { width: container.width, height: container.height };
+  }
+
+  const containerRatio = container.width / container.height;
+  const videoRatio = video.width / video.height;
+
+  if (videoRatio > containerRatio) {
+    return { width: container.width, height: container.width / videoRatio };
+  }
+
+  return { width: container.height * videoRatio, height: container.height };
+}
+
 function getEntrySourceTime(entry: RenderTimelineEntry, timelineTime: number) {
   const clampedTimelineTime = Math.max(entry.timelineStart, Math.min(timelineTime, entry.timelineEnd));
   return entry.sourceStart + (clampedTimelineTime - entry.timelineStart) * entry.speed;
@@ -107,6 +125,7 @@ function getTransitionMix(boundary: ResolvedTransitionBoundary, timelineTime: nu
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
 
   const secondaryVideoRef = useRef<HTMLVideoElement>(null);
@@ -170,7 +189,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     return null;
   }, [activeCaptionCue, currentTime]);
   const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
-  const videoDisplaySize = containerSize;
+  const videoDisplaySize = useMemo(
+    () => fitVideoFrame(containerSize, videoDimensions),
+    [containerSize, videoDimensions],
+  );
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -484,10 +506,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         <div
           style={{
             position: 'relative',
-            width: '100%',
-            height: '100%',
+            width: Math.max(0, videoDisplaySize.width),
+            height: Math.max(0, videoDisplaySize.height),
+            maxWidth: '100%',
+            maxHeight: '100%',
             overflow: 'hidden',
-            background: '#000',
           }}
         >
           <video
@@ -498,12 +521,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               inset: 0,
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: 'contain',
               cursor: 'pointer',
               opacity: transitionMix?.outgoingOpacity ?? 1,
             }}
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
+              setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
               setVideoDuration(el.duration);
               setIsVideoReady(el.readyState >= 2);
               seekToTimelineTime(currentTimeRef.current);
@@ -525,7 +549,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               inset: 0,
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: 'contain',
               pointerEvents: 'none',
               opacity: transitionMix?.incomingOpacity ?? 0,
               clipPath: transitionMix?.incomingClipPath ?? 'inset(0 0 0 0)',
