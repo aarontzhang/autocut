@@ -69,11 +69,13 @@ function buildCoarseRepresentativeWindows(duration, preferredLongIntervalSeconds
 
 function buildRepresentativeCandidateTimes(window, sceneChangeTimes = []) {
   const edgeInset = Math.min(0.35, Math.max(0.08, window.duration * 0.18));
-  const baseCandidates = [
-    window.startTime + edgeInset,
-    window.startTime + window.duration / 2,
-    window.endTime - edgeInset,
-  ];
+  const baseCandidates = window.duration <= 2.5
+    ? [window.startTime + window.duration / 2]
+    : [
+        window.startTime + edgeInset,
+        window.startTime + window.duration / 2,
+        window.endTime - edgeInset,
+      ];
   const sceneCandidates = sceneChangeTimes
     .filter((time) => time >= window.startTime && time < window.endTime)
     .map((time) => Math.min(window.endTime - 0.05, Math.max(window.startTime + 0.05, time + 0.18)));

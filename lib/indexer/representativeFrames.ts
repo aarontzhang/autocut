@@ -44,11 +44,13 @@ export function buildRepresentativeCandidateTimes(
   sceneChangeTimes: number[] = [],
 ): number[] {
   const edgeInset = Math.min(0.35, Math.max(0.08, window.duration * 0.18));
-  const baseCandidates = [
-    window.startTime + edgeInset,
-    window.startTime + window.duration / 2,
-    window.endTime - edgeInset,
-  ];
+  const baseCandidates = window.duration <= 2.5
+    ? [window.startTime + window.duration / 2]
+    : [
+        window.startTime + edgeInset,
+        window.startTime + window.duration / 2,
+        window.endTime - edgeInset,
+      ];
 
   const sceneCandidates = sceneChangeTimes
     .filter((time) => time >= window.startTime && time < window.endTime)

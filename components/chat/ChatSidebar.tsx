@@ -352,15 +352,15 @@ function getIndexingStageTitle(progress: IndexingProgress | null, fallback?: str
     case 'detecting_scenes':
       return 'Detecting scenes…';
     case 'choosing_representative_frames':
-      return 'Choosing representative frames…';
+      return 'Analyzing sampled frames…';
     case 'describing_representative_frames':
-      return 'Describing representative frames…';
+      return 'Analyzing sampled frames…';
     case 'dense_refinement':
       return 'Dense local refinement…';
     case 'extracting_frames':
-      return 'Choosing representative frames…';
+      return 'Sampling video frames…';
     case 'describing_frames':
-      return 'Describing representative frames…';
+      return 'Analyzing sampled frames…';
     case 'transcribing':
       return 'Transcribing audio…';
     default:
@@ -1247,7 +1247,12 @@ async function extractSourceOverviewFrames(
     duration: number;
     overviewIntervalSeconds: number;
     maxOverviewFrames: number;
-    onProgress?: (progress: { completed: number; total: number }) => void;
+    onProgress?: (progress: {
+      stage: 'extracting_frames' | 'choosing_representative_frames';
+      completed: number;
+      total: number;
+      label: string;
+    }) => void;
   },
 ): Promise<SourceIndexedFrame[]> {
   if (input.duration <= 0) return [];
@@ -1272,21 +1277,34 @@ async function extractSourceOverviewFrames(
     {
       concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
       onProgress: ({ completed, total }) => {
-        input.onProgress?.({ completed, total });
+        input.onProgress?.({
+          stage: 'extracting_frames',
+          completed,
+          total,
+          label: `Sampling video frames ${completed}/${total}`,
+        });
       },
     },
   );
 
-  const scoredCandidates = await Promise.all(candidateSamples.map(async (sample, index) => {
+  const scoredCandidates: Array<(typeof candidateSamples)[number] & { image: string; score: number }> = [];
+  for (let index = 0; index < candidateSamples.length; index += 1) {
+    const sample = candidateSamples[index];
     const image = images[index];
     const metrics = await measureFrameHeuristics(image);
     const score = scoreFrameHeuristics(metrics, Number.POSITIVE_INFINITY);
-    return {
+    scoredCandidates.push({
       ...sample,
       image,
       score,
-    };
-  }));
+    });
+    input.onProgress?.({
+      stage: 'choosing_representative_frames',
+      completed: index + 1,
+      total: candidateSamples.length,
+      label: `Scoring frame candidates ${index + 1}/${candidateSamples.length}`,
+    });
+  }
 
   const bestByWindow = new Map<number, (typeof scoredCandidates)[number]>();
   for (const candidate of scoredCandidates) {
@@ -2294,12 +2312,6 @@ export default function ChatSidebar() {
       setFrameAnalysisError(null);
       const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
 
-      let completedFrames = 0;
-      const totalTargetFrames = sourcesToIndex.reduce(
-        (sum, entry) => sum + getAdaptiveCoarseFrameBudget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames),
-        0,
-      );
-
       for (const entry of sourcesToIndex) {
         const frameCount = getAdaptiveCoarseFrameBudget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames);
         const extractionStartedAt = performance.now();
@@ -2307,9 +2319,9 @@ export default function ChatSidebar() {
         let lastProgressPaintAt = 0;
         setFrameIndexingProgress({
           stage: 'extracting_frames',
-          completed: completedFrames,
-          total: Math.max(totalTargetFrames, 1),
-          label: `Choosing representative frames`,
+          completed: 0,
+          total: Math.max(frameCount, 1),
+          label: `Sampling video frames 0/${Math.max(frameCount, 1)}`,
           etaSeconds: estimateFrameExtractionSeconds(frameCount),
         });
 
@@ -2319,19 +2331,19 @@ export default function ChatSidebar() {
           duration: entry.duration,
           overviewIntervalSeconds,
           maxOverviewFrames,
-          onProgress: ({ completed, total }) => {
+          onProgress: ({ stage, completed, total, label }) => {
             const now = performance.now();
             if (completed < total && now - lastProgressPaintAt < 120) return;
             lastProgressPaintAt = now;
             setFrameIndexingProgress({
-              stage: 'extracting_frames',
-              completed: completedFrames + completed,
-              total: Math.max(totalTargetFrames, 1),
-              label: `Choosing representative frames ${Math.min(completedFrames + completed, totalTargetFrames)}/${totalTargetFrames}`,
+              stage,
+              completed,
+              total: Math.max(total, 1),
+              label,
               etaSeconds: estimateRemainingSecondsFromObservedRate(
                 extractionStartedAt,
-                completedFrames + completed,
-                totalTargetFrames,
+                completed,
+                Math.max(total, 1),
                 extractionFallbackPerFrame,
               ),
             });
@@ -2342,14 +2354,13 @@ export default function ChatSidebar() {
         setSourceOverviewFrames(entry.sourceId, describedFrames, {
           fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
         });
-        completedFrames += frames.length;
       }
 
       const refreshedState = useEditorStore.getState();
       setFrameIndexingProgress({
         stage: 'extracting_frames',
-        completed: totalTargetFrames,
-        total: Math.max(totalTargetFrames, 1),
+        completed: 1,
+        total: 1,
         label: `Representative frames ready`,
         etaSeconds: 0,
       });
@@ -2992,14 +3003,14 @@ export default function ChatSidebar() {
     if (frameIndexingProgress && frameIndexingProgress.stage === 'dense_refinement' && frameAnalysisError === null) {
       analysisStatusCards.push({
         key: 'dense-refinement',
-        title: 'Dense refinement',
+        title: 'Visual analysis',
         progress: frameIndexingProgress,
         secondaryLabel: 'Local follow-up only inside the narrowed range.',
       });
     } else if (!usingServerSourceIndex && frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
       analysisStatusCards.push({
         key: 'frame-analysis',
-        title: 'Representative frames',
+        title: 'Visual analysis',
         progress: frameIndexingProgress,
         detail: indexingDetail,
         secondaryLabel: getIndexingStageTitle(frameIndexingProgress, null),
@@ -3007,7 +3018,7 @@ export default function ChatSidebar() {
     } else if (!usingServerSourceIndex && frameAnalysisReady) {
       analysisStatusCards.push({
         key: 'frame-analysis',
-        title: 'Representative frames',
+        title: 'Visual analysis',
         progress: buildCompletedProgress('describing_frames'),
         tone: 'completed',
       });
