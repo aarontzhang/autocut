@@ -30,16 +30,58 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-const WORKER_ID = `analysis-worker:${process.pid}`;
-const POLL_INTERVAL_MS = 3000;
+const HOST_PARALLELISM = typeof os.availableParallelism === 'function'
+  ? os.availableParallelism()
+  : Math.max(os.cpus().length, 1);
+const DEFAULT_WORKER_CONCURRENCY = Math.min(8, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
+const DEFAULT_INDEX_CONCURRENCY = Math.min(6, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
+const DEFAULT_DESCRIPTION_CONCURRENCY = 2;
+
+const WORKER_ID = process.env.ANALYSIS_WORKER_ID?.trim() || `analysis-worker:${process.pid}`;
+const POLL_INTERVAL_MS = normalizeInteger(process.env.ANALYSIS_WORKER_POLL_MS, 3000, 500, 60_000);
+const WORKER_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_WORKER_CONCURRENCY, DEFAULT_WORKER_CONCURRENCY, 1, 8);
+const INDEX_SELECTION_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_INDEX_SEGMENT_CONCURRENCY, DEFAULT_INDEX_CONCURRENCY, 1, 8);
+const DESCRIPTION_BATCH_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY, DEFAULT_DESCRIPTION_CONCURRENCY, 1, 4);
+const FRAME_DESCRIPTION_TIMEOUT_MS = 45_000;
+const FRAME_DESCRIPTION_MAX_RETRIES = 2;
+const FRAME_DESCRIPTION_UNAVAILABLE = 'Visual summary unavailable.';
 const TRANSCRIPT_CHUNK_SECONDS = 45;
 const TRANSCRIPT_OVERLAP_SECONDS = 0.75;
 const FRAME_BATCH_SIZE = 8;
 const DEFAULT_LONG_INTERVAL_SECONDS = 5;
 const DEFAULT_MAX_COARSE_FRAMES = 720;
 
+function normalizeInteger(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getSlotWorkerId(slotIndex) {
+  return WORKER_CONCURRENCY === 1 ? WORKER_ID : `${WORKER_ID}:${slotIndex + 1}`;
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  if (items.length === 0) return [];
+
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= items.length) return;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
 }
 
 function getAdaptiveCoarseFrameBudget(duration, preferredLongIntervalSeconds, maxCoarseFrames) {
@@ -267,7 +309,7 @@ async function setAssetStatus(assetId, patch) {
   if (error) throw error;
 }
 
-async function claimNextJob() {
+async function claimNextJob(lockerId) {
   const { data: queuedJobs, error } = await supabase
     .from('analysis_jobs')
     .select('id, project_id, asset_id, payload, attempt_count')
@@ -275,34 +317,37 @@ async function claimNextJob() {
     .eq('status', 'queued')
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(1);
+    .limit(Math.max(1, WORKER_CONCURRENCY * 3));
   if (error) throw error;
-  const job = queuedJobs?.[0];
-  if (!job) return null;
+  if (!queuedJobs?.length) return null;
 
-  const { data: claimed, error: claimError } = await supabase
-    .from('analysis_jobs')
-    .update({
-      status: 'running',
-      attempt_count: Number(job.attempt_count ?? 0) + 1,
-      locked_at: new Date().toISOString(),
-      locked_by: WORKER_ID,
-      error: null,
-      progress: {
-        stage: 'preparing_media',
-        completed: 0,
-        total: 1,
-        label: 'Preparing media',
-        etaSeconds: null,
-      },
-    })
-    .eq('id', job.id)
-    .eq('status', 'queued')
-    .select('id, project_id, asset_id, payload')
-    .maybeSingle();
+  for (const job of queuedJobs) {
+    const { data: claimed, error: claimError } = await supabase
+      .from('analysis_jobs')
+      .update({
+        status: 'running',
+        attempt_count: Number(job.attempt_count ?? 0) + 1,
+        locked_at: new Date().toISOString(),
+        locked_by: lockerId,
+        error: null,
+        progress: {
+          stage: 'preparing_media',
+          completed: 0,
+          total: 1,
+          label: 'Preparing media',
+          etaSeconds: null,
+        },
+      })
+      .eq('id', job.id)
+      .eq('status', 'queued')
+      .select('id, project_id, asset_id, payload')
+      .maybeSingle();
 
-  if (claimError) throw claimError;
-  return claimed ?? null;
+    if (claimError) throw claimError;
+    if (claimed) return claimed;
+  }
+
+  return null;
 }
 
 async function getAssetForJob(job) {
@@ -423,7 +468,10 @@ async function extractFrameBuffer(inputPath, sourceTime, outputPath) {
 }
 
 async function evaluateCandidateFrame(inputPath, sourceTime, sceneChangeTimes, scratchDir) {
-  const outputPath = path.join(scratchDir, `frame-${sourceTime.toFixed(3).replace(/\./g, '_')}.jpg`);
+  const outputPath = path.join(
+    scratchDir,
+    `frame-${sourceTime.toFixed(3).replace(/\./g, '_')}-${randomUUID().slice(0, 8)}.jpg`,
+  );
   const jpegBuffer = await extractFrameBuffer(inputPath, sourceTime, outputPath);
   const metrics = analyzeJpegMetrics(jpegBuffer);
   const score = scoreFrameMetrics(metrics, nearestDistanceToSceneBoundary(sourceTime, sceneChangeTimes));
@@ -461,86 +509,104 @@ async function describeRepresentativeFrameBatch(batch) {
     ],
   }];
 
-  const response = await openai.responses.create({
-    model: process.env.OPENAI_FRAME_DESCRIPTION_MODEL?.trim() || 'gpt-4o-mini',
-    input,
-    max_output_tokens: 1600,
-  });
-  const parsed = parseFrameDescriptions(response.output_text ?? '');
-  if (!parsed || parsed.length === 0) {
-    throw new Error('Could not parse representative-frame descriptions.');
+  let lastError = null;
+  for (let attempt = 0; attempt < FRAME_DESCRIPTION_MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await openai.responses.create({
+        model: process.env.OPENAI_FRAME_DESCRIPTION_MODEL?.trim() || 'gpt-4o-mini',
+        input,
+        max_output_tokens: 1600,
+      }, {
+        maxRetries: 1,
+        timeout: FRAME_DESCRIPTION_TIMEOUT_MS,
+      });
+      const parsed = parseFrameDescriptions(response.output_text ?? '');
+      if (!parsed || parsed.length === 0) {
+        throw new Error('Could not parse representative-frame descriptions.');
+      }
+      return parsed;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= FRAME_DESCRIPTION_MAX_RETRIES) break;
+      await sleep(750 * (attempt + 1));
+    }
   }
-  return parsed;
+
+  throw lastError ?? new Error('Could not describe representative frames.');
+}
+
+async function describeRepresentativeFramesWithFallback(batch) {
+  try {
+    return await describeRepresentativeFrameBatch(batch);
+  } catch (error) {
+    if (batch.length === 1) {
+      console.warn('[analysis-worker] representative-frame description failed for a single frame', {
+        sourceTime: batch[0]?.sourceTime ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [{ index: 0, description: FRAME_DESCRIPTION_UNAVAILABLE }];
+    }
+
+    console.warn('[analysis-worker] representative-frame batch failed; retrying frames individually', {
+      batchSize: batch.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return runWithConcurrency(
+      batch.map((frame, index) => ({ frame, index })),
+      Math.min(DESCRIPTION_BATCH_CONCURRENCY, batch.length),
+      async ({ frame, index }) => {
+        const single = await describeRepresentativeFramesWithFallback([frame]);
+        return {
+          index,
+          description: single[0]?.description?.trim() || FRAME_DESCRIPTION_UNAVAILABLE,
+        };
+      },
+    );
+  }
+}
+
+async function chooseBestCandidateForWindow(inputPath, candidateTimes, sceneChangeTimes, scratchDir) {
+  let best = null;
+  for (const candidateTime of candidateTimes) {
+    const evaluated = await evaluateCandidateFrame(inputPath, candidateTime, sceneChangeTimes, scratchDir);
+    if (!best || evaluated.score > best.score) {
+      best = evaluated;
+    }
+  }
+  return best;
 }
 
 async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDir, jobId) {
   const sceneChangeTimes = scenes.slice(1).map((scene) => scene.sourceStart);
   const windows = buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES);
-  const selections = [];
   const totalWork = windows.length + scenes.length;
   let completed = 0;
-
-  for (const window of windows) {
-    const candidates = buildRepresentativeCandidateTimes(window, sceneChangeTimes);
-    let best = null;
-    for (const candidateTime of candidates) {
-      const evaluated = await evaluateCandidateFrame(inputPath, candidateTime, sceneChangeTimes, scratchDir);
-      if (!best || evaluated.score > best.score) {
-        best = evaluated;
-      }
-    }
-    if (!best) continue;
-    const scene = findSceneForTime(best.sourceTime, scenes);
-    selections.push({
-      sampleKind: 'coarse_window_rep',
-      sourceTime: best.sourceTime,
-      windowStart: window.startTime,
-      windowEnd: window.endTime,
-      windowDuration: window.duration,
-      sceneId: scene?.id ?? null,
-      imageBase64: best.imageBase64,
-      score: best.score,
-      metrics: best.metrics,
-    });
-    completed += 1;
-    await updateProgress(
-      jobId,
-      'choosing_representative_frames',
-      completed,
-      Math.max(1, totalWork),
-      `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
-    );
-  }
-
-  const sceneSelections = [];
-  for (const [sceneIndex, scene] of scenes.entries()) {
-    const sceneWindow = {
+  const tasks = [
+    ...windows.map((window, index) => ({
+      kind: 'window',
+      index,
+      window,
+    })),
+    ...scenes.map((scene, sceneIndex) => ({
+      kind: 'scene',
       index: sceneIndex,
-      startTime: scene.sourceStart,
-      endTime: scene.sourceEnd,
-      duration: Math.max(0, scene.sourceEnd - scene.sourceStart),
-    };
-    const candidates = buildRepresentativeCandidateTimes(sceneWindow, [scene.sourceStart]);
-    let best = null;
-    for (const candidateTime of candidates) {
-      const evaluated = await evaluateCandidateFrame(inputPath, candidateTime, sceneChangeTimes, scratchDir);
-      if (!best || evaluated.score > best.score) {
-        best = evaluated;
-      }
-    }
-    if (!best) continue;
-    sceneSelections.push({
-      sampleKind: 'scene_rep',
-      sourceTime: best.sourceTime,
-      windowStart: scene.sourceStart,
-      windowEnd: scene.sourceEnd,
-      windowDuration: Math.max(0, scene.sourceEnd - scene.sourceStart),
-      sceneId: scene.id,
-      imageBase64: best.imageBase64,
-      score: best.score,
-      metrics: best.metrics,
-      sceneIndex,
-    });
+      scene,
+      window: {
+        index: sceneIndex,
+        startTime: scene.sourceStart,
+        endTime: scene.sourceEnd,
+        duration: Math.max(0, scene.sourceEnd - scene.sourceStart),
+      },
+    })),
+  ];
+
+  const resolved = await runWithConcurrency(tasks, INDEX_SELECTION_CONCURRENCY, async (task) => {
+    const candidates = task.kind === 'window'
+      ? buildRepresentativeCandidateTimes(task.window, sceneChangeTimes)
+      : buildRepresentativeCandidateTimes(task.window, [task.scene.sourceStart]);
+    const best = await chooseBestCandidateForWindow(inputPath, candidates, sceneChangeTimes, scratchDir);
+
     completed += 1;
     await updateProgress(
       jobId,
@@ -549,9 +615,57 @@ async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDi
       Math.max(1, totalWork),
       `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
     );
+
+    if (!best) return null;
+    if (task.kind === 'window') {
+      const scene = findSceneForTime(best.sourceTime, scenes);
+      return {
+        kind: 'window',
+        index: task.index,
+        selection: {
+          sampleKind: 'coarse_window_rep',
+          sourceTime: best.sourceTime,
+          windowStart: task.window.startTime,
+          windowEnd: task.window.endTime,
+          windowDuration: task.window.duration,
+          sceneId: scene?.id ?? null,
+          imageBase64: best.imageBase64,
+          score: best.score,
+          metrics: best.metrics,
+        },
+      };
+    }
+
+    return {
+      kind: 'scene',
+      index: task.index,
+      selection: {
+        sampleKind: 'scene_rep',
+        sourceTime: best.sourceTime,
+        windowStart: task.scene.sourceStart,
+        windowEnd: task.scene.sourceEnd,
+        windowDuration: Math.max(0, task.scene.sourceEnd - task.scene.sourceStart),
+        sceneId: task.scene.id,
+        imageBase64: best.imageBase64,
+        score: best.score,
+        metrics: best.metrics,
+        sceneIndex: task.index,
+      },
+    };
+  });
+
+  const windowSelections = new Array(windows.length).fill(null);
+  const sceneSelections = new Array(scenes.length).fill(null);
+  for (const entry of resolved) {
+    if (!entry) continue;
+    if (entry.kind === 'window') windowSelections[entry.index] = entry.selection;
+    if (entry.kind === 'scene') sceneSelections[entry.index] = entry.selection;
   }
 
-  return { windowSelections: selections, sceneSelections };
+  return {
+    windowSelections: windowSelections.filter(Boolean),
+    sceneSelections: sceneSelections.filter(Boolean),
+  };
 }
 
 async function insertRepresentativeFrames(assetId, selections) {
@@ -614,15 +728,19 @@ async function writeRepresentativeDescriptions(insertedSelections, jobId) {
   let completed = 0;
   const total = insertedSelections.length;
   await updateProgress(jobId, 'describing_representative_frames', 0, Math.max(1, total), 'Describing representative frames 0/' + Math.max(1, total));
+  const batches = [];
   for (let start = 0; start < insertedSelections.length; start += FRAME_BATCH_SIZE) {
-    const batch = insertedSelections.slice(start, start + FRAME_BATCH_SIZE);
-    const descriptions = await describeRepresentativeFrameBatch(batch);
+    batches.push(insertedSelections.slice(start, start + FRAME_BATCH_SIZE));
+  }
+
+  await runWithConcurrency(batches, DESCRIPTION_BATCH_CONCURRENCY, async (batch) => {
+    const descriptions = await describeRepresentativeFramesWithFallback(batch);
     for (const item of descriptions) {
       const target = batch[item.index];
       if (!target) continue;
       const nextMetadata = {
         ...(target.metadata ?? {}),
-        description: item.description.trim(),
+        description: item.description.trim() || FRAME_DESCRIPTION_UNAVAILABLE,
         score: target.score,
         sceneId: target.sceneId,
         sampleKind: target.sampleKind,
@@ -641,7 +759,7 @@ async function writeRepresentativeDescriptions(insertedSelections, jobId) {
         `Describing representative frames ${completed}/${Math.max(1, total)}`,
       );
     }
-  }
+  });
 }
 
 async function processIndexAssetJob(job) {
@@ -765,24 +883,35 @@ async function failJob(job, error) {
   console.error(`[analysis-worker] job ${job?.id ?? 'unknown'} failed`, error);
 }
 
-async function run() {
-  console.log(`[analysis-worker] started as ${WORKER_ID}`);
+async function runWorkerSlot(slotIndex) {
+  const lockerId = getSlotWorkerId(slotIndex);
   while (true) {
     let job = null;
     try {
-      job = await claimNextJob();
+      job = await claimNextJob(lockerId);
       if (!job) {
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
-      console.log(`[analysis-worker] claimed job ${job.id} for asset ${job.asset_id}`);
+      console.log(`[analysis-worker] ${lockerId} claimed job ${job.id} for asset ${job.asset_id}`);
       await processIndexAssetJob(job);
-      console.log(`[analysis-worker] completed job ${job.id}`);
+      console.log(`[analysis-worker] ${lockerId} completed job ${job.id}`);
     } catch (error) {
       await failJob(job, error);
       await sleep(POLL_INTERVAL_MS);
     }
   }
+}
+
+async function run() {
+  console.log('[analysis-worker] started', {
+    workerId: WORKER_ID,
+    workerConcurrency: WORKER_CONCURRENCY,
+    indexSelectionConcurrency: INDEX_SELECTION_CONCURRENCY,
+    descriptionBatchConcurrency: DESCRIPTION_BATCH_CONCURRENCY,
+    pollIntervalMs: POLL_INTERVAL_MS,
+  });
+  await Promise.all(Array.from({ length: WORKER_CONCURRENCY }, (_, index) => runWorkerSlot(index)));
 }
 
 run().catch((error) => {
