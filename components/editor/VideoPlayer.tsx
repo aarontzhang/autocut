@@ -31,6 +31,12 @@ const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
 
+type VideoFrameRequestCallback = (now: number, metadata: unknown) => void;
+type VideoWithFrameCallback = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
 function fitVideoFrame(
   container: { width: number; height: number },
   video: { width: number; height: number } | null,
@@ -128,6 +134,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const pendingDeleteRangesRef = useRef<ReturnType<typeof useEditorStore.getState>['pendingDeleteRanges']>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const videoFrameRequestRef = useRef<number | null>(null);
   const playbackTickRef = useRef<() => void>(() => {});
 
   const setVideoDuration = useEditorStore((s) => s.setVideoDuration);
@@ -287,6 +294,44 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     syncLayers(clampedTimelineTime, { allowPlay: false });
   }, [renderTimeline.length, setCurrentTime, syncLayers, totalTimelineDuration]);
 
+  const cancelPlaybackMonitor = useCallback(() => {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    const primaryVideo = videoRef.current as VideoWithFrameCallback | null;
+    if (
+      videoFrameRequestRef.current !== null
+      && primaryVideo
+      && typeof primaryVideo.cancelVideoFrameCallback === 'function'
+    ) {
+      primaryVideo.cancelVideoFrameCallback(videoFrameRequestRef.current);
+    }
+    videoFrameRequestRef.current = null;
+  }, [videoRef]);
+
+  const schedulePlaybackMonitor = useCallback(function schedulePlaybackMonitorImpl() {
+    const primaryVideo = videoRef.current as VideoWithFrameCallback | null;
+    if (!primaryVideo || primaryVideo.paused || primaryVideo.ended) return;
+    if (videoFrameRequestRef.current !== null || animationFrameRef.current !== null) return;
+
+    if (typeof primaryVideo.requestVideoFrameCallback === 'function') {
+      videoFrameRequestRef.current = primaryVideo.requestVideoFrameCallback(() => {
+        videoFrameRequestRef.current = null;
+        playbackTickRef.current();
+        schedulePlaybackMonitorImpl();
+      });
+      return;
+    }
+
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      animationFrameRef.current = null;
+      playbackTickRef.current();
+      schedulePlaybackMonitorImpl();
+    });
+  }, [videoRef]);
+
   const handlePlaybackTick = useCallback(() => {
     const primaryVideo = videoRef.current;
     if (!primaryVideo || renderTimeline.length === 0) return;
@@ -343,10 +388,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current = totalTimelineDuration;
       setCurrentTime(totalTimelineDuration);
     }
-
-    if (!primaryVideo.paused && !primaryVideo.ended) {
-      animationFrameRef.current = window.requestAnimationFrame(() => playbackTickRef.current());
-    }
   }, [pauseSecondaryVideo, renderTimeline, seekToTimelineTime, setCurrentTime, syncLayers, totalTimelineDuration, videoRef]);
 
   useEffect(() => {
@@ -356,18 +397,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   useEffect(() => {
     const primaryVideo = videoRef.current;
     if (!primaryVideo) return;
+    const syncTimelineFromMedia = () => {
+      playbackTickRef.current();
+    };
 
     const syncPlaybackState = () => {
       const isPlaying = !primaryVideo.paused && !primaryVideo.ended;
       setPlaybackActive(isPlaying);
+      syncTimelineFromMedia();
+      cancelPlaybackMonitor();
       if (isPlaying) {
-        if (animationFrameRef.current !== null) {
-          window.cancelAnimationFrame(animationFrameRef.current);
-        }
-        animationFrameRef.current = window.requestAnimationFrame(() => playbackTickRef.current());
-      } else if (animationFrameRef.current !== null) {
-        window.cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
+        schedulePlaybackMonitor();
       }
     };
 
@@ -375,25 +415,42 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     primaryVideo.addEventListener('play', syncPlaybackState);
     primaryVideo.addEventListener('pause', syncPlaybackState);
     primaryVideo.addEventListener('ended', syncPlaybackState);
+    primaryVideo.addEventListener('timeupdate', syncTimelineFromMedia);
+    primaryVideo.addEventListener('seeking', syncTimelineFromMedia);
+    primaryVideo.addEventListener('seeked', syncTimelineFromMedia);
+    primaryVideo.addEventListener('ratechange', syncTimelineFromMedia);
 
     return () => {
       primaryVideo.removeEventListener('play', syncPlaybackState);
       primaryVideo.removeEventListener('pause', syncPlaybackState);
       primaryVideo.removeEventListener('ended', syncPlaybackState);
-      if (animationFrameRef.current !== null) {
-        window.cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
+      primaryVideo.removeEventListener('timeupdate', syncTimelineFromMedia);
+      primaryVideo.removeEventListener('seeking', syncTimelineFromMedia);
+      primaryVideo.removeEventListener('seeked', syncTimelineFromMedia);
+      primaryVideo.removeEventListener('ratechange', syncTimelineFromMedia);
+      cancelPlaybackMonitor();
       pauseSecondaryVideo();
       setPlaybackActive(false);
     };
-  }, [handlePlaybackTick, pauseSecondaryVideo, setPlaybackActive, videoRef]);
+  }, [cancelPlaybackMonitor, handlePlaybackTick, pauseSecondaryVideo, schedulePlaybackMonitor, setPlaybackActive, videoRef]);
 
   useEffect(() => {
     const primaryVideo = videoRef.current;
-    if (!primaryVideo || !primaryVideo.paused || renderTimeline.length === 0) return;
-    seekToTimelineTime(currentTimeRef.current);
-  }, [renderTimeline, seekToTimelineTime, videoRef]);
+    if (!primaryVideo || renderTimeline.length === 0) return;
+
+    const clampedTimelineTime = Math.max(0, Math.min(totalTimelineDuration, currentTimeRef.current));
+    if (Math.abs(clampedTimelineTime - currentTimeRef.current) > SEEK_EPSILON) {
+      seekToTimelineTime(clampedTimelineTime);
+      return;
+    }
+
+    if (primaryVideo.paused) {
+      seekToTimelineTime(clampedTimelineTime);
+    } else {
+      syncLayers(clampedTimelineTime, { allowPlay: true });
+      schedulePlaybackMonitor();
+    }
+  }, [renderTimeline, schedulePlaybackMonitor, seekToTimelineTime, syncLayers, totalTimelineDuration, videoRef]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;

@@ -14,6 +14,7 @@ const HEADER_W = 76;
 const RULER_H = 24;
 
 type PlayheadDragInfo = {
+  pointerId: number;
   totalW: number;
   totalDuration: number;
 };
@@ -28,7 +29,7 @@ export default function Timeline({
   playerRef,
 }: TimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ startX: number; startScrollLeft: number; moved: boolean } | null>(null);
+  const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean } | null>(null);
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
@@ -209,23 +210,39 @@ export default function Timeline({
     }
   }, [contentDuration, playerRef]);
 
-  const beginPlayheadDrag = useCallback((clientX: number) => {
-    const dragInfo = { totalW, totalDuration: totalTimelineDuration };
+  const beginPlayheadDrag = useCallback((clientX: number, pointerId: number) => {
+    const dragInfo = { pointerId, totalW, totalDuration: totalTimelineDuration };
     playheadDragRef.current = dragInfo;
     document.body.style.cursor = 'ew-resize';
     scrubPlayhead(clientX, dragInfo);
   }, [scrubPlayhead, totalTimelineDuration, totalW]);
 
+  const endInteractions = useCallback((pointerId?: number) => {
+    const playheadDrag = playheadDragRef.current;
+    if (playheadDrag && (pointerId === undefined || playheadDrag.pointerId === pointerId)) {
+      playheadDragRef.current = null;
+    }
+
+    const pan = panRef.current;
+    if (pan && (pointerId === undefined || pan.pointerId === pointerId)) {
+      panRef.current = null;
+    }
+
+    if (!playheadDragRef.current && !panRef.current) {
+      document.body.style.cursor = '';
+    }
+  }, []);
+
   useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
+    const onPointerMove = (e: PointerEvent) => {
       const playheadDrag = playheadDragRef.current;
-      if (playheadDrag) {
+      if (playheadDrag && playheadDrag.pointerId === e.pointerId) {
         scrubPlayhead(e.clientX, playheadDrag);
         return;
       }
 
       const pan = panRef.current;
-      if (!pan) return;
+      if (!pan || pan.pointerId !== e.pointerId) return;
       const dx = e.clientX - pan.startX;
       if (Math.abs(dx) > 4) {
         pan.moved = true;
@@ -234,23 +251,20 @@ export default function Timeline({
       }
     };
 
-    const onMouseUp = () => {
-      if (playheadDragRef.current) {
-        playheadDragRef.current = null;
-      }
-      if (panRef.current) {
-        panRef.current = null;
-      }
-      document.body.style.cursor = '';
+    const onPointerEnd = (e: PointerEvent) => {
+      endInteractions(e.pointerId);
     };
 
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
     return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+      endInteractions();
     };
-  }, [scrubPlayhead]);
+  }, [endInteractions, scrubPlayhead]);
 
   const px = (time: number) => tPx(time);
 
@@ -321,9 +335,15 @@ export default function Timeline({
         ref={scrollRef}
         style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', display: 'flex', flexDirection: 'row', cursor: 'grab', position: 'relative' }}
         className="no-select"
-        onMouseDown={e => {
-          if ((e.target as HTMLElement).closest('.playhead-dot')) return;
-          panRef.current = { startX: e.clientX, startScrollLeft: scrollRef.current?.scrollLeft ?? 0, moved: false };
+        onPointerDown={e => {
+          if (e.button !== 0) return;
+          if ((e.target as HTMLElement).closest('.playhead-hitbox, .playhead-dot')) return;
+          panRef.current = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startScrollLeft: scrollRef.current?.scrollLeft ?? 0,
+            moved: false,
+          };
           document.body.style.cursor = 'grabbing';
         }}
       >
@@ -770,7 +790,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   headerWidth: number;
   rulerHeight: number;
   playheadDragRef: MutableRefObject<PlayheadDragInfo | null>;
-  onBeginDrag: (clientX: number) => void;
+  onBeginDrag: (clientX: number, pointerId: number) => void;
 }) {
   const playheadX = useMemo(() => {
     if (totalTimelineDuration <= 0) return 0;
@@ -800,11 +820,13 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
           width: 24,
           zIndex: 15,
           cursor: 'ew-resize',
+          touchAction: 'none',
         }}
-        onMouseDown={e => {
+        onPointerDown={e => {
+          if (e.button !== 0) return;
           e.stopPropagation();
           e.preventDefault();
-          onBeginDrag(e.clientX);
+          onBeginDrag(e.clientX, e.pointerId);
         }}
       />
       <div
