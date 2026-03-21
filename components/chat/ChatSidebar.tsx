@@ -1439,6 +1439,55 @@ function MarkerAwareText({ text }: { text: string }) {
   });
 }
 
+function AutoAvatar({ size = 28 }: { size?: number }) {
+  return (
+    <div style={{
+      width: size,
+      height: size,
+      borderRadius: 10,
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))',
+      border: '1px solid rgba(255,255,255,0.08)',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      boxShadow: '0 10px 24px rgba(0,0,0,0.18)',
+      flexShrink: 0,
+    }}>
+      <AutocutMark size={Math.max(12, Math.round(size * 0.58))} />
+    </div>
+  );
+}
+
+function AutoIdentity({
+  subtitle,
+}: {
+  subtitle?: string;
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+      <span style={{
+        fontSize: 12,
+        fontWeight: 600,
+        color: 'var(--fg-primary)',
+        fontFamily: 'var(--font-serif)',
+        letterSpacing: 0.1,
+      }}>
+        Auto
+      </span>
+      {subtitle && (
+        <span style={{
+          fontSize: 10,
+          color: 'var(--fg-muted)',
+          fontFamily: 'var(--font-serif)',
+          whiteSpace: 'nowrap',
+        }}>
+          {subtitle}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Message bubbles ───────────────────────────────────────────────────────────
 function UserMessage({ msg }: { msg: ChatMessageType }) {
   return (
@@ -1693,203 +1742,205 @@ function AssistantMessage({
   }, [action, applyStoredAction, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
 
   return (
-    <div style={{ marginBottom: 4 }}>
-      {/* Claude indicator */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-        <AutocutMark size={13} />
-      </div>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+      <AutoAvatar />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ marginBottom: 6 }}>
+          <AutoIdentity />
+        </div>
 
-      {/* Message text */}
-      <div style={{
-        fontSize: 13, color: 'var(--fg-secondary)',
-        lineHeight: 1.65, paddingLeft: 22,
-        fontFamily: 'var(--font-serif)',
-      }}>
-        <MarkerAwareText text={msg.content} />
-      </div>
-
-      {/* Action card */}
-      {hasAction && meta && (
         <div style={{
-          marginTop: 10, marginLeft: 22,
-          border: `1px solid rgba(255,255,255,0.08)`,
-          borderRadius: 7,
-          overflow: 'hidden',
-          background: 'var(--bg-elevated)',
+          fontSize: 13,
+          color: 'var(--fg-secondary)',
+          lineHeight: 1.65,
+          fontFamily: 'var(--font-serif)',
+          padding: '10px 12px',
+          borderRadius: '12px 12px 12px 4px',
+          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
+          border: '1px solid rgba(255,255,255,0.07)',
         }}>
-          {/* Card header */}
+          <MarkerAwareText text={msg.content} />
+        </div>
+
+        {hasAction && meta && (
           <div style={{
-            padding: '7px 12px',
-            background: 'rgba(255,255,255,0.03)',
-            borderBottom: '1px solid rgba(255,255,255,0.06)',
-            display: 'flex', alignItems: 'center', gap: 8,
+            marginTop: 10,
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 7,
+            overflow: 'hidden',
+            background: 'var(--bg-elevated)',
           }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color, flexShrink: 0 }} />
-            <span style={{
-              fontSize: 12, color: 'var(--fg-primary)', fontWeight: 600,
-              fontFamily: 'var(--font-serif)',
-            }}>
-              {meta.label}
-            </span>
-            {meta.summary && (
-              <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-                — {meta.summary}
-              </span>
-            )}
-          </div>
-
-          {/* Details */}
-          <ActionDetails action={activeReviewAction!} />
-
-          {/* Buttons */}
-          {actionResolved ? (
             <div style={{
-              padding: '8px 12px',
-              borderTop: '1px solid rgba(255,255,255,0.05)',
+              padding: '7px 12px',
+              background: 'rgba(255,255,255,0.03)',
+              borderBottom: '1px solid rgba(255,255,255,0.06)',
+              display: 'flex', alignItems: 'center', gap: 8,
             }}>
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color, flexShrink: 0 }} />
               <span style={{
-                fontSize: 11,
-                color: 'var(--fg-muted)',
+                fontSize: 12, color: 'var(--fg-primary)', fontWeight: 600,
                 fontFamily: 'var(--font-serif)',
               }}>
-                {actionResultText ?? 'Completed.'}
+                {meta.label}
               </span>
-            </div>
-          ) : reviewResult ? (
-            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
-                {reviewResult}
-              </span>
-            </div>
-          ) : (
-            <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              {reviewableAction && reviewSteps.length > 0 && activeReviewAction && (
-                <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                  {batchReviewActive
-                    ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Accept applies all of them.`
-                    : `Review ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'} at once.`}
-                </p>
+              {meta.summary && (
+                <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+                  - {meta.summary}
+                </span>
               )}
-              {anotherReviewActive && !batchReviewActive && reviewableAction && (
-                <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                  Finish the active review before opening another one.
-                </p>
-              )}
-              {isDeleteAction && !actionResolved ? (
-                <>
-                  {deleteRanges && (
-                    <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                      {deleteRanges.length} cut{deleteRanges.length !== 1 ? 's' : ''} highlighted. Accept to apply.
-                    </p>
-                  )}
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={handleAcceptAll} style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, background: 'var(--accent)', border: 'none', color: '#000', borderRadius: 4, cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
-                      Accept
-                    </button>
-                    <button onClick={handleCancelDelete} style={{ padding: '5px 10px', fontSize: 12, background: 'none', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
-                      Cancel
-                    </button>
-                  </div>
-                </>
-              ) : action?.type === 'update_ai_settings' ? (
-                <button
-                  onClick={handleApplySettings}
-                  style={{
-                    width: '100%', padding: '5px 0',
-                    fontSize: 12, fontWeight: 500,
-                    background: 'var(--accent)',
-                    border: 'none',
-                    color: '#000',
-                    borderRadius: 4, cursor: 'pointer',
-                    fontFamily: 'var(--font-serif)',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  Apply settings
-                </button>
-              ) : action?.type === 'transcribe_request' ? (
-                <>
-                  {transcribeError && (
-                    <p style={{ fontSize: 11, color: '#f87171', margin: '0 0 6px', fontFamily: 'var(--font-serif)' }}>
-                      {transcribeError}
-                    </p>
-                  )}
+            </div>
+
+            <ActionDetails action={activeReviewAction!} />
+
+            {actionResolved ? (
+              <div style={{
+                padding: '8px 12px',
+                borderTop: '1px solid rgba(255,255,255,0.05)',
+              }}>
+                <span style={{
+                  fontSize: 11,
+                  color: 'var(--fg-muted)',
+                  fontFamily: 'var(--font-serif)',
+                }}>
+                  {actionResultText ?? 'Completed.'}
+                </span>
+              </div>
+            ) : reviewResult ? (
+              <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                <span style={{ fontSize: 11, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)' }}>
+                  {reviewResult}
+                </span>
+              </div>
+            ) : (
+              <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                {reviewableAction && reviewSteps.length > 0 && activeReviewAction && (
+                  <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                    {batchReviewActive
+                      ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Accept applies all of them.`
+                      : `Review ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'} at once.`}
+                  </p>
+                )}
+                {anotherReviewActive && !batchReviewActive && reviewableAction && (
+                  <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                    Finish the active review before opening another one.
+                  </p>
+                )}
+                {isDeleteAction && !actionResolved ? (
+                  <>
+                    {deleteRanges && (
+                      <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                        {deleteRanges.length} cut{deleteRanges.length !== 1 ? 's' : ''} highlighted. Accept to apply.
+                      </p>
+                    )}
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button onClick={handleAcceptAll} style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, background: 'var(--accent)', border: 'none', color: '#000', borderRadius: 4, cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
+                        Accept
+                      </button>
+                      <button onClick={handleCancelDelete} style={{ padding: '5px 10px', fontSize: 12, background: 'none', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                ) : action?.type === 'update_ai_settings' ? (
                   <button
-                    onClick={handleTranscribe}
-                    disabled={isTranscribing || transcriptionDone}
+                    onClick={handleApplySettings}
                     style={{
                       width: '100%', padding: '5px 0',
                       fontSize: 12, fontWeight: 500,
-                      background: isTranscribing || transcriptionDone ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                      background: 'var(--accent)',
                       border: 'none',
-                      color: isTranscribing || transcriptionDone ? 'var(--fg-muted)' : '#000',
-                      borderRadius: 4, cursor: isTranscribing || transcriptionDone ? 'default' : 'pointer',
+                      color: '#000',
+                      borderRadius: 4, cursor: 'pointer',
                       fontFamily: 'var(--font-serif)',
                       transition: 'all 0.15s',
                     }}
                   >
-                    {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
+                    Apply settings
                   </button>
-                </>
-              ) : batchReviewActive ? (
-                <div style={{ display: 'flex', gap: 6 }}>
+                ) : action?.type === 'transcribe_request' ? (
+                  <>
+                    {transcribeError && (
+                      <p style={{ fontSize: 11, color: '#f87171', margin: '0 0 6px', fontFamily: 'var(--font-serif)' }}>
+                        {transcribeError}
+                      </p>
+                    )}
+                    <button
+                      onClick={handleTranscribe}
+                      disabled={isTranscribing || transcriptionDone}
+                      style={{
+                        width: '100%', padding: '5px 0',
+                        fontSize: 12, fontWeight: 500,
+                        background: isTranscribing || transcriptionDone ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
+                        border: 'none',
+                        color: isTranscribing || transcriptionDone ? 'var(--fg-muted)' : '#000',
+                        borderRadius: 4, cursor: isTranscribing || transcriptionDone ? 'default' : 'pointer',
+                        fontFamily: 'var(--font-serif)',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {isTranscribing ? 'Transcribing…' : transcriptionDone ? 'Transcript ready ✓' : 'Transcribe'}
+                    </button>
+                  </>
+                ) : batchReviewActive ? (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={handleApplyReviewedAction}
+                      style={{
+                        flex: 1,
+                        padding: '5px 0',
+                        fontSize: 12,
+                        fontWeight: 500,
+                        background: 'var(--accent)',
+                        border: 'none',
+                        color: '#000',
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-serif)',
+                      }}
+                    >
+                      Accept all
+                    </button>
+                    <button
+                      onClick={cancelReview}
+                      style={{
+                        flex: 1,
+                        padding: '5px 0',
+                        fontSize: 12,
+                        fontWeight: 500,
+                        background: 'rgba(255,255,255,0.06)',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        color: 'var(--fg-secondary)',
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-serif)',
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
                   <button
-                    onClick={handleApplyReviewedAction}
+                    onClick={startReview}
+                    disabled={anotherReviewActive}
                     style={{
-                      flex: 1,
-                      padding: '5px 0',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      background: 'var(--accent)',
+                      width: '100%', padding: '5px 0',
+                      fontSize: 12, fontWeight: 500,
+                      background: anotherReviewActive ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
                       border: 'none',
-                      color: '#000',
-                      borderRadius: 4,
-                      cursor: 'pointer',
+                      color: anotherReviewActive ? 'var(--fg-muted)' : '#000',
+                      borderRadius: 4, cursor: anotherReviewActive ? 'default' : 'pointer',
                       fontFamily: 'var(--font-serif)',
+                      transition: 'all 0.15s',
                     }}
                   >
-                    Accept all
+                    {reviewSteps.length > 1 ? 'Preview all changes' : 'Preview change'}
                   </button>
-                  <button
-                    onClick={cancelReview}
-                    style={{
-                      flex: 1,
-                      padding: '5px 0',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      background: 'rgba(255,255,255,0.06)',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      color: 'var(--fg-secondary)',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={startReview}
-                  disabled={anotherReviewActive}
-                  style={{
-                    width: '100%', padding: '5px 0',
-                    fontSize: 12, fontWeight: 500,
-                    background: anotherReviewActive ? 'rgba(255,255,255,0.06)' : 'var(--accent)',
-                    border: 'none',
-                    color: anotherReviewActive ? 'var(--fg-muted)' : '#000',
-                    borderRadius: 4, cursor: anotherReviewActive ? 'default' : 'pointer',
-                    fontFamily: 'var(--font-serif)',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {reviewSteps.length > 1 ? 'Preview all changes' : 'Preview change'}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1897,12 +1948,19 @@ function AssistantMessage({
 // ─── Thinking indicator ────────────────────────────────────────────────────────
 function ThinkingIndicator({ status }: { status?: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-      <div style={{ flexShrink: 0, marginTop: 3 }}>
-        <AutocutMark size={13} />
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <div style={{ display: 'flex', gap: 3, paddingTop: 4 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+      <AutoAvatar />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+        <AutoIdentity subtitle="Typing..." />
+        <div style={{
+          display: 'inline-flex',
+          gap: 3,
+          padding: '10px 12px',
+          borderRadius: '12px 12px 12px 4px',
+          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
+          border: '1px solid rgba(255,255,255,0.07)',
+          width: 'fit-content',
+        }}>
           {[0, 1, 2].map(i => (
             <div key={i} className="dot-bar" style={{
               width: 3, height: 14,
@@ -1918,6 +1976,7 @@ function ThinkingIndicator({ status }: { status?: string }) {
             color: 'var(--fg-muted)',
             fontFamily: 'var(--font-serif)',
             lineHeight: 1.4,
+            paddingLeft: 2,
           }}>
             {status}
           </span>
@@ -3117,42 +3176,43 @@ export default function ChatSidebar() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <AutocutMark size={24} />
+          <AutoAvatar size={30} />
           <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-primary)', fontFamily: 'var(--font-serif)' }}>
               Auto
             </span>
-            <button
-              type="button"
-              onClick={handleClearChat}
-              disabled={isChatLoading || reviewLocked || messages.length === 0}
-              aria-label="Clear chat"
-              title="Clear chat"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '0 10px',
-                height: 28,
-                background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                borderRadius: 999,
-                color: isChatLoading || reviewLocked || messages.length === 0 ? 'rgba(255,255,255,0.24)' : 'var(--fg-secondary)',
-                cursor: isChatLoading || reviewLocked || messages.length === 0 ? 'default' : 'pointer',
-                transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease',
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 7h16" />
-                <path d="M9 7V4h6v3" />
-                <path d="M7 7l1 12h8l1-12" />
-                <path d="M10 11v5" />
-                <path d="M14 11v5" />
-              </svg>
-              <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)' }}>Clear chat</span>
-            </button>
           </div>
         </div>
+        <button
+          type="button"
+          onClick={handleClearChat}
+          disabled={isChatLoading || reviewLocked || messages.length === 0}
+          aria-label="Clear chat"
+          title="Clear chat"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '0 10px',
+            height: 28,
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 999,
+            color: isChatLoading || reviewLocked || messages.length === 0 ? 'rgba(255,255,255,0.24)' : 'var(--fg-secondary)',
+            cursor: isChatLoading || reviewLocked || messages.length === 0 ? 'default' : 'pointer',
+            transition: 'background 0.15s ease, border-color 0.15s ease, color 0.15s ease',
+            flexShrink: 0,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 7h16" />
+            <path d="M9 7V4h6v3" />
+            <path d="M7 7l1 12h8l1-12" />
+            <path d="M10 11v5" />
+            <path d="M14 11v5" />
+          </svg>
+          <span style={{ fontSize: 10, fontFamily: 'var(--font-serif)' }}>Clear chat</span>
+        </button>
 
       </div>
 
