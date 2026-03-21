@@ -37,6 +37,7 @@ export default function Timeline({
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
+  const currentTime = useEditorStore(s => s.currentTime);
   const pendingDeleteRanges = useEditorStore(s => s.pendingDeleteRanges);
   const clips = useEditorStore(s => s.pendingDeleteRanges ? s.clips : (s.previewSnapshot?.clips ?? s.clips));
   const captions = useEditorStore(s => s.pendingDeleteRanges ? s.captions : (s.previewSnapshot?.captions ?? s.captions));
@@ -684,6 +685,7 @@ export default function Timeline({
             );
           })}
           <TimelinePlayheadOverlay
+            currentTime={currentTime}
             scrollRef={scrollRef}
             totalTimelineDuration={totalTimelineDuration}
             totalW={totalW}
@@ -752,6 +754,7 @@ function EffectTrackRow({ height, children }: { height: number; children: ReactN
 }
 
 const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
+  currentTime,
   scrollRef,
   totalTimelineDuration,
   totalW,
@@ -760,6 +763,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   playheadDragRef,
   onBeginDrag,
 }: {
+  currentTime: number;
   scrollRef: RefObject<HTMLDivElement | null>;
   totalTimelineDuration: number;
   totalW: number;
@@ -768,8 +772,6 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   playheadDragRef: MutableRefObject<PlayheadDragInfo | null>;
   onBeginDrag: (clientX: number) => void;
 }) {
-  const currentTime = useEditorStore(s => s.currentTime);
-
   const playheadX = useMemo(() => {
     if (totalTimelineDuration <= 0) return 0;
     return (currentTime / totalTimelineDuration) * totalW;

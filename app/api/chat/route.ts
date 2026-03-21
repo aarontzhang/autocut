@@ -794,6 +794,25 @@ function isLikelyContextDependentFollowUp(message: string, previousUserMessage?:
     return true;
   }
 
+  if (
+    previousUserMessage
+    && isMarkerPlacementRequest(normalized)
+  ) {
+    const markerTargetRemainder = normalized
+      .replace(/\b(?:please|can you|could you|would you|for me)\b/g, ' ')
+      .replace(/\b(?:add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/g, ' ')
+      .replace(/\b(?:a|an|the|another|some)\b/g, ' ')
+      .replace(/\b(?:marker|bookmark|tag)\b/g, ' ')
+      .replace(/\b(?:here|there|it|that|this|moment|spot|one)\b/g, ' ')
+      .replace(/[^\w\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!markerTargetRemainder) {
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -1367,6 +1386,74 @@ function buildCommittedMarkerFallback(params: {
   };
 }
 
+function findLatestAssistantTimingHint(
+  messages: ChatTurn[],
+  videoDuration: number,
+): {
+  timelineTime: number;
+  range: { start: number; end: number } | null;
+} | null {
+  const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
+  if (latestUserIndex <= 0) return null;
+
+  for (let index = latestUserIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'assistant') continue;
+
+    const narratedRanges = extractExplicitTimeRanges(message.content, videoDuration);
+    const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
+    const explicitTimes = extractExplicitTimelineReferences(message.content);
+    const timelineTime = chooseNarratedMarkerTime(explicitTimes, narratedRange);
+
+    if (timelineTime !== null) {
+      return {
+        timelineTime,
+        range: narratedRange,
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildPriorAssistantMarkerFallback(params: {
+  latestUserMessage: string;
+  currentAction: EditAction | null;
+  messages: ChatTurn[];
+  videoDuration: number;
+  taskState: ConversationTaskState | null;
+}): EditAction | null {
+  if (params.currentAction && params.currentAction.type !== 'none') return null;
+  if (!isMarkerPlacementRequest(params.latestUserMessage)) return null;
+
+  const timingHint = findLatestAssistantTimingHint(params.messages, params.videoDuration);
+  if (!timingHint) return null;
+
+  const taskAnchor = params.taskState?.activeUserMessages[0]?.trim();
+  const note = taskAnchor && taskAnchor !== params.latestUserMessage
+    ? taskAnchor
+    : params.latestUserMessage;
+
+  return {
+    type: 'add_marker',
+    marker: {
+      timelineTime: timingHint.timelineTime,
+      label: buildMarkerLabelFromQuery(note),
+      createdBy: 'ai',
+      status: 'open',
+      linkedRange: timingHint.range
+        ? {
+            startTime: timingHint.range.start,
+            endTime: timingHint.range.end,
+          }
+        : undefined,
+      confidence: timingHint.range ? 0.78 : 0.7,
+      note,
+    },
+    message: 'Placed a marker at the previously identified moment.',
+  };
+}
+
 function parseRetryAfterSeconds(value: string | null | undefined): number | null {
   if (!value) return null;
   const numeric = Number(value);
@@ -1711,9 +1798,19 @@ Honor these defaults unless the user explicitly asks for something different in 
       ),
       validationContext,
     );
+    const priorAssistantMarkerFallback = validateEditAction(
+      buildPriorAssistantMarkerFallback({
+        latestUserMessage: effectiveLatestUserMessage,
+        currentAction: fallbackMarkerAction ?? committedMarkerFallback ?? action,
+        messages: normalizedMessages,
+        videoDuration: validationContext.videoDuration,
+        taskState,
+      }),
+      validationContext,
+    );
     return NextResponse.json({
-      message: fallbackMarkerAction?.message ?? committedMarkerFallback?.message ?? message,
-      action: fallbackMarkerAction ?? committedMarkerFallback ?? action,
+      message: priorAssistantMarkerFallback?.message ?? fallbackMarkerAction?.message ?? committedMarkerFallback?.message ?? message,
+      action: priorAssistantMarkerFallback ?? fallbackMarkerAction ?? committedMarkerFallback ?? action,
     });
   } catch (err) {
     const upstreamErrorResponse = buildUpstreamErrorResponse(err);
