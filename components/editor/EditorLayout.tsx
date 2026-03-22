@@ -334,11 +334,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
         try {
-          await refreshSignedMediaUrls(projectId);
           const sourceIndexData = await refreshSourceIndex(projectId);
           if (projectLoadSequenceRef.current !== loadSequence || !sourceIndexData) {
             return;
           }
+          await refreshSignedMediaUrls(projectId);
         } catch (error) {
           console.warn('Failed to hydrate source index:', error);
         }

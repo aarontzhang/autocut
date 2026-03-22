@@ -993,7 +993,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ? { ...source, ...normalizedPatch, id: source.id, isPrimary: normalizedPatch.isPrimary ?? source.isPrimary }
         : { ...source, isPrimary: normalizedPatch.isPrimary === true ? false : source.isPrimary }
     ));
-    const primaryMirror = buildPrimaryMirrorState(nextSources, state.sourceRuntimeById, state.currentProjectId);
+    const previousRuntime = state.sourceRuntimeById[sourceId];
+    const nextRuntimeById: SourceRuntimeMediaMap = {
+      ...state.sourceRuntimeById,
+      [sourceId]: {
+        file: previousRuntime?.file ?? null,
+        objectUrl: previousRuntime?.objectUrl ?? '',
+        playerUrl: previousRuntime?.objectUrl
+          || previousRuntime?.playerUrl
+          || (normalizedPatch.storagePath && state.currentProjectId
+            ? `/api/projects/${state.currentProjectId}/media?sourceId=${encodeURIComponent(sourceId)}`
+            : ''),
+        processingUrl: previousRuntime?.processingUrl ?? '',
+      },
+    };
+    const primaryMirror = buildPrimaryMirrorState(nextSources, nextRuntimeById, state.currentProjectId);
     set({
       ...primaryMirror,
       sourceIndexFreshBySourceId: mergeSourceIndexStateMap(state.sourceIndexFreshBySourceId, null, nextSources),
