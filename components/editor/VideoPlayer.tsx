@@ -601,7 +601,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             onClick={togglePlay}
             playsInline
             preload="auto"
-            crossOrigin="anonymous"
           />
 
           <video
@@ -621,7 +620,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             muted={false}
             playsInline
             preload="auto"
-            crossOrigin="anonymous"
             onLoadedMetadata={(event) => {
               if (secondaryLayerSourceId) {
                 setSourceDuration(secondaryLayerSourceId, event.currentTarget.duration);

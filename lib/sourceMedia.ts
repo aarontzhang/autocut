@@ -58,7 +58,7 @@ function buildResolvedEntry(
   runtime: SourceRuntimeMedia | undefined,
   fallback?: LegacyPrimarySourceInput,
 ): ResolvedProjectSourceMedia {
-  const playerUrl = runtime?.objectUrl || runtime?.playerUrl || fallback?.videoUrl || '';
+  const playerUrl = runtime?.objectUrl || runtime?.processingUrl || runtime?.playerUrl || fallback?.processingVideoUrl || fallback?.videoUrl || '';
   const processingUrl = runtime?.processingUrl
     || runtime?.objectUrl
     || runtime?.playerUrl
@@ -98,7 +98,7 @@ function buildFallbackPrimarySource(
     assetId: null,
     status: fallback.storagePath ? 'pending' : 'ready',
     isPrimary: true,
-    playerUrl: runtime?.objectUrl || runtime?.playerUrl || fallback.videoUrl || '',
+    playerUrl: runtime?.objectUrl || runtime?.processingUrl || runtime?.playerUrl || fallback.processingVideoUrl || fallback.videoUrl || '',
     processingUrl: runtime?.processingUrl
       || runtime?.objectUrl
       || runtime?.playerUrl
