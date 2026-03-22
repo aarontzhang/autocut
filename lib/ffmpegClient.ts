@@ -44,6 +44,14 @@ function cloneWritableBytes(bytes: Uint8Array): Uint8Array {
   return bytes.slice();
 }
 
+function isSameOriginUrl(value: string): boolean {
+  try {
+    return new URL(value, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export function resetFFmpeg() {
   ffmpegInstance = null;
   loadPromise = null;
@@ -113,7 +121,10 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
     try {
-      const response = await fetch(fileOrUrl, { signal: controller.signal });
+      const response = await fetch(fileOrUrl, {
+        signal: controller.signal,
+        cache: isSameOriginUrl(fileOrUrl) ? 'force-cache' : 'default',
+      });
       if (!response.ok) {
         throw new Error(`Failed to load media source (${response.status}).`);
       }
@@ -270,6 +281,22 @@ function createOverallProgressReporter(onProgress?: (progress: number) => void) 
     lastReported = Math.max(lastReported, Math.round(nextProgress));
     onProgress(Math.max(0, Math.min(100, lastReported)));
   };
+}
+
+async function createExportObjectUrl(
+  ffmpeg: FFmpeg,
+  outputFileName: string,
+  reportOverallProgress: (progress: number) => void,
+  onStage?: (stage: string) => void,
+) {
+  onStage?.('Preparing download…');
+  reportOverallProgress(97);
+  const data = await ffmpeg.readFile(outputFileName);
+  reportOverallProgress(99);
+  const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
+  const outputUrl = URL.createObjectURL(blob);
+  reportOverallProgress(100);
+  return outputUrl;
 }
 
 function getClipExportState(clip: VideoClip) {
@@ -659,12 +686,7 @@ export async function exportClips({
       }
 
       if (segFiles.length === 1) {
-        onStage?.('Finalizing export…');
-        reportOverallProgress(98);
-        const data = await ffmpeg.readFile(segFiles[0]);
-        reportOverallProgress(100);
-        const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
-        return URL.createObjectURL(blob);
+        return createExportObjectUrl(ffmpeg, segFiles[0], reportOverallProgress, onStage);
       }
 
       phaseStart = 90;
@@ -682,12 +704,7 @@ export async function exportClips({
         'export_output.mp4',
       ]);
 
-      onStage?.('Finalizing export…');
-      reportOverallProgress(98);
-      const data = await ffmpeg.readFile('export_output.mp4');
-      reportOverallProgress(100);
-      const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
-      return URL.createObjectURL(blob);
+      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
     }
 
     onStage?.('Reading source media…');
@@ -849,12 +866,7 @@ export async function exportClips({
       }
 
       if (segFiles.length === 1) {
-        onStage?.('Finalizing export…');
-        reportOverallProgress(98);
-        const data = await ffmpeg.readFile(segFiles[0]);
-        reportOverallProgress(100);
-        const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
-        return URL.createObjectURL(blob);
+        return createExportObjectUrl(ffmpeg, segFiles[0], reportOverallProgress, onStage);
       }
 
       phaseStart = 90;
@@ -873,12 +885,7 @@ export async function exportClips({
       ]);
     }
 
-    onStage?.('Finalizing export…');
-    reportOverallProgress(98);
-    const data = await ffmpeg.readFile('export_output.mp4');
-    reportOverallProgress(100);
-    const blob = new Blob([data as unknown as ArrayBuffer], { type: 'video/mp4' });
-    return URL.createObjectURL(blob);
+    return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
   } catch (error) {
     if (isFFmpegAbortError(error)) {
       throw createAbortError();

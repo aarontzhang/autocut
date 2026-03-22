@@ -38,7 +38,18 @@ export default function TopBar() {
         processingVideoUrl,
         videoDuration,
       },
-    }).map((entry) => [entry.sourceId, entry.source]),
+    }).map((entry) => {
+      const runtime = sourceRuntimeById[entry.sourceId];
+      // Prefer the stable in-session or same-origin playback source for exports.
+      // Live projects otherwise fall back to short-lived signed processing URLs,
+      // which can trigger an extra cold download right when export starts.
+      const exportSource = runtime?.file
+        ?? runtime?.objectUrl
+        ?? runtime?.playerUrl
+        ?? runtime?.processingUrl
+        ?? entry.source;
+      return [entry.sourceId, exportSource];
+    }),
   );
 
   const outputReady = ffmpegJob.status === 'done';
