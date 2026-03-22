@@ -139,7 +139,31 @@ export async function ensureAssetIndexingJob(
   assetId: string,
 ): Promise<SourceIndexAnalysisState | null> {
   try {
-    const { data: existing, error: existingError } = await supabase
+    const { data: latest, error: latestError } = await supabase
+      .from('analysis_jobs')
+      .select('id, status, error, progress, pause_requested')
+      .eq('project_id', projectId)
+      .eq('asset_id', assetId)
+      .eq('job_type', 'index_asset')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestError) throw latestError;
+    if (latest) return mapAnalysis(latest);
+
+    const { data: asset, error: assetError } = await supabase
+      .from('media_assets')
+      .select('status, indexed_at')
+      .eq('id', assetId)
+      .maybeSingle();
+
+    if (assetError) throw assetError;
+    if (asset && (asset.indexed_at || asset.status === 'ready')) {
+      return null;
+    }
+
+    const { data: existingActive, error: existingActiveError } = await supabase
       .from('analysis_jobs')
       .select('id, status, error, progress, pause_requested')
       .eq('project_id', projectId)
@@ -150,8 +174,8 @@ export async function ensureAssetIndexingJob(
       .limit(1)
       .maybeSingle();
 
-    if (existingError) throw existingError;
-    if (existing) return mapAnalysis(existing);
+    if (existingActiveError) throw existingActiveError;
+    if (existingActive) return mapAnalysis(existingActive);
 
     const { data: inserted, error: insertError } = await supabase
       .from('analysis_jobs')
