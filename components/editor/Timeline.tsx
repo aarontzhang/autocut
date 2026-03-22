@@ -32,6 +32,7 @@ type ClipVisualLayout = {
 
 const CLIP_MIN_DISPLAY_WIDTH = 22;
 const CLIP_LANE_STEP = 18;
+const CLIP_LANE_OVERLAP_EPSILON_PX = 0.5;
 
 function buildClipVisualLayouts(
   schedule: ReturnType<typeof buildClipSchedule>,
@@ -41,16 +42,22 @@ function buildClipVisualLayouts(
   const layouts = schedule.map((entry) => {
     const rawLeft = toPx(entry.timelineStart);
     const rawWidth = Math.max(1, toPx(entry.timelineEnd) - rawLeft);
+    const rawRight = rawLeft + rawWidth;
     const displayWidth = Math.max(CLIP_MIN_DISPLAY_WIDTH, rawWidth);
     const displayLeft = rawWidth >= CLIP_MIN_DISPLAY_WIDTH
       ? rawLeft
       : Math.max(0, rawLeft - (displayWidth - rawWidth) / 2);
 
     let lane = 0;
-    while (laneEndByIndex[lane] !== undefined && displayLeft < laneEndByIndex[lane] + 4) {
+    // Only stack clips when their real timeline ranges overlap.
+    // Back-to-back clips should stay on the same row even if their rendered boxes touch.
+    while (
+      laneEndByIndex[lane] !== undefined
+      && rawLeft + CLIP_LANE_OVERLAP_EPSILON_PX < laneEndByIndex[lane]
+    ) {
       lane += 1;
     }
-    laneEndByIndex[lane] = displayLeft + displayWidth;
+    laneEndByIndex[lane] = rawRight;
 
     return {
       clipId: entry.clipId,
