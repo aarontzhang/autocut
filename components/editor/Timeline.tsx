@@ -6,6 +6,7 @@ import { useEditorStore } from '@/lib/useEditorStore';
 import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
 import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
+import { getReviewOverlayDescriptors } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 
@@ -19,6 +20,53 @@ type PlayheadDragInfo = {
   totalW: number;
   totalDuration: number;
 };
+
+type ClipVisualLayout = {
+  clipId: string;
+  rawLeft: number;
+  rawWidth: number;
+  displayLeft: number;
+  displayWidth: number;
+  lane: number;
+};
+
+const CLIP_MIN_DISPLAY_WIDTH = 22;
+const CLIP_LANE_STEP = 18;
+
+function buildClipVisualLayouts(
+  schedule: ReturnType<typeof buildClipSchedule>,
+  toPx: (time: number) => number,
+): { layouts: ClipVisualLayout[]; laneCount: number } {
+  const laneEndByIndex: number[] = [];
+  const layouts = schedule.map((entry) => {
+    const rawLeft = toPx(entry.timelineStart);
+    const rawWidth = Math.max(1, toPx(entry.timelineEnd) - rawLeft);
+    const displayWidth = Math.max(CLIP_MIN_DISPLAY_WIDTH, rawWidth);
+    const displayLeft = rawWidth >= CLIP_MIN_DISPLAY_WIDTH
+      ? rawLeft
+      : Math.max(0, rawLeft - (displayWidth - rawWidth) / 2);
+
+    let lane = 0;
+    while (laneEndByIndex[lane] !== undefined && displayLeft < laneEndByIndex[lane] + 4) {
+      lane += 1;
+    }
+    laneEndByIndex[lane] = displayLeft + displayWidth;
+
+    return {
+      clipId: entry.clipId,
+      rawLeft,
+      rawWidth,
+      displayLeft,
+      displayWidth,
+      lane,
+    };
+  });
+
+  return {
+    layouts,
+    laneCount: Math.max(1, laneEndByIndex.length),
+  };
+}
 
 interface TimelineProps {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -42,19 +90,30 @@ export default function Timeline({
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const currentTime = useEditorStore(s => s.currentTime);
-  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
-  const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
-  const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
-  const markers = useEditorStore(s => s.previewSnapshot?.markers ?? s.markers);
-  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
+  const previewSnapshot = useEditorStore(s => s.previewSnapshot);
+  const activeReviewSession = useEditorStore(s => s.activeReviewSession);
+  const activeReviewFocusItemId = useEditorStore(s => s.activeReviewFocusItemId);
+  const liveClips = useEditorStore(s => s.clips);
+  const liveCaptions = useEditorStore(s => s.captions);
+  const liveTransitions = useEditorStore(s => s.transitions);
+  const liveMarkers = useEditorStore(s => s.markers);
+  const liveTextOverlays = useEditorStore(s => s.textOverlays);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
+  const taggedClipIds = useEditorStore(s => s.taggedClipIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const toggleTaggedMarker = useEditorStore(s => s.toggleTaggedMarker);
+  const toggleTaggedClip = useEditorStore(s => s.toggleTaggedClip);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
+  const timelineSnapshot = activeReviewSession?.baseSnapshot ?? previewSnapshot;
+  const clips = timelineSnapshot?.clips ?? liveClips;
+  const captions = timelineSnapshot?.captions ?? liveCaptions;
+  const transitions = timelineSnapshot?.transitions ?? liveTransitions;
+  const markers = timelineSnapshot?.markers ?? liveMarkers;
+  const textOverlays = timelineSnapshot?.textOverlays ?? liveTextOverlays;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -77,7 +136,6 @@ export default function Timeline({
     return () => window.removeEventListener('keydown', onKey);
   }, [createMarkerAtTime, splitClipAtTime]);
 
-  const TRACK_HEIGHT = BASE_TRACK_HEIGHT;
   const schedule = buildClipSchedule(clips, transitions);
   const mainTrackEnd = useMemo(
     () => (schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration),
@@ -109,9 +167,14 @@ export default function Timeline({
     return formatTime(time);
   }, [majorTickInterval]);
 
-  const hasCaptions = captions.length > 0;
-  const hasTextOverlays = textOverlays.length > 0;
-  const hasTransitions = transitions.length > 0;
+  const reviewOverlays = useMemo(
+    () => (activeReviewSession ? getReviewOverlayDescriptors(activeReviewSession) : []),
+    [activeReviewSession],
+  );
+  const hasCaptions = captions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'caption');
+  const hasTextOverlays = textOverlays.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'text');
+  const hasTransitions = transitions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'transition');
+  const cutReviewOverlays = reviewOverlays.filter((overlay) => overlay.kind === 'cut');
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -168,6 +231,8 @@ export default function Timeline({
     if (totalTimelineDuration <= 0) return 0;
     return (time / totalTimelineDuration) * totalW;
   }, [totalTimelineDuration, totalW]);
+  const clipVisualLayout = useMemo(() => buildClipVisualLayouts(schedule, tPx), [schedule, tPx]);
+  const TRACK_HEIGHT = BASE_TRACK_HEIGHT + (clipVisualLayout.laneCount - 1) * CLIP_LANE_STEP;
 
   const pxToTimelineTime = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     const rect = containerEl.getBoundingClientRect();
@@ -299,6 +364,11 @@ export default function Timeline({
   }, [endInteractions, scrubPlayhead]);
 
   const px = (time: number) => tPx(time);
+  const clipLayoutById = useMemo(
+    () => new Map(clipVisualLayout.layouts.map((layout) => [layout.clipId, layout])),
+    [clipVisualLayout.layouts],
+  );
+  const hasCutReviewOverlays = cutReviewOverlays.length > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -456,7 +526,7 @@ export default function Timeline({
               return (
                 <button
                   key={marker.id}
-                  title={`${isTagged ? 'Untag' : 'Tag'} marker ${marker.number}${marker.label ? `: ${marker.label}` : ''}`}
+                  title={`${isTagged ? 'Untag' : 'Tag'} Marker ${marker.number}${marker.label ? ` • ${marker.label}` : ''}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     toggleTaggedMarker(marker.id);
@@ -504,6 +574,29 @@ export default function Timeline({
                 </button>
               );
             })}
+            {reviewOverlays
+              .filter((overlay) => overlay.kind === 'marker' && typeof overlay.atTime === 'number')
+              .map((overlay) => {
+                const isFocused = activeReviewFocusItemId === overlay.itemId;
+                return (
+                  <div
+                    key={overlay.id}
+                    style={{
+                      position: 'absolute',
+                      left: tPx(overlay.atTime!),
+                      transform: 'translateX(-50%)',
+                      top: 1,
+                      width: 14,
+                      height: 16,
+                      borderRadius: 999,
+                      border: isFocused ? '1px solid rgba(250,204,21,0.95)' : '1px dashed rgba(250,204,21,0.55)',
+                      background: isFocused ? 'rgba(250,204,21,0.28)' : 'rgba(250,204,21,0.12)',
+                      pointerEvents: 'none',
+                      zIndex: 1,
+                    }}
+                  />
+                );
+              })}
           </div>
 
           <TrackRow
@@ -512,23 +605,61 @@ export default function Timeline({
             onDrop={handleTrackDrop}
             onDragOver={handleTimelineDragOver}
           >
+            {hasCutReviewOverlays && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.16)',
+                  pointerEvents: 'none',
+                }}
+              />
+            )}
+            {cutReviewOverlays.map((overlay) => {
+              if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
+              const isFocused = activeReviewFocusItemId === overlay.itemId;
+              return (
+                <div
+                  key={overlay.id}
+                  style={{
+                    position: 'absolute',
+                    left: px(overlay.startTime),
+                    width: Math.max(3, px(overlay.endTime) - px(overlay.startTime)),
+                    top: 4,
+                    bottom: 4,
+                    borderRadius: 4,
+                    border: isFocused ? '1px solid rgba(248,113,113,0.95)' : '1px solid rgba(248,113,113,0.45)',
+                    background: isFocused
+                      ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.45), rgba(248,113,113,0.45) 6px, rgba(248,113,113,0.18) 6px, rgba(248,113,113,0.18) 12px)'
+                      : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.24), rgba(248,113,113,0.24) 6px, rgba(248,113,113,0.1) 6px, rgba(248,113,113,0.1) 12px)',
+                    pointerEvents: 'none',
+                    zIndex: 1,
+                  }}
+                />
+              );
+            })}
             {videoDuration > 0 && schedule.map((entry, index) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;
-              const clipLeft = tPx(entry.timelineStart);
-              const clipWidth = tPx(entry.timelineEnd) - clipLeft;
+              const layout = clipLayoutById.get(entry.clipId);
+              if (!layout) return null;
               return (
                 <ClipBlock
                   key={clip.id}
                   clip={clip}
-                  left={clipLeft}
-                  width={clipWidth}
-                  height={TRACK_HEIGHT}
+                  left={layout.displayLeft}
+                  width={layout.displayWidth}
+                  top={6 + layout.lane * CLIP_LANE_STEP}
+                  height={BASE_TRACK_HEIGHT - 12}
                   isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
+                  isTagged={taggedClipIds.includes(clip.id)}
                   index={index}
+                  title={`Clip ${index + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onSelect={e => {
                     e.stopPropagation();
+                    toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
+                    requestSeek(entry.timelineStart);
                   }}
                 />
               );
@@ -541,11 +672,44 @@ export default function Timeline({
             onDrop={handleTrackDrop}
             onDragOver={handleTimelineDragOver}
           >
+            {hasCutReviewOverlays && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.16)',
+                  pointerEvents: 'none',
+                }}
+              />
+            )}
+            {cutReviewOverlays.map((overlay) => {
+              if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
+              const isFocused = activeReviewFocusItemId === overlay.itemId;
+              return (
+                <div
+                  key={`${overlay.id}:audio`}
+                  style={{
+                    position: 'absolute',
+                    left: px(overlay.startTime),
+                    width: Math.max(3, px(overlay.endTime) - px(overlay.startTime)),
+                    top: 4,
+                    bottom: 4,
+                    borderRadius: 4,
+                    border: isFocused ? '1px solid rgba(248,113,113,0.9)' : '1px solid rgba(248,113,113,0.38)',
+                    background: isFocused
+                      ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.42), rgba(248,113,113,0.42) 6px, rgba(248,113,113,0.16) 6px, rgba(248,113,113,0.16) 12px)'
+                      : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.22), rgba(248,113,113,0.22) 6px, rgba(248,113,113,0.08) 6px, rgba(248,113,113,0.08) 12px)',
+                    pointerEvents: 'none',
+                    zIndex: 1,
+                  }}
+                />
+              );
+            })}
             {videoDuration > 0 && schedule.map((entry) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;
-              const clipLeft = tPx(entry.timelineStart);
-              const clipWidth = tPx(entry.timelineEnd) - clipLeft;
+              const layout = clipLayoutById.get(entry.clipId);
+              if (!layout) return null;
               const clipWaveform = clip.sourceId === MAIN_SOURCE_ID
                 ? (() => {
                     const startFrac = clip.sourceStart / videoDuration;
@@ -554,7 +718,7 @@ export default function Timeline({
                     const endBar = Math.ceil(endFrac * waveform.length);
                     return waveform.slice(startBar, endBar);
                   })()
-                : Array.from({ length: Math.max(12, Math.floor(Math.max(24, clipWidth) / 6)) }, (_, index) => (
+                : Array.from({ length: Math.max(12, Math.floor(Math.max(24, layout.displayWidth) / 6)) }, (_, index) => (
                     0.35 + ((index % 5) / 10)
                   ));
               const isClipSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
@@ -564,21 +728,24 @@ export default function Timeline({
                   className="clip-audio"
                   style={{
                     position: 'absolute',
-                    left: clipLeft,
-                    top: 6,
-                    width: Math.max(24, clipWidth),
-                    height: TRACK_HEIGHT - 12,
+                    left: layout.displayLeft,
+                    top: 6 + layout.lane * CLIP_LANE_STEP,
+                    width: layout.displayWidth,
+                    height: BASE_TRACK_HEIGHT - 12,
                     borderRadius: 4,
                     overflow: 'hidden',
-                    background: isClipSelected ? 'rgba(96,165,250,0.18)' : undefined,
-                    border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(255,255,255,0.06)',
+                    background: isClipSelected ? 'rgba(96,165,250,0.18)' : taggedClipIds.includes(clip.id) ? 'rgba(125,211,252,0.14)' : undefined,
+                    border: isClipSelected ? '2px solid var(--accent)' : taggedClipIds.includes(clip.id) ? '1.5px solid rgba(125,211,252,0.85)' : '1px solid rgba(255,255,255,0.06)',
                     cursor: 'pointer',
                     boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
                     opacity: isClipSelected ? 1 : 0.92,
                   }}
+                  title={`Clip ${schedule.findIndex((item) => item.clipId === clip.id) + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onClick={e => {
                     e.stopPropagation();
+                    toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
+                    requestSeek(entry.timelineStart);
                   }}
                 >
                   <div
@@ -645,6 +812,27 @@ export default function Timeline({
                   </button>
                 );
               })}
+              {reviewOverlays
+                .filter((overlay) => overlay.kind === 'caption' && overlay.startTime !== undefined && overlay.endTime !== undefined)
+                .map((overlay) => {
+                  const isFocused = activeReviewFocusItemId === overlay.itemId;
+                  return (
+                    <div
+                      key={overlay.id}
+                      style={{
+                        position: 'absolute',
+                        left: px(overlay.startTime!),
+                        width: Math.max(4, px(overlay.endTime!) - px(overlay.startTime!)),
+                        top: 3,
+                        height: EFFECT_TRACK_H - 6,
+                        borderRadius: 3,
+                        border: isFocused ? '1.5px solid rgba(255,255,255,0.92)' : '1px dashed rgba(255,255,255,0.5)',
+                        background: isFocused ? 'rgba(245,158,11,0.58)' : 'rgba(245,158,11,0.28)',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  );
+                })}
             </EffectTrackRow>
           )}
 
@@ -694,6 +882,27 @@ export default function Timeline({
                   </button>
                 );
               })}
+              {reviewOverlays
+                .filter((overlay) => overlay.kind === 'text' && overlay.startTime !== undefined && overlay.endTime !== undefined)
+                .map((overlay) => {
+                  const isFocused = activeReviewFocusItemId === overlay.itemId;
+                  return (
+                    <div
+                      key={overlay.id}
+                      style={{
+                        position: 'absolute',
+                        left: px(overlay.startTime!),
+                        width: Math.max(4, px(overlay.endTime!) - px(overlay.startTime!)),
+                        top: 3,
+                        height: EFFECT_TRACK_H - 6,
+                        borderRadius: 3,
+                        border: isFocused ? '1.5px solid rgba(255,255,255,0.92)' : '1px dashed rgba(255,255,255,0.5)',
+                        background: isFocused ? 'rgba(139,92,246,0.52)' : 'rgba(139,92,246,0.24)',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  );
+                })}
             </EffectTrackRow>
           )}
 
@@ -737,6 +946,38 @@ export default function Timeline({
                   </button>
                 );
               })}
+              {reviewOverlays
+                .filter((overlay) => overlay.kind === 'transition' && overlay.atTime !== undefined)
+                .map((overlay) => {
+                  const isFocused = activeReviewFocusItemId === overlay.itemId;
+                  return (
+                    <div
+                      key={overlay.id}
+                      style={{
+                        position: 'absolute',
+                        left: px(overlay.atTime!) - 8,
+                        top: 3,
+                        width: 16,
+                        height: EFFECT_TRACK_H - 6,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 10,
+                          height: 10,
+                          transform: 'rotate(45deg)',
+                          borderRadius: 2,
+                          border: isFocused ? '1px solid rgba(255,255,255,0.95)' : '1px dashed rgba(255,255,255,0.55)',
+                          background: isFocused ? 'rgba(255,255,255,0.66)' : 'rgba(255,255,255,0.22)',
+                        }}
+                      />
+                    </div>
+                  );
+                })}
             </EffectTrackRow>
           )}
 

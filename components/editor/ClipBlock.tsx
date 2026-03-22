@@ -8,9 +8,12 @@ interface ClipBlockProps {
   left: number;    // px position
   width: number;   // px width
   height: number;
+  top: number;
   isSelected: boolean;
+  isTagged: boolean;
   onSelect: (e: React.MouseEvent) => void;
   index: number;
+  title: string;
 }
 
 const CLIP_COLOR = {
@@ -20,41 +23,54 @@ const CLIP_COLOR = {
 };
 
 export default function ClipBlock({
-  clip, left, width, height, isSelected,
-  onSelect, index
+  clip, left, width, height, top, isSelected, isTagged,
+  onSelect, index, title,
 }: ClipBlockProps) {
-  void index;
+  const clipNumber = index + 1;
   const color = CLIP_COLOR;
 
   // Timeline duration = sourceDuration / speed
   const timelineDuration = clip.sourceDuration / clip.speed;
+  const isMicroClip = width < 52;
 
   return (
     <div
       className="clip-block"
+      title={title}
       style={{
         position: 'absolute',
         left,
-        top: 6,
-        width: Math.max(24, width),
-        height: height - 12,
+        top,
+        width,
+        height,
         background: color.bg,
         borderRadius: 4,
-        border: `1.5px solid ${isSelected ? 'var(--accent)' : color.border}`,
+        border: `1.5px solid ${isSelected ? 'var(--accent)' : isTagged ? 'rgba(125,211,252,0.9)' : color.border}`,
         outline: isSelected ? '1.5px solid rgba(255,255,255,0.2)' : undefined,
         outlineOffset: isSelected ? '1px' : undefined,
         boxSizing: 'border-box',
         overflow: 'hidden',
         cursor: 'pointer',
         userSelect: 'none',
+        boxShadow: isTagged ? '0 0 0 1px rgba(125,211,252,0.3)' : 'none',
       }}
       onClick={onSelect}
     >
+      {isMicroClip && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04))',
+            pointerEvents: 'none',
+          }}
+        />
+      )}
       {/* Label */}
       <div style={{
         position: 'absolute',
-        left: 10,
-        right: 10,
+        left: isMicroClip ? 6 : 10,
+        right: isMicroClip ? 6 : 10,
         top: 0,
         bottom: 0,
         display: 'flex',
@@ -73,11 +89,11 @@ export default function ClipBlock({
           textOverflow: 'ellipsis',
           flexShrink: 1,
         }}>
-          {formatTime(timelineDuration)}
+          {isMicroClip ? clipNumber : `Clip ${clipNumber}`}
         </span>
 
         {/* Speed badge */}
-        {clip.speed !== 1.0 && width > 40 && (
+        {!isMicroClip && clip.speed !== 1.0 && width > 76 && (
           <span style={{
             fontSize: 9,
             fontWeight: 700,
@@ -93,7 +109,7 @@ export default function ClipBlock({
         )}
 
         {/* Filter badge */}
-        {clip.filter && clip.filter.type !== 'none' && width > 50 && (
+        {!isMicroClip && clip.filter && clip.filter.type !== 'none' && width > 94 && (
           <span style={{
             fontSize: 9,
             color: 'rgba(167,139,250,0.9)',
@@ -104,6 +120,18 @@ export default function ClipBlock({
             flexShrink: 0,
           }}>
             {clip.filter.type[0].toUpperCase()}
+          </span>
+        )}
+
+        {!isMicroClip && width > 118 && (
+          <span style={{
+            fontSize: 9,
+            color: 'rgba(255,255,255,0.55)',
+            fontFamily: 'var(--font-serif)',
+            whiteSpace: 'nowrap',
+            flexShrink: 0,
+          }}>
+            {formatTime(timelineDuration)}
           </span>
         )}
       </div>

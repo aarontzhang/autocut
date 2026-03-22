@@ -17,7 +17,13 @@ import {
 } from '@/lib/types';
 import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
-import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
+import {
+  buildReviewGroupWithUpdatedItems,
+  buildReviewPreviewSnapshot,
+  collapseReviewItemsToAction,
+  createReviewGroup,
+  EditSnapshot,
+} from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
@@ -1072,6 +1078,28 @@ function getMarkerActionResult(action: EditAction): string {
   return 'Marker updated.';
 }
 
+function getMarkerPrimaryLabel(marker: Pick<MarkerEntry, 'number'>): string {
+  return `Marker ${marker.number}`;
+}
+
+function getMarkerSecondaryLabel(marker: Pick<MarkerEntry, 'timelineTime' | 'label'>): string {
+  return marker.label?.trim() || formatChatTime(marker.timelineTime);
+}
+
+function getClipPrimaryLabel(index: number): string {
+  return `Clip ${index + 1}`;
+}
+
+function getReviewItemCount(action?: EditAction | null): number {
+  if (!action || action.type === 'none') return 0;
+  if (action.type === 'delete_ranges') return action.ranges?.length ?? 0;
+  if (action.type === 'add_captions') return action.captions?.length ?? 0;
+  if (action.type === 'add_transition') return action.transitions?.length ?? 0;
+  if (action.type === 'add_markers') return action.markers?.length ?? 0;
+  if (action.type === 'add_text_overlay') return action.textOverlays?.length ?? 0;
+  return 1;
+}
+
 function getMarkerActionSeekTime(
   action: EditAction,
   existingMarkers: MarkerEntry[],
@@ -1480,8 +1508,8 @@ function ActionDetails({ action }: { action: EditAction }) {
       <div style={{ padding: '6px 12px 8px' }}>
         {(markers ?? []).filter(Boolean).map((marker, i) => (
           <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
-            <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-muted)' }}>
-              {marker?.number ? `@${marker.number}` : 'Marker'}
+            <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
+              {typeof marker?.number === 'number' ? getMarkerPrimaryLabel({ number: marker.number }) : `Marker ${i + 1}`}
             </span>
             <span style={{ fontSize: 10, color: 'var(--fg-secondary)' }}>
               {marker?.timelineTime !== undefined ? formatChatTime(marker.timelineTime) : '—'}
@@ -1824,9 +1852,11 @@ function AssistantMessage({
   const sourceRuntimeById = useEditorStore(s => s.sourceRuntimeById);
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const previewOwnerId = useEditorStore(s => s.previewOwnerId);
-  const setPreviewSnapshot = useEditorStore(s => s.setPreviewSnapshot);
-  const clearPreviewSnapshot = useEditorStore(s => s.clearPreviewSnapshot);
   const commitPreviewSnapshot = useEditorStore(s => s.commitPreviewSnapshot);
+  const activeReviewSession = useEditorStore(s => s.activeReviewSession);
+  const activeReviewFocusItemId = useEditorStore(s => s.activeReviewFocusItemId);
+  const setActiveReviewSession = useEditorStore(s => s.setActiveReviewSession);
+  const setActiveReviewFocusItemId = useEditorStore(s => s.setActiveReviewFocusItemId);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
@@ -1834,8 +1864,6 @@ function AssistantMessage({
   const appliedActions = useEditorStore(s => s.appliedActions);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
-  const [reviewBaseSnapshot, setReviewBaseSnapshot] = useState<EditSnapshot | null>(null);
-  const [reviewPreviewActive, setReviewPreviewActive] = useState(false);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
@@ -1860,9 +1888,10 @@ function AssistantMessage({
 
   const action = msg.action;
   const hasAction = action && action.type !== 'none';
-  const reviewSteps = useMemo(() => (action ? expandActionForReview(action) : []), [action]);
   const activeReviewAction = action ?? null;
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
+  const reviewSessionForMessage = activeReviewSession?.ownerId === msg.id ? activeReviewSession : null;
+  const reviewSteps = reviewSessionForMessage?.items ?? [];
   const actionPreviouslyApplied = useMemo(() => (
     !!action && appliedActions.some(record => actionsMatch(record.action, action))
   ), [action, appliedActions]);
@@ -1874,8 +1903,9 @@ function AssistantMessage({
     && action.type !== 'none'
     && action.type !== 'transcribe_request'
     && action.type !== 'update_ai_settings';
-  const batchReviewActive = reviewPreviewActive && reviewableAction;
+  const batchReviewActive = !!reviewSessionForMessage && reviewableAction;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
+  const reviewableItemCount = getReviewItemCount(action);
   const actionResultText = msg.actionResult ?? (
     msg.actionStatus === 'rejected'
       ? 'No changes applied.'
@@ -1887,13 +1917,22 @@ function AssistantMessage({
   );
 
   useEffect(() => () => {
-    clearPreviewSnapshot(msg.id);
-  }, [clearPreviewSnapshot, msg.id]);
+    if (useEditorStore.getState().activeReviewSession?.ownerId === msg.id) {
+      useEditorStore.getState().setActiveReviewSession(null);
+    }
+  }, [msg.id]);
 
   useEffect(() => {
     if (!actionPreviouslyApplied || msg.actionStatus === 'completed' || msg.actionStatus === 'rejected') return;
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: actionResultText ?? 'Already applied.' });
   }, [actionPreviouslyApplied, actionResultText, msg.actionStatus, msg.id, updateMessage]);
+
+  const reviewedAction = useMemo(
+    () => (reviewSessionForMessage ? collapseReviewItemsToAction(reviewSessionForMessage) : null),
+    [reviewSessionForMessage],
+  );
+  const allReviewItemsChecked = reviewSteps.length > 0 && reviewSteps.every((item) => item.checked);
+  const checkedReviewCount = reviewSteps.filter((item) => item.checked).length;
 
   const startReview = useCallback(() => {
     if (
@@ -1909,38 +1948,79 @@ function AssistantMessage({
       markers: state.markers,
       textOverlays: state.textOverlays,
     };
-    setReviewBaseSnapshot(baseSnapshot);
-    setReviewPreviewActive(true);
+    const nextReviewGroup = createReviewGroup(msg.id, action, baseSnapshot);
+    if (!nextReviewGroup) return;
     setReviewResult(null);
-    setPreviewSnapshot(msg.id, applyActionToSnapshot(baseSnapshot, action));
+    setActiveReviewSession(nextReviewGroup);
     const reviewSeekTime = getReviewSeekTime(baseSnapshot, action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [action, anotherReviewActive, msg.id, requestSeek, reviewableAction, setPreviewSnapshot]);
+  }, [action, anotherReviewActive, msg.id, requestSeek, reviewableAction, setActiveReviewSession]);
 
   const cancelReview = useCallback(() => {
-    clearPreviewSnapshot(msg.id);
-    setReviewBaseSnapshot(null);
-    setReviewPreviewActive(false);
+    setActiveReviewSession(null);
     setReviewResult(null);
-  }, [clearPreviewSnapshot, msg.id]);
+  }, [setActiveReviewSession]);
+
+  const toggleReviewAll = useCallback((checked: boolean) => {
+    if (!reviewSessionForMessage) return;
+    const nextGroup = buildReviewGroupWithUpdatedItems(
+      reviewSessionForMessage,
+      (items) => items.map((item) => ({ ...item, checked })),
+    );
+    setActiveReviewSession(nextGroup);
+    setReviewResult(null);
+  }, [reviewSessionForMessage, setActiveReviewSession]);
+
+  const toggleReviewItem = useCallback((itemId: string, checked: boolean) => {
+    if (!reviewSessionForMessage) return;
+    const nextGroup = buildReviewGroupWithUpdatedItems(
+      reviewSessionForMessage,
+      (items) => items.map((item) => (item.id === itemId ? { ...item, checked } : item)),
+    );
+    setActiveReviewSession(nextGroup);
+    setReviewResult(null);
+  }, [reviewSessionForMessage, setActiveReviewSession]);
+
+  const focusReviewItem = useCallback((itemId: string) => {
+    if (!reviewSessionForMessage) return;
+    const target = reviewSessionForMessage.items.find((item) => item.id === itemId);
+    if (!target) return;
+    setActiveReviewFocusItemId(itemId);
+    const anchor = target.anchorTime;
+    if (anchor !== null) {
+      const previewSnapshot = buildReviewPreviewSnapshot(reviewSessionForMessage);
+      const removedDurationBeforeAnchor = target.action.type === 'delete_range'
+        ? reviewSessionForMessage.items.reduce((sum, item) => {
+            if (!item.checked || item.id === target.id || item.action.type !== 'delete_range') return sum;
+            const start = item.action.deleteStartTime ?? 0;
+            const end = item.action.deleteEndTime ?? 0;
+            return end <= anchor ? sum + Math.max(0, end - start) : sum;
+          }, 0)
+        : 0;
+      const adjustedAnchor = Math.max(0, anchor - removedDurationBeforeAnchor);
+      const reviewSeekTime = target.action.type === 'delete_range'
+        ? Math.max(0, adjustedAnchor - REVIEW_PREROLL_SECONDS)
+        : (getReviewSeekTime(previewSnapshot, target.action) ?? Math.max(0, adjustedAnchor - REVIEW_PREROLL_SECONDS));
+      requestSeek(reviewSeekTime);
+    }
+  }, [requestSeek, reviewSessionForMessage, setActiveReviewFocusItemId]);
 
   const handleApplyReviewedAction = useCallback(() => {
-    if (!action || !reviewBaseSnapshot) return;
-    const nextSnapshot = applyActionToSnapshot(reviewBaseSnapshot, action);
-    clearPreviewSnapshot(msg.id);
+    if (!reviewSessionForMessage || !reviewedAction) return;
+    const nextSnapshot = buildReviewPreviewSnapshot(reviewSessionForMessage);
+    const sourceRanges = sourceRangesForAction(reviewSessionForMessage.baseSnapshot.clips, reviewedAction);
     commitPreviewSnapshot(nextSnapshot);
-    const sourceRanges = sourceRangesForAction(reviewBaseSnapshot.clips, action);
-    recordAppliedAction(action, action.message, { sourceRanges });
-    const result = getReviewApplyResult(action, reviewSteps.length);
+    recordAppliedAction(reviewedAction, reviewedAction.message, { sourceRanges });
+    const result = getReviewApplyResult(reviewedAction, checkedReviewCount);
     updateMessage(msg.id, {
       actionStatus: 'completed',
       actionResult: result,
     });
-    setReviewBaseSnapshot(null);
-    setReviewPreviewActive(false);
+    setActiveReviewSession(null);
+    setActiveReviewFocusItemId(null);
     setReviewResult(result);
-    void onActionResolved(msg.id, action, result);
-  }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, onActionResolved, recordAppliedAction, reviewBaseSnapshot, reviewSteps.length, updateMessage]);
+    void onActionResolved(msg.id, reviewedAction, result);
+  }, [checkedReviewCount, commitPreviewSnapshot, msg.id, onActionResolved, recordAppliedAction, reviewSessionForMessage, reviewedAction, setActiveReviewFocusItemId, setActiveReviewSession, updateMessage]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -2055,7 +2135,17 @@ function AssistantMessage({
               background: 'rgba(255,255,255,0.03)',
               borderBottom: '1px solid rgba(255,255,255,0.06)',
               display: 'flex', alignItems: 'center', gap: 8,
-            }}>
+              cursor: reviewableAction && !anotherReviewActive ? 'pointer' : 'default',
+            }}
+              onClick={() => {
+                if (!reviewableAction) return;
+                if (batchReviewActive) {
+                  setActiveReviewFocusItemId(null);
+                  return;
+                }
+                startReview();
+              }}
+            >
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color, flexShrink: 0 }} />
               <span style={{
                 fontSize: 12, color: 'var(--fg-primary)', fontWeight: 600,
@@ -2071,6 +2161,79 @@ function AssistantMessage({
             </div>
 
             <ActionDetails action={activeReviewAction!} />
+            {batchReviewActive && reviewSteps.length > 0 && (
+              <div style={{ padding: '8px 12px 10px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 11, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
+                  <input
+                    type="checkbox"
+                    checked={allReviewItemsChecked}
+                    onChange={(event) => toggleReviewAll(event.target.checked)}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                  Select all
+                  <span style={{ marginLeft: 'auto', color: 'var(--fg-muted)' }}>{checkedReviewCount}/{reviewSteps.length} selected</span>
+                </label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                  {reviewSteps.map((item) => {
+                    const isFocused = activeReviewFocusItemId === item.id;
+                    return (
+                      <div
+                        key={item.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '7px 8px',
+                          borderRadius: 6,
+                          border: isFocused ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(255,255,255,0.08)',
+                          background: isFocused ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={item.checked}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            toggleReviewItem(item.id, event.target.checked);
+                          }}
+                          style={{ accentColor: 'var(--accent)', margin: 0 }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => focusReviewItem(item.id)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            flex: 1,
+                            background: 'transparent',
+                            border: 'none',
+                            padding: 0,
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                            color: 'inherit',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                            <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontWeight: 600, fontFamily: 'var(--font-serif)' }}>
+                              {item.label}
+                            </span>
+                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {item.summary || item.action.message}
+                            </span>
+                          </span>
+                          <span style={{ fontSize: 10, color: isFocused ? '#d1d5db' : 'var(--fg-muted)', fontFamily: 'var(--font-serif)', flexShrink: 0 }}>
+                            {isFocused ? 'Previewing' : 'Preview'}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {actionResolved ? (
               <div style={{
@@ -2093,11 +2256,11 @@ function AssistantMessage({
               </div>
             ) : (
               <div style={{ padding: '8px 12px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                {reviewableAction && reviewSteps.length > 0 && activeReviewAction && (
+                {reviewableAction && reviewableItemCount > 0 && activeReviewAction && (
                   <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
                     {batchReviewActive
-                      ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Accept applies all of them.`
-                      : `Review ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'} at once.`}
+                      ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Apply commits only the checked edits.`
+                      : `Review ${reviewableItemCount} proposed change${reviewableItemCount === 1 ? '' : 's'} at once.`}
                   </p>
                 )}
                 {anotherReviewActive && !batchReviewActive && reviewableAction && (
@@ -2149,20 +2312,21 @@ function AssistantMessage({
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button
                       onClick={handleApplyReviewedAction}
+                      disabled={!reviewedAction}
                       style={{
                         flex: 1,
                         padding: '5px 0',
                         fontSize: 12,
                         fontWeight: 500,
-                        background: 'var(--accent)',
+                        background: reviewedAction ? 'var(--accent)' : 'rgba(255,255,255,0.06)',
                         border: 'none',
-                        color: '#000',
+                        color: reviewedAction ? '#000' : 'var(--fg-muted)',
                         borderRadius: 4,
-                        cursor: 'pointer',
+                        cursor: reviewedAction ? 'pointer' : 'default',
                         fontFamily: 'var(--font-serif)',
                       }}
                     >
-                      Accept all
+                      {reviewedAction ? 'Apply selected' : 'No edits selected'}
                     </button>
                     <button
                       onClick={cancelReview}
@@ -2197,7 +2361,7 @@ function AssistantMessage({
                       transition: 'all 0.15s',
                     }}
                   >
-                    {reviewSteps.length > 1 ? 'Preview all changes' : 'Preview change'}
+                    {reviewableItemCount > 1 ? 'Review changes' : 'Review change'}
                   </button>
                 )}
               </div>
@@ -2489,9 +2653,12 @@ export default function ChatSidebar() {
   const markers = useEditorStore(s => s.markers);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
+  const taggedClipIds = useEditorStore(s => s.taggedClipIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const setTaggedMarkerIds = useEditorStore(s => s.setTaggedMarkerIds);
+  const setTaggedClipIds = useEditorStore(s => s.setTaggedClipIds);
   const clearTaggedMarkers = useEditorStore(s => s.clearTaggedMarkers);
+  const clearTaggedClips = useEditorStore(s => s.clearTaggedClips);
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
@@ -2567,8 +2734,19 @@ export default function ChatSidebar() {
     if (!selectedItem || selectedItem.type !== 'clip') return null;
     const idx = clips.findIndex(c => c.id === selectedItem.id);
     if (idx === -1) return null;
-    return { index: idx, duration: clips[idx].sourceDuration };
+    return { index: idx, duration: clips[idx].sourceDuration, id: clips[idx].id };
   })();
+  const taggedClips = useMemo(() => (
+    taggedClipIds
+      .map((clipId) => clips.find((clip) => clip.id === clipId) ?? null)
+      .filter((clip): clip is typeof clips[number] => clip !== null)
+      .map((clip) => ({
+        id: clip.id,
+        index: clips.findIndex((entry) => entry.id === clip.id),
+        duration: clip.sourceDuration,
+      }))
+      .filter((clip) => clip.index >= 0)
+  ), [clips, taggedClipIds]);
   const taggedMarkers = useMemo(() => resolveMarkersById(taggedMarkerIds, markers), [markers, taggedMarkerIds]);
   const selectedMarkerContext = (() => {
     const selectedMarker = selectedItem && selectedItem.type === 'marker'
@@ -3089,6 +3267,10 @@ export default function ChatSidebar() {
             speed: c.speed,
           })),
           selectedClip: selectedClipContext,
+          selectedClips: taggedClips.map((clip) => ({
+            index: clip.index,
+            duration: clip.duration,
+          })),
           selectedMarker: selectedMarkerContext ? {
             number: selectedMarkerContext.number,
             timelineTime: selectedMarkerContext.timelineTime,
@@ -3108,6 +3290,10 @@ export default function ChatSidebar() {
             number: marker.number,
             timelineTime: marker.timelineTime,
             label: marker.label ?? null,
+          })),
+          taggedClips: taggedClips.map((clip) => ({
+            index: clip.index,
+            duration: clip.duration,
           })),
           textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
@@ -3189,7 +3375,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedClips, taggedMarkers, useServerSourceIndex]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -3198,6 +3384,7 @@ export default function ChatSidebar() {
     setInput('');
     previousTaggedMarkerIdsRef.current = [];
     clearTaggedMarkers();
+    clearTaggedClips();
     setActiveMarkerMention(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
@@ -3219,7 +3406,7 @@ export default function ChatSidebar() {
       setIsChatLoading(false);
       setLoadingStatus('');
     }
-  }, [addMessage, clearTaggedMarkers, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, clearTaggedClips, clearTaggedMarkers, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
     const storeState = useEditorStore.getState();
@@ -3326,8 +3513,9 @@ export default function ChatSidebar() {
     setHighlightedMarkerIndex(0);
     previousTaggedMarkerIdsRef.current = [];
     clearTaggedMarkers();
+    clearTaggedClips();
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-  }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
+  }, [clearChatHistory, clearTaggedClips, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = availableSources.length > 0;
   const overviewFramesForUi = displayOverviewFrames ?? analysisOverviewFrames;
@@ -3520,6 +3708,15 @@ export default function ChatSidebar() {
     focusComposer(nextValue.length);
   }, [focusComposer, input, setTaggedMarkerIds, taggedMarkerIds]);
 
+  const untagClip = useCallback((clipId: string) => {
+    const nextTaggedIds = taggedClipIds.filter((id) => id !== clipId);
+    setTaggedClipIds(nextTaggedIds);
+    if (selectedItem?.type === 'clip' && selectedItem.id === clipId) {
+      setSelectedItem(null);
+    }
+    focusComposer();
+  }, [focusComposer, selectedItem, setSelectedItem, setTaggedClipIds, taggedClipIds]);
+
   useEffect(() => {
     if (framesReady) {
       setFrameIndexingProgress(null);
@@ -3665,7 +3862,7 @@ export default function ChatSidebar() {
       {/* Input */}
       <div style={{
         flexShrink: 0,
-        padding: '8px 10px 10px',
+        padding: '7px 10px 9px',
         borderTop: '1px solid var(--border)',
         background: 'var(--bg-panel)',
       }}>
@@ -3674,39 +3871,52 @@ export default function ChatSidebar() {
           background: 'var(--bg-elevated)',
           border: `1px solid ${composerMuted ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
           borderRadius: 8,
-          padding: '9px 11px 9px',
+          padding: '7px 11px 8px',
+          minHeight: 56,
           transition: 'border-color 0.2s ease, opacity 0.2s ease',
           opacity: composerMuted ? 0.82 : 1,
         }}>
-          {selectedClipContext && (
+          {taggedClips.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+              {taggedClips.map((clip) => (
+                <button
+                  key={clip.id}
+                  onClick={() => untagClip(clip.id)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '2px 7px',
+                    background: 'rgba(56,189,248,0.12)',
+                    border: '1px solid rgba(56,189,248,0.28)',
+                    borderRadius: 999,
+                    fontSize: 11,
+                    color: '#7dd3fc',
+                    fontFamily: 'var(--font-serif)',
+                    cursor: 'pointer',
+                  }}
+                  title="Remove this clip tag from the message"
+                >
+                  <span>{getClipPrimaryLabel(clip.index)}</span>
+                  <span style={{ color: 'rgba(125,211,252,0.72)' }}>{formatChatTime(clip.duration)}</span>
+                  <span style={{ color: 'rgba(125,211,252,0.72)' }}>×</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {!taggedClips.length && selectedClipContext && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               <div style={{
                 display: 'inline-flex', alignItems: 'center', gap: 5,
-                padding: '2px 6px 2px 6px',
-                background: 'rgba(56,189,248,0.12)',
-                border: '1px solid rgba(56,189,248,0.3)',
-                borderRadius: 4,
+                padding: '2px 7px',
+                background: 'rgba(56,189,248,0.08)',
+                border: '1px solid rgba(56,189,248,0.22)',
+                borderRadius: 999,
                 fontSize: 11,
                 color: '#7dd3fc',
                 fontFamily: 'var(--font-serif)',
               }}>
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/>
-                </svg>
-                Clip {selectedClipContext.index + 1}
-                <button
-                  onClick={() => setSelectedItem(null)}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: 0, marginLeft: 1, color: 'rgba(125,211,252,0.6)',
-                    lineHeight: 1,
-                  }}
-                >
-                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                  </svg>
-                </button>
+                {getClipPrimaryLabel(selectedClipContext.index)}
               </div>
             </div>
           )}
@@ -3731,8 +3941,8 @@ export default function ChatSidebar() {
                   }}
                   title="Remove this marker tag from the message"
                 >
-                  <span>@{marker.number}</span>
-                  <span>{marker.label ?? formatChatTime(marker.timelineTime)}</span>
+                  <span>{getMarkerPrimaryLabel(marker)}</span>
+                  <span>{getMarkerSecondaryLabel(marker)}</span>
                   <span style={{ color: 'rgba(253,230,138,0.72)' }}>×</span>
                 </button>
               ))}
@@ -3771,9 +3981,9 @@ export default function ChatSidebar() {
                       textAlign: 'left',
                     }}
                   >
-                    <span>@{marker.number}</span>
+                    <span>{getMarkerPrimaryLabel(marker)}</span>
                     <span style={{ flex: 1, color: 'var(--fg-primary)' }}>
-                      {marker.label ?? formatChatTime(marker.timelineTime)}
+                      {getMarkerSecondaryLabel(marker)}
                     </span>
                     <span style={{ color: 'var(--fg-muted)' }}>{formatChatTime(marker.timelineTime)}</span>
                   </button>
@@ -3786,7 +3996,7 @@ export default function ChatSidebar() {
               Finish the active edit review before sending another request.
             </p>
           )}
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 34 }}>
             <textarea
               ref={textareaRef}
               value={input}
@@ -3814,12 +4024,13 @@ export default function ChatSidebar() {
                 border: 'none',
                 color: composerInputDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
                 fontSize: 13,
-                lineHeight: 1.55,
-                minHeight: 22,
+                lineHeight: 1.45,
+                minHeight: 24,
                 maxHeight: 96,
                 width: '100%',
                 fontFamily: 'var(--font-serif)',
                 flex: 1,
+                padding: '1px 0 0',
               }}
             />
             {isChatLoading ? (
@@ -3834,7 +4045,6 @@ export default function ChatSidebar() {
                   cursor: 'pointer',
                   flexShrink: 0,
                   transition: 'background 0.15s',
-                  marginBottom: 1,
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.15)'; }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
@@ -3853,7 +4063,6 @@ export default function ChatSidebar() {
                   cursor: canSubmitMessage ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
-                  marginBottom: 1,
                 }}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill={canSubmitMessage ? '#000' : 'rgba(255,255,255,0.25)'}>

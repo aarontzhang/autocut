@@ -19,6 +19,34 @@ export interface EditSnapshot {
   appliedActions?: AppliedActionRecord[];
 }
 
+export interface ReviewOverlayDescriptor {
+  id: string;
+  itemId: string;
+  kind: 'cut' | 'caption' | 'transition' | 'marker' | 'text';
+  startTime?: number;
+  endTime?: number;
+  atTime?: number;
+  label?: string;
+}
+
+export interface EditReviewItem {
+  id: string;
+  index: number;
+  action: EditAction;
+  checked: boolean;
+  label: string;
+  summary: string;
+  anchorTime: number | null;
+  overlay: ReviewOverlayDescriptor | null;
+}
+
+export interface EditReviewGroup {
+  ownerId: string;
+  originalAction: EditAction;
+  baseSnapshot: EditSnapshot;
+  items: EditReviewItem[];
+}
+
 export const MIN_CLIP_DURATION_SECONDS = 0.05;
 export const CLIP_EDGE_SNAP_EPSILON_SECONDS = 0.08;
 
@@ -408,4 +436,241 @@ export function expandActionForReview(action: EditAction): EditAction[] {
   }
 
   return [action];
+}
+
+function getReviewItemAnchorTime(action: EditAction): number | null {
+  if (action.type === 'split_clip') return action.splitTime ?? null;
+  if (action.type === 'delete_range') return action.deleteStartTime ?? null;
+  if (action.type === 'add_captions') return action.captions?.[0]?.startTime ?? null;
+  if (action.type === 'add_transition') return action.transitions?.[0]?.atTime ?? null;
+  if (action.type === 'add_marker') return action.marker?.timelineTime ?? null;
+  if (action.type === 'add_text_overlay') return action.textOverlays?.[0]?.startTime ?? null;
+  return null;
+}
+
+function getReviewItemDescriptor(itemId: string, action: EditAction): ReviewOverlayDescriptor | null {
+  if (action.type === 'delete_range') {
+    return {
+      id: `${itemId}:cut`,
+      itemId,
+      kind: 'cut',
+      startTime: action.deleteStartTime,
+      endTime: action.deleteEndTime,
+      label: 'Cut',
+    };
+  }
+
+  if (action.type === 'add_captions') {
+    const caption = action.captions?.[0];
+    if (!caption) return null;
+    return {
+      id: `${itemId}:caption`,
+      itemId,
+      kind: 'caption',
+      startTime: caption.startTime,
+      endTime: caption.endTime,
+      label: caption.text,
+    };
+  }
+
+  if (action.type === 'add_transition') {
+    const transition = action.transitions?.[0];
+    if (!transition) return null;
+    return {
+      id: `${itemId}:transition`,
+      itemId,
+      kind: 'transition',
+      atTime: transition.atTime,
+      label: transition.type,
+    };
+  }
+
+  if (action.type === 'add_marker') {
+    if (action.marker?.timelineTime === undefined) return null;
+    return {
+      id: `${itemId}:marker`,
+      itemId,
+      kind: 'marker',
+      atTime: action.marker.timelineTime,
+      label: action.marker.label,
+    };
+  }
+
+  if (action.type === 'add_text_overlay') {
+    const overlay = action.textOverlays?.[0];
+    if (!overlay) return null;
+    return {
+      id: `${itemId}:text`,
+      itemId,
+      kind: 'text',
+      startTime: overlay.startTime,
+      endTime: overlay.endTime,
+      label: overlay.text,
+    };
+  }
+
+  return null;
+}
+
+function getReviewItemLabel(action: EditAction, index: number): { label: string; summary: string } {
+  if (action.type === 'delete_range') {
+    const start = action.deleteStartTime ?? 0;
+    const end = action.deleteEndTime ?? 0;
+    return {
+      label: `Cut ${index + 1}`,
+      summary: `${start.toFixed(3)}s - ${end.toFixed(3)}s`,
+    };
+  }
+
+  if (action.type === 'add_captions') {
+    const caption = action.captions?.[0];
+    return {
+      label: `Caption ${index + 1}`,
+      summary: caption ? caption.text : 'Caption preview',
+    };
+  }
+
+  if (action.type === 'add_transition') {
+    const transition = action.transitions?.[0];
+    return {
+      label: `Transition ${index + 1}`,
+      summary: transition ? `${transition.type} at ${transition.atTime.toFixed(3)}s` : 'Transition preview',
+    };
+  }
+
+  if (action.type === 'add_marker') {
+    return {
+      label: `Marker ${index + 1}`,
+      summary: action.marker?.timelineTime !== undefined ? `${action.marker.timelineTime.toFixed(3)}s` : 'Marker preview',
+    };
+  }
+
+  if (action.type === 'add_text_overlay') {
+    const overlay = action.textOverlays?.[0];
+    return {
+      label: `Text ${index + 1}`,
+      summary: overlay?.text ?? 'Text overlay preview',
+    };
+  }
+
+  return {
+    label: action.message || `Edit ${index + 1}`,
+    summary: '',
+  };
+}
+
+export function createReviewGroup(
+  ownerId: string,
+  action: EditAction,
+  baseSnapshot: EditSnapshot,
+): EditReviewGroup | null {
+  const reviewActions = expandActionForReview(action);
+  if (reviewActions.length === 0) return null;
+
+  return {
+    ownerId,
+    originalAction: action,
+    baseSnapshot,
+    items: reviewActions.map((reviewAction, index) => {
+      const id = `${ownerId}:${reviewAction.type}:${index}`;
+      const itemCopy = JSON.parse(JSON.stringify(reviewAction)) as EditAction;
+      const descriptor = getReviewItemDescriptor(id, itemCopy);
+      const label = getReviewItemLabel(itemCopy, index);
+      return {
+        id,
+        index,
+        action: itemCopy,
+        checked: true,
+        label: label.label,
+        summary: label.summary,
+        anchorTime: getReviewItemAnchorTime(itemCopy),
+        overlay: descriptor,
+      };
+    }),
+  };
+}
+
+export function getCheckedReviewItems(group: EditReviewGroup): EditReviewItem[] {
+  return group.items.filter((item) => item.checked);
+}
+
+export function buildReviewPreviewSnapshot(group: EditReviewGroup): EditSnapshot {
+  return getCheckedReviewItems(group).reduce(
+    (snapshot, item) => applyActionToSnapshot(snapshot, item.action),
+    group.baseSnapshot,
+  );
+}
+
+export function buildReviewGroupWithUpdatedItems(
+  group: EditReviewGroup,
+  updater: (items: EditReviewItem[]) => EditReviewItem[],
+): EditReviewGroup {
+  return {
+    ...group,
+    items: updater(group.items),
+  };
+}
+
+export function collapseReviewItemsToAction(group: EditReviewGroup): EditAction | null {
+  const checkedItems = getCheckedReviewItems(group);
+  if (checkedItems.length === 0) return null;
+
+  const { originalAction } = group;
+  const message = originalAction.message;
+
+  if (originalAction.type === 'delete_ranges' || originalAction.type === 'delete_range') {
+    const ranges = checkedItems
+      .filter((item) => item.action.type === 'delete_range')
+      .map((item) => ({
+        start: item.action.deleteStartTime ?? 0,
+        end: item.action.deleteEndTime ?? 0,
+      }));
+    if (ranges.length === 0) return null;
+    if (ranges.length === 1) {
+      return {
+        type: 'delete_range',
+        deleteStartTime: ranges[0].start,
+        deleteEndTime: ranges[0].end,
+        message,
+      };
+    }
+    return {
+      type: 'delete_ranges',
+      ranges,
+      message,
+    };
+  }
+
+  if (originalAction.type === 'add_captions') {
+    const captions = checkedItems.flatMap((item) => item.action.captions ?? []);
+    return captions.length > 0 ? { type: 'add_captions', captions, message } : null;
+  }
+
+  if (originalAction.type === 'add_transition') {
+    const transitions = checkedItems.flatMap((item) => item.action.transitions ?? []);
+    return transitions.length > 0 ? { type: 'add_transition', transitions, message } : null;
+  }
+
+  if (originalAction.type === 'add_markers' || originalAction.type === 'add_marker') {
+    const markers = checkedItems.flatMap((item) => item.action.type === 'add_marker' && item.action.marker ? [item.action.marker] : []);
+    if (markers.length === 0) return null;
+    if (markers.length === 1) {
+      return { type: 'add_marker', marker: markers[0], message };
+    }
+    return { type: 'add_markers', markers, message };
+  }
+
+  if (originalAction.type === 'add_text_overlay') {
+    const textOverlays = checkedItems.flatMap((item) => item.action.textOverlays ?? []);
+    return textOverlays.length > 0 ? { type: 'add_text_overlay', textOverlays, message } : null;
+  }
+
+  return checkedItems[0]?.action ?? null;
+}
+
+export function getReviewOverlayDescriptors(group: EditReviewGroup): ReviewOverlayDescriptor[] {
+  return group.items
+    .filter((item) => item.checked && item.overlay)
+    .map((item) => item.overlay!)
+    .filter(Boolean);
 }

@@ -209,6 +209,7 @@ No action:
 - ALWAYS express times in M:SS format in your messages (e.g., "4:03", "1:20") — never use plain seconds like "243 seconds" or "80s"
 - Never use markdown formatting (no **bold**, no *italic*, no bullet points). Plain text only.
 - If context says "Selected clip: Clip N (index I)", and the user says "this clip", "it", "the selected clip" — use clipIndex I for the operation.
+- If context includes tagged or selected clips and the user says "these clips", "both clips", "between them", or similar, resolve that against the tagged clip set first in timeline order.
 - Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
@@ -1360,6 +1361,18 @@ Honor these defaults unless the user explicitly asks for something different in 
       const sc = context.selectedClip;
       contextLines.push(`Selected clip: Clip ${sc.index + 1} (index ${sc.index}), duration ${sc.duration.toFixed(2)}s`);
     }
+    if (Array.isArray(context?.selectedClips)) {
+      const selectedClips = (context.selectedClips as Array<{ index?: number; duration?: number }>)
+        .filter((clip) => typeof clip.index === 'number');
+      if (selectedClips.length > 0) {
+        contextLines.push(
+          'Selected clips: ' +
+          selectedClips
+            .map((clip) => `Clip ${(clip.index as number) + 1} (index ${clip.index})`)
+            .join(' | ')
+        );
+      }
+    }
     if (context?.selectedMarker && typeof context.selectedMarker === 'object') {
       const marker = context.selectedMarker as { number?: number; timelineTime?: number; label?: string | null };
       if (typeof marker.number === 'number' && typeof marker.timelineTime === 'number') {
@@ -1424,6 +1437,19 @@ Honor these defaults unless the user explicitly asks for something different in 
           '. Prioritize these markers in the response.'
         );
       }
+    }
+    const taggedClips = Array.isArray(context?.taggedClips)
+      ? (context.taggedClips as Array<{ index?: number; duration?: number }>)
+          .filter((clip) => typeof clip.index === 'number')
+      : [];
+    if (taggedClips.length > 0) {
+      contextLines.push(
+        'Tagged clips attached to the latest user request: ' +
+        taggedClips
+          .map((clip) => `Clip ${(clip.index as number) + 1} (index ${clip.index})`)
+          .join(' | ') +
+        '. If the user says "these clips", "between them", or "use these", prefer these tagged clips as the likely reference.'
+      );
     }
 
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
