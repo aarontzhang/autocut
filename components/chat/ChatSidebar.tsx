@@ -4,6 +4,7 @@ import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import {
   AnalysisProgress,
+  AppliedActionRecord,
   ChatMessage as ChatMessageType,
   CaptionEntry,
   EditAction,
@@ -72,6 +73,15 @@ type ChatRequestMessage = {
   actionStatus?: ChatMessageType['actionStatus'];
   actionResult?: string;
   autoApplied?: boolean;
+};
+
+type LiveMessageActionState = {
+  actionMessage?: string;
+  actionStatus?: ChatMessageType['actionStatus'];
+  actionResult?: string;
+  autoApplied?: boolean;
+  isApplied: boolean;
+  wasUndone: boolean;
 };
 
 type IndexingProgress = AnalysisProgress;
@@ -641,6 +651,68 @@ function actionsMatch(a?: EditAction, b?: EditAction): boolean {
   return serializeActionForComparison(a) === serializeActionForComparison(b);
 }
 
+function getLiveMessageActionState(
+  message: Pick<ChatMessageType, 'action' | 'actionStatus' | 'actionResult' | 'autoApplied'>,
+  appliedActions: AppliedActionRecord[],
+): LiveMessageActionState {
+  const action = message.action;
+  if (!action || action.type === 'none') {
+    return {
+      actionMessage: undefined,
+      actionStatus: message.actionStatus,
+      actionResult: message.actionResult,
+      autoApplied: message.autoApplied,
+      isApplied: false,
+      wasUndone: false,
+    };
+  }
+
+  const isApplied = appliedActions.some((record) => actionsMatch(record.action, action));
+  const wasPreviouslyApplied = message.actionStatus === 'completed' || message.autoApplied === true;
+
+  if (message.actionStatus === 'rejected') {
+    return {
+      actionMessage: action.message,
+      actionStatus: 'rejected',
+      actionResult: message.actionResult,
+      autoApplied: undefined,
+      isApplied: false,
+      wasUndone: false,
+    };
+  }
+
+  if (isApplied) {
+    return {
+      actionMessage: action.message,
+      actionStatus: 'completed',
+      actionResult: message.actionResult,
+      autoApplied: message.autoApplied === true ? true : undefined,
+      isApplied: true,
+      wasUndone: false,
+    };
+  }
+
+  if (wasPreviouslyApplied) {
+    return {
+      actionMessage: `Previously applied, then undone: ${action.message}`,
+      actionStatus: 'pending',
+      actionResult: 'Undone via undo/redo. Reapply if you still want this edit.',
+      autoApplied: undefined,
+      isApplied: false,
+      wasUndone: true,
+    };
+  }
+
+  return {
+    actionMessage: action.message,
+    actionStatus: message.actionStatus,
+    actionResult: message.actionResult,
+    autoApplied: undefined,
+    isApplied: false,
+    wasUndone: false,
+  };
+}
+
 function assistantPromisesMoreSteps(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return false;
@@ -711,17 +783,24 @@ function findOriginalRequestForAssistantMessage(messages: ChatMessageType[], ass
   return null;
 }
 
-function buildChatRequestHistory(messages: ChatMessageType[], latestUserText?: string): ChatRequestMessage[] {
-  const history: ChatRequestMessage[] = messages.map((message) => ({
-    role: message.role,
-    content: message.content,
-    action: message.action ?? null,
-    actionType: message.action?.type,
-    actionMessage: message.action?.message,
-    actionStatus: message.actionStatus,
-    actionResult: message.actionResult,
-    autoApplied: message.autoApplied,
-  }));
+function buildChatRequestHistory(
+  messages: ChatMessageType[],
+  appliedActions: AppliedActionRecord[],
+  latestUserText?: string,
+): ChatRequestMessage[] {
+  const history: ChatRequestMessage[] = messages.map((message) => {
+    const liveActionState = getLiveMessageActionState(message, appliedActions);
+    return {
+      role: message.role,
+      content: message.content,
+      action: message.action ?? null,
+      actionType: message.action?.type,
+      actionMessage: liveActionState.actionMessage,
+      actionStatus: liveActionState.actionStatus,
+      actionResult: liveActionState.actionResult,
+      autoApplied: liveActionState.autoApplied,
+    };
+  });
 
   if (latestUserText) {
     history.push({ role: 'user', content: latestUserText });
@@ -1892,13 +1971,13 @@ function AssistantMessage({
   const anotherReviewActive = previewOwnerId !== null && previewOwnerId !== msg.id;
   const reviewSessionForMessage = activeReviewSession?.ownerId === msg.id ? activeReviewSession : null;
   const reviewSteps = reviewSessionForMessage?.items ?? [];
-  const actionPreviouslyApplied = useMemo(() => (
-    !!action && appliedActions.some(record => actionsMatch(record.action, action))
-  ), [action, appliedActions]);
-  const actionResolved = msg.actionStatus === 'completed'
-    || msg.actionStatus === 'rejected'
-    || msg.autoApplied
-    || actionPreviouslyApplied;
+  const liveActionState = useMemo(
+    () => getLiveMessageActionState(msg, appliedActions),
+    [appliedActions, msg],
+  );
+  const actionPreviouslyApplied = liveActionState.isApplied;
+  const actionResolved = liveActionState.actionStatus === 'completed'
+    || liveActionState.actionStatus === 'rejected';
   const reviewableAction = !!action
     && action.type !== 'none'
     && action.type !== 'transcribe_request'
@@ -1906,10 +1985,10 @@ function AssistantMessage({
   const batchReviewActive = !!reviewSessionForMessage && reviewableAction;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const reviewableItemCount = getReviewItemCount(action);
-  const actionResultText = msg.actionResult ?? (
-    msg.actionStatus === 'rejected'
+  const actionResultText = liveActionState.actionResult ?? (
+    liveActionState.actionStatus === 'rejected'
       ? 'No changes applied.'
-      : msg.autoApplied
+      : liveActionState.autoApplied
         ? 'Auto-applied ✓'
         : actionPreviouslyApplied
           ? 'Already applied.'
@@ -2261,6 +2340,11 @@ function AssistantMessage({
                     {batchReviewActive
                       ? `Previewing ${reviewSteps.length} proposed change${reviewSteps.length === 1 ? '' : 's'}. Apply commits only the checked edits.`
                       : `Review ${reviewableItemCount} proposed change${reviewableItemCount === 1 ? '' : 's'} at once.`}
+                  </p>
+                )}
+                {liveActionState.wasUndone && (
+                  <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
+                    This edit was undone from the timeline, so it can be applied again.
                   </p>
                 )}
                 {anotherReviewActive && !batchReviewActive && reviewableAction && (
@@ -3396,7 +3480,7 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      const history = buildChatRequestHistory(messages, text);
+      const history = buildChatRequestHistory(messages, useEditorStore.getState().appliedActions, text);
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
@@ -3427,7 +3511,11 @@ export default function ChatSidebar() {
     stopRequestedRef.current = false;
 
     try {
-      const history = buildChatRequestHistory(currentMessages, `Continue my previous request now that the requested transcript is available. Original request: "${originalRequest}". Do not ask to transcribe the same section again.`);
+      const history = buildChatRequestHistory(
+        currentMessages,
+        useEditorStore.getState().appliedActions,
+        `Continue my previous request now that the requested transcript is available. Original request: "${originalRequest}". Do not ask to transcribe the same section again.`,
+      );
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
@@ -3473,7 +3561,7 @@ export default function ChatSidebar() {
         action,
         actionResult,
       });
-      const history = buildChatRequestHistory(currentMessages, continuationMessage);
+      const history = buildChatRequestHistory(currentMessages, useEditorStore.getState().appliedActions, continuationMessage);
       await runSingleTurn(history, ctrl);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {

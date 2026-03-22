@@ -915,12 +915,17 @@ function formatPendingActionContext(
   if (!pending) return [];
 
   const json = JSON.stringify(pending.action);
+  const pendingMessage = sanitizeInlineUntrustedText(
+    pending.turn.actionMessage || pending.action.message,
+    200,
+  );
   return [
     `Latest unresolved assistant proposal: ${summarizeActionForContext(pending.action)}.`,
-    `Pending proposal message: "${sanitizeInlineUntrustedText(pending.action.message, 200)}"`,
+    `Pending proposal message: "${pendingMessage}"`,
+    pending.turn.actionResult ? `Pending proposal state: ${sanitizeInlineUntrustedText(pending.turn.actionResult, 160)}` : null,
     `PENDING_ACTION_JSON: ${json}`,
     'If the user confirms, refines, narrows, or cancels that proposal, continue from this structured action instead of guessing from keywords alone.',
-  ];
+  ].filter((line): line is string => Boolean(line));
 }
 
 function formatSilenceCandidatesContext(candidates: SilenceCandidate[]): string[] {
