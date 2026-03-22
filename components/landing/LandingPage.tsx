@@ -635,9 +635,18 @@ export default function LandingPage() {
           }
           .lp-feat .lp-feat-graphic { order: 1; }
           .lp-quote { padding: 48px 20px; }
-          .lp-contact { padding: 0 20px 48px; }
           .lp-nav { padding: 0 20px; }
-          .lp-footer { padding: 16px 20px; }
+          .lp-footer {
+            padding: 16px 20px;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 10px;
+          }
+          .lp-footer-contact {
+            margin-left: 0 !important;
+            text-align: left !important;
+            max-width: none !important;
+          }
         }
       `}</style>
 
@@ -773,52 +782,6 @@ export default function LandingPage() {
         </Link>
       </section>
 
-      <section className="lp-contact" style={{
-        padding: '0 32px 64px',
-      }}>
-        <div style={{
-          maxWidth: 720,
-          margin: '0 auto',
-          padding: '28px 32px',
-          borderRadius: 24,
-          border: '1px solid rgba(255,255,255,0.08)',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))',
-          boxShadow: '0 24px 60px rgba(0,0,0,0.24)',
-          textAlign: 'center',
-        }}>
-          <p style={{
-            margin: '0 0 10px',
-            fontSize: 12,
-            fontWeight: 700,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            color: 'rgba(33,212,255,0.72)',
-          }}>
-            Interested?
-          </p>
-          <p style={{
-            margin: 0,
-            fontSize: 'clamp(20px, 2.4vw, 30px)',
-            lineHeight: 1.35,
-            letterSpacing: '-0.03em',
-            color: 'rgba(255,255,255,0.9)',
-          }}>
-            Text me, the founder, personally at{' '}
-            <a
-              href="tel:5087456868"
-              style={{
-                color: '#7fe7ff',
-                textDecoration: 'none',
-                fontWeight: 700,
-              }}
-            >
-              508-745-6868
-            </a>
-            .
-          </p>
-        </div>
-      </section>
-
       {/* ── Footer ───────────────────────────────────────────── */}
       <footer className="lp-footer" style={{
         borderTop: '1px solid rgba(255,255,255,0.06)',
@@ -828,6 +791,28 @@ export default function LandingPage() {
           <AutocutMark size={20} withTile />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.35)' }}>Autocut</span>
         </div>
+        <p className="lp-footer-contact" style={{
+          margin: '0 0 0 auto',
+          maxWidth: 460,
+          fontSize: 14,
+          fontWeight: 500,
+          lineHeight: 1.45,
+          letterSpacing: '-0.02em',
+          textAlign: 'right',
+          color: 'rgba(255,255,255,0.52)',
+        }}>
+          Interested? Text me, the founder, personally at{' '}
+          <a
+            href="tel:5087456868"
+            style={{
+              color: 'inherit',
+              textDecoration: 'none',
+            }}
+          >
+            508-745-6868
+          </a>
+          .
+        </p>
       </footer>
     </div>
   );
