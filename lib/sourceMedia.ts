@@ -58,7 +58,9 @@ function buildResolvedEntry(
   runtime: SourceRuntimeMedia | undefined,
   fallback?: LegacyPrimarySourceInput,
 ): ResolvedProjectSourceMedia {
-  const playerUrl = runtime?.objectUrl || runtime?.processingUrl || runtime?.playerUrl || fallback?.processingVideoUrl || fallback?.videoUrl || '';
+  // Prefer the dedicated playback URL so seeking/preview uses the stable proxy
+  // endpoint instead of a short-lived processing URL.
+  const playerUrl = runtime?.objectUrl || runtime?.playerUrl || runtime?.processingUrl || fallback?.videoUrl || fallback?.processingVideoUrl || '';
   const processingUrl = runtime?.processingUrl
     || runtime?.objectUrl
     || runtime?.playerUrl
@@ -98,7 +100,7 @@ function buildFallbackPrimarySource(
     assetId: null,
     status: fallback.storagePath ? 'pending' : 'ready',
     isPrimary: true,
-    playerUrl: runtime?.objectUrl || runtime?.processingUrl || runtime?.playerUrl || fallback.processingVideoUrl || fallback.videoUrl || '',
+    playerUrl: runtime?.objectUrl || runtime?.playerUrl || runtime?.processingUrl || fallback.videoUrl || fallback.processingVideoUrl || '',
     processingUrl: runtime?.processingUrl
       || runtime?.objectUrl
       || runtime?.playerUrl

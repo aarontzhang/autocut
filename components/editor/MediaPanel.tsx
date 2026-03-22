@@ -24,7 +24,7 @@ export default function MediaPanel({
   const sourceCards = useMemo(() => (
     sources.map((source) => ({
       ...source,
-      previewUrl: sourceRuntimeById[source.id]?.objectUrl || sourceRuntimeById[source.id]?.processingUrl || sourceRuntimeById[source.id]?.playerUrl || '',
+      previewUrl: sourceRuntimeById[source.id]?.objectUrl || sourceRuntimeById[source.id]?.playerUrl || sourceRuntimeById[source.id]?.processingUrl || '',
       isPlayable: Boolean(
         sourceRuntimeById[source.id]?.objectUrl
         || sourceRuntimeById[source.id]?.playerUrl

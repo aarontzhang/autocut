@@ -762,6 +762,59 @@ function formatFrameDescriptionProgressLabel(params: {
   return `Analyzing visuals ${completedFrames}/${totalFrames}`;
 }
 
+function formatSourceList(names: string[], maxVisible = 2): string {
+  if (names.length === 0) return '';
+  if (names.length <= maxVisible) return names.join(', ');
+  const visible = names.slice(0, maxVisible).join(', ');
+  return `${visible}, +${names.length - maxVisible} more`;
+}
+
+function formatSourceScopedProgressLabel(params: {
+  sourceIndex: number;
+  totalSources: number;
+  fileName: string;
+  actionLabel: string;
+  completed: number;
+  total: number;
+}): string {
+  const { sourceIndex, totalSources, fileName, actionLabel, completed, total } = params;
+  return `Clip ${sourceIndex}/${totalSources} • ${fileName} • ${actionLabel} ${completed}/${Math.max(total, 1)}`;
+}
+
+function buildSourceCoverageDetail(params: {
+  sources: Array<{ sourceId: string; fileName: string; status: string }>;
+  readySourceIds: Set<string>;
+  readyLabel: string;
+}): string | null {
+  const readyNames: string[] = [];
+  const processingNames: string[] = [];
+  const waitingNames: string[] = [];
+  const issueNames: string[] = [];
+
+  params.sources.forEach((source) => {
+    if (params.readySourceIds.has(source.sourceId)) {
+      readyNames.push(source.fileName);
+      return;
+    }
+    if (source.status === 'error') {
+      issueNames.push(source.fileName);
+      return;
+    }
+    if (source.status === 'indexing') {
+      processingNames.push(source.fileName);
+      return;
+    }
+    waitingNames.push(source.fileName);
+  });
+
+  const parts = [`Tracking all ${params.sources.length} clip${params.sources.length === 1 ? '' : 's'}.`];
+  if (readyNames.length > 0) parts.push(`${params.readyLabel}: ${formatSourceList(readyNames)}.`);
+  if (processingNames.length > 0) parts.push(`Processing: ${formatSourceList(processingNames)}.`);
+  if (waitingNames.length > 0) parts.push(`Waiting: ${formatSourceList(waitingNames)}.`);
+  if (issueNames.length > 0) parts.push(`Issue: ${formatSourceList(issueNames)}.`);
+  return parts.join(' ');
+}
+
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
   return action?.type === 'add_marker'
     || action?.type === 'add_markers'
@@ -1676,17 +1729,25 @@ function AssistantMessage({
 
   const handleAcceptAll = useCallback(() => {
     if (!action || !deleteRanges) return;
+    const seekTime = getReviewSeekTime({
+      clips: useEditorStore.getState().clips,
+      captions: useEditorStore.getState().captions,
+      transitions: useEditorStore.getState().transitions,
+      markers: useEditorStore.getState().markers,
+      textOverlays: useEditorStore.getState().textOverlays,
+    }, action);
     applyStoredAction(action);
     const sourceRanges = sourceRangesForAction(useEditorStore.getState().clips, action);
     recordAppliedAction(action, action.message, { sourceRanges });
     clearPendingDeleteRanges(msg.id);
     const n = deleteRanges.length;
+    if (seekTime !== null) requestSeek(seekTime);
     updateMessage(msg.id, {
       actionStatus: 'completed',
       actionResult: `Committed ${n} cut${n !== 1 ? 's' : ''}.`,
     });
     void onActionResolved(msg.id, action, `Committed ${n} cut${n !== 1 ? 's' : ''}.`);
-  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
+  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, onActionResolved, recordAppliedAction, requestSeek, updateMessage]);
 
   const handleCancelDelete = useCallback(() => {
     clearPendingDeleteRanges(msg.id);
@@ -1773,19 +1834,23 @@ function AssistantMessage({
           <AutoIdentity />
         </div>
 
-        <div style={{
-          display: 'inline-block',
-          fontSize: 13,
-          color: 'var(--fg-secondary)',
-          lineHeight: 1.65,
-          fontFamily: 'var(--font-serif)',
-          padding: '10px 12px',
-          borderRadius: '12px 12px 12px 4px',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
-          border: '1px solid rgba(255,255,255,0.07)',
-          maxWidth: '100%',
-        }}>
-          <MarkerAwareText text={msg.content} />
+        <div style={{ display: 'flex', justifyContent: 'flex-start', width: '100%' }}>
+          <div style={{
+            display: 'inline-block',
+            fontSize: 13,
+            color: 'var(--fg-secondary)',
+            lineHeight: 1.65,
+            fontFamily: 'var(--font-serif)',
+            padding: '10px 12px',
+            borderRadius: '10px 10px 10px 2px',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
+            border: '1px solid rgba(255,255,255,0.07)',
+            maxWidth: '100%',
+            alignSelf: 'flex-start',
+            textAlign: 'left',
+          }}>
+            <MarkerAwareText text={msg.content} />
+          </div>
         </div>
 
         {hasAction && meta && (
@@ -1978,24 +2043,26 @@ function ThinkingIndicator({ status }: { status?: string }) {
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%' }}>
       <AutoAvatar />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, alignItems: 'flex-start', width: '100%', maxWidth: '72%' }}>
-        <AutoIdentity subtitle="Typing..." />
-        <div style={{
-          display: 'inline-flex',
-          gap: 3,
-          padding: '10px 12px',
-          borderRadius: '12px 12px 12px 4px',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
-          border: '1px solid rgba(255,255,255,0.07)',
-          width: 'fit-content',
-        }}>
-          {[0, 1, 2].map(i => (
-            <div key={i} className="dot-bar" style={{
-              width: 3, height: 14,
-              background: 'rgba(255,255,255,0.25)',
-              borderRadius: 2,
-              animationDelay: `${i * 0.15}s`,
-            }} />
-          ))}
+        <AutoIdentity subtitle="Thinking..." />
+        <div style={{ display: 'flex', justifyContent: 'flex-start', width: '100%' }}>
+          <div style={{
+            display: 'inline-flex',
+            gap: 3,
+            padding: '10px 12px',
+            borderRadius: '10px 10px 10px 2px',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.025))',
+            border: '1px solid rgba(255,255,255,0.07)',
+            width: 'fit-content',
+          }}>
+            {[0, 1, 2].map(i => (
+              <div key={i} className="dot-bar" style={{
+                width: 3, height: 14,
+                background: 'rgba(255,255,255,0.25)',
+                borderRadius: 2,
+                animationDelay: `${i * 0.15}s`,
+              }} />
+            ))}
+          </div>
         </div>
         {status && (
           <span style={{
@@ -2415,7 +2482,8 @@ export default function ChatSidebar() {
       setFrameAnalysisError(null);
       const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
 
-      for (const entry of sourcesToIndex) {
+      for (let sourceOffset = 0; sourceOffset < sourcesToIndex.length; sourceOffset += 1) {
+        const entry = sourcesToIndex[sourceOffset];
         const frameCount = getAdaptiveCoarseFrameBudget(entry.duration, Math.max(0.1, overviewIntervalSeconds), maxOverviewFrames);
         const extractionStartedAt = performance.now();
         const extractionFallbackPerFrame = estimateFrameExtractionSeconds(frameCount) / Math.max(frameCount, 1);
@@ -2424,7 +2492,14 @@ export default function ChatSidebar() {
           stage: 'extracting_frames',
           completed: 0,
           total: Math.max(frameCount, 1),
-          label: `Sampling video frames 0/${Math.max(frameCount, 1)}`,
+          label: formatSourceScopedProgressLabel({
+            sourceIndex: sourceOffset + 1,
+            totalSources: sourcesToIndex.length,
+            fileName: entry.fileName,
+            actionLabel: 'Sampling frames',
+            completed: 0,
+            total: Math.max(frameCount, 1),
+          }),
           etaSeconds: estimateFrameExtractionSeconds(frameCount),
         });
 
@@ -2434,7 +2509,7 @@ export default function ChatSidebar() {
           duration: entry.duration,
           overviewIntervalSeconds,
           maxOverviewFrames,
-          onProgress: ({ stage, completed, total, label }) => {
+          onProgress: ({ stage, completed, total }) => {
             const now = performance.now();
             if (completed < total && now - lastProgressPaintAt < 120) return;
             lastProgressPaintAt = now;
@@ -2442,7 +2517,14 @@ export default function ChatSidebar() {
               stage,
               completed,
               total: Math.max(total, 1),
-              label,
+              label: formatSourceScopedProgressLabel({
+                sourceIndex: sourceOffset + 1,
+                totalSources: sourcesToIndex.length,
+                fileName: entry.fileName,
+                actionLabel: stage === 'extracting_frames' ? 'Sampling frames' : 'Preparing visuals',
+                completed,
+                total,
+              }),
               etaSeconds: estimateRemainingSecondsFromObservedRate(
                 extractionStartedAt,
                 completed,
@@ -2453,7 +2535,11 @@ export default function ChatSidebar() {
           },
         });
 
-        const describedFrames = await ensureFrameDescriptions(frames, true);
+        const describedFrames = await ensureFrameDescriptions(frames, true, {
+          sourceIndex: sourceOffset + 1,
+          totalSources: sourcesToIndex.length,
+          fileName: entry.fileName,
+        });
         setSourceOverviewFrames(entry.sourceId, describedFrames, {
           fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
         });
@@ -2555,6 +2641,11 @@ export default function ChatSidebar() {
   async function ensureFrameDescriptions(
     frames: SourceIndexedFrame[],
     force = false,
+    sourceContext?: {
+      sourceIndex: number;
+      totalSources: number;
+      fileName: string;
+    },
   ): Promise<SourceIndexedFrame[]> {
     if (frames.length === 0) return frames;
     if (!force && frames.every((frame) => hasUsableFrameDescription(frame.description))) {
@@ -2597,13 +2688,22 @@ export default function ChatSidebar() {
         stage: 'describing_frames',
         completed: initialCompleted,
         total: Math.max(totalOverviewFrames, 1),
-        label: formatFrameDescriptionProgressLabel({
-          completedFrames: initialCompleted,
-          totalFrames: totalOverviewFrames,
-          completedBatches: 0,
-          totalBatches: Math.max(totalBatches, 1),
-          activeBatches: 0,
-        }),
+        label: sourceContext
+          ? formatSourceScopedProgressLabel({
+              sourceIndex: sourceContext.sourceIndex,
+              totalSources: sourceContext.totalSources,
+              fileName: sourceContext.fileName,
+              actionLabel: 'Analyzing visuals',
+              completed: initialCompleted,
+              total: totalOverviewFrames,
+            })
+          : formatFrameDescriptionProgressLabel({
+              completedFrames: initialCompleted,
+              totalFrames: totalOverviewFrames,
+              completedBatches: 0,
+              totalBatches: Math.max(totalBatches, 1),
+              activeBatches: 0,
+            }),
         etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
       });
 
@@ -2615,13 +2715,22 @@ export default function ChatSidebar() {
             stage: 'describing_frames',
             completed,
             total: Math.max(totalOverviewFrames, 1),
-            label: formatFrameDescriptionProgressLabel({
-              completedFrames: completed,
-              totalFrames: totalOverviewFrames,
-              completedBatches: completedBatchCount,
-              totalBatches: Math.max(totalBatches, 1),
-              activeBatches: activeBatchCount,
-            }),
+            label: sourceContext
+              ? formatSourceScopedProgressLabel({
+                  sourceIndex: sourceContext.sourceIndex,
+                  totalSources: sourceContext.totalSources,
+                  fileName: sourceContext.fileName,
+                  actionLabel: 'Analyzing visuals',
+                  completed,
+                  total: totalOverviewFrames,
+                })
+              : formatFrameDescriptionProgressLabel({
+                  completedFrames: completed,
+                  totalFrames: totalOverviewFrames,
+                  completedBatches: completedBatchCount,
+                  totalBatches: Math.max(totalBatches, 1),
+                  activeBatches: activeBatchCount,
+                }),
             etaSeconds: estimateRemainingSecondsFromObservedRate(
               descriptionStartedAt,
               completed,
@@ -2655,13 +2764,22 @@ export default function ChatSidebar() {
             stage: 'describing_frames',
             completed,
             total: Math.max(totalOverviewFrames, 1),
-            label: formatFrameDescriptionProgressLabel({
-              completedFrames: completed,
-              totalFrames: totalOverviewFrames,
-              completedBatches: completedBatchCount,
-              totalBatches: Math.max(totalBatches, 1),
-              activeBatches: activeBatchCount,
-            }),
+            label: sourceContext
+              ? formatSourceScopedProgressLabel({
+                  sourceIndex: sourceContext.sourceIndex,
+                  totalSources: sourceContext.totalSources,
+                  fileName: sourceContext.fileName,
+                  actionLabel: 'Analyzing visuals',
+                  completed,
+                  total: totalOverviewFrames,
+                })
+              : formatFrameDescriptionProgressLabel({
+                  completedFrames: completed,
+                  totalFrames: totalOverviewFrames,
+                  completedBatches: completedBatchCount,
+                  totalBatches: Math.max(totalBatches, 1),
+                  activeBatches: activeBatchCount,
+                }),
             etaSeconds: remaining > 0
               ? estimateRemainingSecondsFromObservedRate(
                 descriptionStartedAt,
@@ -2679,13 +2797,22 @@ export default function ChatSidebar() {
             stage: 'describing_frames',
             completed,
             total: Math.max(totalOverviewFrames, 1),
-            label: formatFrameDescriptionProgressLabel({
-              completedFrames: completed,
-              totalFrames: totalOverviewFrames,
-              completedBatches: completedBatchCount,
-              totalBatches: Math.max(totalBatches, 1),
-              activeBatches: activeBatchCount,
-            }),
+            label: sourceContext
+              ? formatSourceScopedProgressLabel({
+                  sourceIndex: sourceContext.sourceIndex,
+                  totalSources: sourceContext.totalSources,
+                  fileName: sourceContext.fileName,
+                  actionLabel: 'Analyzing visuals',
+                  completed,
+                  total: totalOverviewFrames,
+                })
+              : formatFrameDescriptionProgressLabel({
+                  completedFrames: completed,
+                  totalFrames: totalOverviewFrames,
+                  completedBatches: completedBatchCount,
+                  totalBatches: Math.max(totalBatches, 1),
+                  activeBatches: activeBatchCount,
+                }),
             etaSeconds: completed >= totalOverviewFrames
               ? 0
               : estimateRemainingSecondsFromObservedRate(
@@ -3066,6 +3193,16 @@ export default function ChatSidebar() {
       const serverAudioPending = missingTranscriptSources.length > 0;
       const serverVisualPending = missingOverviewSources.length > 0;
       const serverAnalysisRunning = sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running';
+      const audioCoverageDetail = buildSourceCoverageDetail({
+        sources: availableSources,
+        readySourceIds: transcriptReadySourceIds,
+        readyLabel: 'Audio ready',
+      });
+      const visualCoverageDetail = buildSourceCoverageDetail({
+        sources: availableSources,
+        readySourceIds: overviewReadySourceIds,
+        readyLabel: 'Visuals ready',
+      });
 
       if (serverAudioPending) {
         analysisStatusCards.push({
@@ -3079,15 +3216,15 @@ export default function ChatSidebar() {
               : 'transcribing_audio',
             completed: Math.max(0, completedTranscriptSources),
             total: Math.max(1, totalServerSources),
-            label: `Indexed audio for ${Math.max(0, completedTranscriptSources)}/${Math.max(1, totalServerSources)} sources`,
+            label: `Audio ready for ${Math.max(0, completedTranscriptSources)}/${Math.max(1, totalServerSources)} clips`,
             etaSeconds: estimatedServerTranscriptEta > 0
               ? estimatedServerTranscriptEta
               : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
           },
-          detail: 'Each source transcript becomes available as soon as that clip finishes processing.',
+          detail: audioCoverageDetail,
           secondaryLabel: serverAnalysisRunning
             ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
-            : `${missingTranscriptSources.length} source${missingTranscriptSources.length === 1 ? '' : 's'} remaining`,
+            : `${missingTranscriptSources.length} clip${missingTranscriptSources.length === 1 ? '' : 's'} remaining`,
         });
       } else if (totalServerSources > 0) {
         analysisStatusCards.push({
@@ -3108,15 +3245,15 @@ export default function ChatSidebar() {
               : 'describing_representative_frames',
             completed: Math.max(0, completedOverviewSources),
             total: Math.max(1, totalServerSources),
-            label: `Indexed visuals for ${Math.max(0, completedOverviewSources)}/${Math.max(1, totalServerSources)} sources`,
+            label: `Visuals ready for ${Math.max(0, completedOverviewSources)}/${Math.max(1, totalServerSources)} clips`,
             etaSeconds: estimatedServerOverviewEta > 0
               ? estimatedServerOverviewEta
               : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
           },
-          detail: 'Representative frames and scene context land per source as indexing finishes.',
+          detail: visualCoverageDetail,
           secondaryLabel: serverAnalysisRunning
             ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
-            : `${missingOverviewSources.length} source${missingOverviewSources.length === 1 ? '' : 's'} remaining`,
+            : `${missingOverviewSources.length} clip${missingOverviewSources.length === 1 ? '' : 's'} remaining`,
         });
       } else if (totalServerSources > 0) {
         analysisStatusCards.push({
