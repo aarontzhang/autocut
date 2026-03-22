@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 
-const VIDEO_IMAGE = 'https://images.unsplash.com/photo-1633077353753-cc4f0df5eb88?w=900&q=85&auto=format&fit=crop';
+const VIDEO_IMAGE = '/landing/hero-gopro-ski.jpg';
 const SIGN_IN_HREF = '/auth/login';
 
 type HeroTrackSegment = {
@@ -255,7 +255,7 @@ function HeroEditorMock() {
                 maxWidth: '88%',
                 lineHeight: 1.5,
               }}>
-                Cut the flat sections between each jump
+                Trim the long traverses and keep the sharpest turns
               </div>
             </div>
 
@@ -266,7 +266,7 @@ function HeroEditorMock() {
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginBottom: 8, lineHeight: 1.5 }}>
-                  Found 18 moments. Ready to review.
+                  Found 12 downhill moments. Ready to review.
                 </div>
                 <div style={{
                   background: '#1a1a1a',
@@ -281,7 +281,7 @@ function HeroEditorMock() {
                   }}>
                     <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
                     <span style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>Delete ranges</span>
-                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>18 cuts</span>
+                    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginLeft: 'auto' }}>12 trims</span>
                   </div>
                   <div style={{ padding: '7px 10px' }}>
                     <button style={{
@@ -312,7 +312,7 @@ function HeroEditorMock() {
               fontSize: 10.5,
               color: 'rgba(255,255,255,0.2)',
             }}>
-              Find events, reference markers, and review cuts…
+              Find moments, place markers, and review cuts…
             </div>
           </div>
         </div>
