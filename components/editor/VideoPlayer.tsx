@@ -335,9 +335,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (layerSourceIdRef.current[currentLeadLayer] === sourceId) return false;
     const spareLayer = getOtherLayer(currentLeadLayer);
     if (layerSourceIdRef.current[spareLayer] !== sourceId) return false;
+    const spareVideo = getVideoElement(spareLayer);
+    if (!spareVideo || spareVideo.readyState < 2) return false;
     setLeadLayerSafely(spareLayer);
     return true;
-  }, [setLeadLayerSafely]);
+  }, [getVideoElement, setLeadLayerSafely]);
 
   const syncLayers = useCallback((timelineTime: number, options?: { allowPlay?: boolean }) => {
     const activeEntries = findRenderEntriesAtTime(renderTimeline, timelineTime);
@@ -513,7 +515,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         }
       }
     } else if (nextEntry) {
-      const handoffTime = Math.max(nextEntry.timelineStart, Math.min(primaryEntry.timelineEnd, currentTimeRef.current));
+      const handoffTime = Math.max(nextEntry.timelineStart, primaryEntry.timelineEnd);
       currentTimeRef.current = handoffTime;
       setCurrentTime(handoffTime);
       const nextSourceTime = getEntrySourceTime(nextEntry, handoffTime);

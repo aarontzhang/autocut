@@ -659,7 +659,7 @@ export async function exportClips({
       }
 
       if (segFiles.length === 1) {
-        onStage?.('Preparing download…');
+        onStage?.('Finalizing export…');
         reportOverallProgress(98);
         const data = await ffmpeg.readFile(segFiles[0]);
         reportOverallProgress(100);
@@ -682,7 +682,7 @@ export async function exportClips({
         'export_output.mp4',
       ]);
 
-      onStage?.('Preparing download…');
+      onStage?.('Finalizing export…');
       reportOverallProgress(98);
       const data = await ffmpeg.readFile('export_output.mp4');
       reportOverallProgress(100);
@@ -713,7 +713,11 @@ export async function exportClips({
     const targetHeight = toEvenDimension(dimensions.height || 720, 720);
 
     if (requiresFullRender) {
-      onStage?.('Rendering transitions and captions…');
+      onStage?.(
+        normalizedTransitions.length > 0 || captionWindows.length > 0
+          ? 'Rendering transitions and captions…'
+          : 'Rendering final video…',
+      );
       const args: string[] = [];
       const filterGraph: string[] = [];
       const transitionByClipId = new Map(normalizedTransitions.map((transition) => [transition.afterClipId, transition]));
@@ -840,7 +844,7 @@ export async function exportClips({
       }
 
       if (segFiles.length === 1) {
-        onStage?.('Preparing download…');
+        onStage?.('Finalizing export…');
         reportOverallProgress(98);
         const data = await ffmpeg.readFile(segFiles[0]);
         reportOverallProgress(100);
@@ -864,7 +868,7 @@ export async function exportClips({
       ]);
     }
 
-    onStage?.('Preparing download…');
+    onStage?.('Finalizing export…');
     reportOverallProgress(98);
     const data = await ffmpeg.readFile('export_output.mp4');
     reportOverallProgress(100);
