@@ -597,7 +597,8 @@ export async function exportClips({
     transitions: normalizedTransitions,
     captions,
   });
-  const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0;
+  const uniqueSourceCount = new Set(clips.map((clip) => clip.sourceId)).size;
+  const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0 || uniqueSourceCount > 1;
 
   const getSourceInput = (sourceId: string) => {
     const source = sourcesById[sourceId];
