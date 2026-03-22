@@ -236,6 +236,8 @@ export interface SourceIndexAnalysisState {
   progress: AnalysisProgress | null;
 }
 
+export type SourceIndexAnalysisStateMap = Record<string, SourceIndexAnalysisState>;
+
 export type VisualConfidenceBand = 'low' | 'medium' | 'high';
 
 export interface VisualQueryIntent {

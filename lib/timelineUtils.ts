@@ -575,15 +575,14 @@ function evenlyDownsampleFrames(
   return selected;
 }
 
-export function projectSourceFramesToTimeline(
+export function projectSourceFramesToTimelineAll(
   clips: VideoClip[],
   sourceFrames: SourceIndexedFrame[],
-  frameTargetConfig: { overviewIntervalSeconds: number; maxOverviewFrames: number },
   transitions: TransitionEntry[] = [],
 ): IndexedVideoFrame[] {
   if (clips.length === 0 || sourceFrames.length === 0) return [];
 
-  const projected = sourceFrames
+  return sourceFrames
     .flatMap((frame) => {
       const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId, transitions)
         .filter((timelineTime) => Number.isFinite(timelineTime));
@@ -602,6 +601,15 @@ export function projectSourceFramesToTimeline(
       }));
     })
     .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
+}
+
+export function projectSourceFramesToTimeline(
+  clips: VideoClip[],
+  sourceFrames: SourceIndexedFrame[],
+  frameTargetConfig: { overviewIntervalSeconds: number; maxOverviewFrames: number },
+  transitions: TransitionEntry[] = [],
+): IndexedVideoFrame[] {
+  const projected = projectSourceFramesToTimelineAll(clips, sourceFrames, transitions);
 
   if (projected.length === 0) return [];
 

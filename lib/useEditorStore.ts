@@ -15,6 +15,7 @@ import {
   ProjectSource,
   SourceIndex,
   SourceIndexAnalysisState,
+  SourceIndexAnalysisStateMap,
   SourceIndexState,
   SourceIndexedFrame,
   TextOverlayEntry,
@@ -30,7 +31,12 @@ import {
   sanitizeTimelineClips,
   splitClipsAtTime,
 } from './editActionUtils';
-import { buildTranscriptContext, formatTimePrecise, projectSourceFramesToTimeline } from './timelineUtils';
+import {
+  buildTranscriptContext,
+  formatTimePrecise,
+  projectSourceFramesToTimeline,
+  projectSourceFramesToTimelineAll,
+} from './timelineUtils';
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
@@ -57,8 +63,6 @@ export type SelectedItem = {
   type: 'clip' | 'caption' | 'text' | 'transition' | 'marker';
   id: string;
 } | null;
-
-export type PendingDeleteRanges = { ownerId: string; ranges: Array<{ start: number; end: number }> };
 
 export type ImportedSourceDraft = {
   id?: string;
@@ -311,6 +315,19 @@ function normalizeSourceIndexAnalysisState(
   };
 }
 
+function normalizeSourceIndexAnalysisStateMap(
+  value: SourceIndexAnalysisStateMap | null | undefined,
+): SourceIndexAnalysisStateMap {
+  if (!value || typeof value !== 'object') return {};
+  return Object.entries(value).reduce<SourceIndexAnalysisStateMap>((acc, [sourceId, analysis]) => {
+    const normalized = normalizeSourceIndexAnalysisState(analysis);
+    if (normalized) {
+      acc[sourceId] = normalized;
+    }
+    return acc;
+  }, {});
+}
+
 function buildInitialSourceIndexState(
   sources: ProjectSource[] = [],
   overrides?: SourceIndexStateMap,
@@ -369,12 +386,17 @@ function buildDerivedIndexState(
   const backgroundTranscript = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
     ? buildTranscriptContext(clips, sourceTranscriptCaptions, transitions)
     : null;
-  const projectedOverviewFrames = sourceOverviewFrames && sourceOverviewFrames.length > 0
+  const analysisOverviewFrames = sourceOverviewFrames && sourceOverviewFrames.length > 0
+    ? projectSourceFramesToTimelineAll(clips, sourceOverviewFrames, transitions)
+    : [];
+  const displayOverviewFrames = sourceOverviewFrames && sourceOverviewFrames.length > 0
     ? projectSourceFramesToTimeline(clips, sourceOverviewFrames, aiSettings.frameInspection, transitions)
     : [];
   return {
     backgroundTranscript,
-    projectedOverviewFrames: projectedOverviewFrames.length > 0 ? projectedOverviewFrames : null,
+    analysisOverviewFrames: analysisOverviewFrames.length > 0 ? analysisOverviewFrames : null,
+    displayOverviewFrames: displayOverviewFrames.length > 0 ? displayOverviewFrames : null,
+    projectedOverviewFrames: displayOverviewFrames.length > 0 ? displayOverviewFrames : null,
     timelineProjectionFresh: true,
   };
 }
@@ -539,13 +561,15 @@ function buildBaseEditorState(input?: {
   | 'transcriptProgress'
   | 'sourceTranscriptCaptions'
   | 'sourceOverviewFrames'
+  | 'analysisOverviewFrames'
+  | 'displayOverviewFrames'
   | 'projectedOverviewFrames'
   | 'sourceIndexFreshBySourceId'
   | 'timelineProjectionFresh'
   | 'visualSearchSession'
   | 'sourceIndex'
   | 'sourceIndexAnalysis'
-  | 'pendingDeleteRanges'
+  | 'sourceIndexAnalysisBySourceId'
 > {
   return {
     videoFile: input?.videoFile ?? null,
@@ -586,13 +610,15 @@ function buildBaseEditorState(input?: {
     transcriptProgress: null,
     sourceTranscriptCaptions: null,
     sourceOverviewFrames: null,
+    analysisOverviewFrames: null,
+    displayOverviewFrames: null,
     projectedOverviewFrames: null,
     sourceIndexFreshBySourceId: buildInitialSourceIndexState(input?.sources),
     timelineProjectionFresh: true,
     visualSearchSession: null,
     sourceIndex: null,
     sourceIndexAnalysis: null,
-    pendingDeleteRanges: null,
+    sourceIndexAnalysisBySourceId: {},
   };
 }
 
@@ -636,13 +662,15 @@ interface EditorState {
   transcriptProgress: TranscriptProgress;
   sourceTranscriptCaptions: CaptionEntry[] | null;
   sourceOverviewFrames: SourceIndexedFrame[] | null;
+  analysisOverviewFrames: IndexedVideoFrame[] | null;
+  displayOverviewFrames: IndexedVideoFrame[] | null;
   projectedOverviewFrames: IndexedVideoFrame[] | null;
   sourceIndexFreshBySourceId: SourceIndexStateMap;
   timelineProjectionFresh: boolean;
   visualSearchSession: VisualSearchSession | null;
   sourceIndex: SourceIndex | null;
   sourceIndexAnalysis: SourceIndexAnalysisState | null;
-  pendingDeleteRanges: PendingDeleteRanges | null;
+  sourceIndexAnalysisBySourceId: SourceIndexAnalysisStateMap;
   importSources: (
     sources: ImportedSourceDraft[],
     options?: { insertAtTime?: number; shouldAppendClips?: boolean },
@@ -662,8 +690,6 @@ interface EditorState {
   setPreviewSnapshot: (ownerId: string, snapshot: EditSnapshot) => void;
   clearPreviewSnapshot: (ownerId?: string) => void;
   commitPreviewSnapshot: (snapshot: EditSnapshot) => void;
-  setPendingDeleteRanges: (ownerId: string, ranges: Array<{ start: number; end: number }>) => void;
-  clearPendingDeleteRanges: (ownerId?: string) => void;
   splitClipAtTime: (timelineTime: number) => void;
   deleteRangeAtTime: (startTime: number, endTime: number) => void;
   deleteClip: (clipId: string) => void;
@@ -747,6 +773,7 @@ interface EditorState {
     sourceOverviewFrames?: SourceIndexedFrame[] | null;
     sourceIndexFreshBySourceId?: SourceIndexStateMap;
     analysis?: SourceIndexAnalysisState | null;
+    analysisBySourceId?: SourceIndexAnalysisStateMap;
   }) => void;
   setSourceIndexAnalysis: (analysis: SourceIndexAnalysisState | null) => void;
   setVisualSearchSession: (session: VisualSearchSession | null) => void;
@@ -1093,12 +1120,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (ownerId && state.previewOwnerId && state.previewOwnerId !== ownerId) return state;
     return { previewSnapshot: null, previewOwnerId: null };
   }),
-
-  setPendingDeleteRanges: (ownerId, ranges) => set({ pendingDeleteRanges: { ownerId, ranges } }),
-  clearPendingDeleteRanges: (ownerId) => set((state) => {
-    if (ownerId && state.pendingDeleteRanges && state.pendingDeleteRanges.ownerId !== ownerId) return state;
-    return { pendingDeleteRanges: null };
-  }),
   commitPreviewSnapshot: (snapshot) => {
     const current = (get() as unknown as EditorStoreWithSnapshot)._snapshot();
     set((state) => ({
@@ -1110,7 +1131,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       previewSnapshot: null,
       previewOwnerId: null,
-      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         snapshot.clips,
         snapshot.transitions,
@@ -1387,7 +1407,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       previewSnapshot: null,
       previewOwnerId: null,
-      pendingDeleteRanges: null,
       ...(actionChangesTimelineStructure(action)
         ? buildDerivedIndexState(
             next.clips,
@@ -1415,7 +1434,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
-      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         prev.clips,
         prev.transitions,
@@ -1441,7 +1459,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       taggedMarkerIds: [],
       previewSnapshot: null,
       previewOwnerId: null,
-      pendingDeleteRanges: null,
       ...buildDerivedIndexState(
         next.clips,
         next.transitions,
@@ -1488,7 +1505,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       textOverlays: [],
       previewSnapshot: null,
       previewOwnerId: null,
-      pendingDeleteRanges: null,
       selectedItem: null,
       taggedMarkerIds: [],
       ...buildDerivedIndexState(
@@ -1737,10 +1753,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       transcriptError: hasTranscriptCaptions ? null : persistedTranscriptError,
       sourceTranscriptCaptions,
       sourceOverviewFrames: sourceOverviewFrames && sourceOverviewFrames.length > 0 ? sourceOverviewFrames : null,
+      analysisOverviewFrames: derivedIndexState.analysisOverviewFrames,
+      displayOverviewFrames: derivedIndexState.displayOverviewFrames,
       projectedOverviewFrames: derivedIndexState.projectedOverviewFrames,
       sourceIndexFreshBySourceId: nextFreshness,
       timelineProjectionFresh: derivedIndexState.timelineProjectionFresh,
       sourceIndex: (editState.sourceIndex as SourceIndex | null | undefined) ?? null,
+      sourceIndexAnalysisBySourceId: {},
     });
   },
 
@@ -1998,6 +2017,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const validSourceIds = new Set(state.sources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
+    const analysisBySourceId = normalizeSourceIndexAnalysisStateMap(payload.analysisBySourceId);
     const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running';
     const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
       ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
@@ -2071,6 +2091,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       sourceOverviewFrames,
       sourceIndexFreshBySourceId,
       sourceIndexAnalysis: analysis ?? state.sourceIndexAnalysis,
+      sourceIndexAnalysisBySourceId: analysisBySourceId,
       ...buildDerivedIndexState(
         state.clips,
         state.transitions,

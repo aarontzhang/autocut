@@ -2,7 +2,19 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { AnalysisProgress, ChatMessage as ChatMessageType, CaptionEntry, EditAction, IndexedVideoFrame, MarkerEntry, SilenceCandidate, SourceIndexedFrame, VisualSearchSession } from '@/lib/types';
+import {
+  AnalysisProgress,
+  ChatMessage as ChatMessageType,
+  CaptionEntry,
+  EditAction,
+  IndexedVideoFrame,
+  MarkerEntry,
+  SilenceCandidate,
+  SourceIndexAnalysisState,
+  SourceIndexAnalysisStateMap,
+  SourceIndexedFrame,
+  VisualSearchSession,
+} from '@/lib/types';
 import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
 import { extractVideoFrames } from '@/lib/ffmpegClient';
 import { applyActionToSnapshot, expandActionForReview, EditSnapshot } from '@/lib/editActionUtils';
@@ -75,6 +87,7 @@ const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
 const APPROVAL_CONTINUATION_PREFIX = 'Continue with the remaining steps from my earlier request now that the approved edit was applied.';
 const MAX_AUTO_APPROVAL_CONTINUATIONS = 4;
+const MAX_CHAT_OVERVIEW_FRAMES = 96;
 
 type ActiveMarkerMention = {
   query: string;
@@ -259,12 +272,106 @@ function clampProgress(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function formatEtaLabel(seconds?: number | null): string | null {
-  if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return null;
-  if (seconds < 10) return 'about 10s left';
-  if (seconds < 60) return `about ${Math.ceil(seconds / 5) * 5}s left`;
-  const roundedMinutes = Math.ceil((seconds / 60) * 2) / 2;
-  return `about ${roundedMinutes} min left`;
+function formatCountdownLabel(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, Math.ceil(totalSeconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')} left`;
+}
+
+function getAnalysisProgressFraction(progress: IndexingProgress | null): number {
+  if (!progress || progress.total <= 0) return 0;
+  return clampProgress(progress.completed / progress.total);
+}
+
+function getAudioStageFraction(analysis: SourceIndexAnalysisState | null, hasTranscript: boolean): number {
+  if (hasTranscript) return 1;
+  if (!analysis || analysis.status === 'failed') return 0;
+  if (analysis.status === 'completed') return 1;
+  const stage = analysis.progress?.stage;
+  if (stage === 'transcribing_audio') return getAnalysisProgressFraction(analysis.progress);
+  if (stage === 'detecting_scenes' || stage === 'choosing_representative_frames' || stage === 'describing_representative_frames') {
+    return 1;
+  }
+  return 0;
+}
+
+function getVisualStageFraction(analysis: SourceIndexAnalysisState | null, hasOverview: boolean): number {
+  if (hasOverview) return 1;
+  if (!analysis || analysis.status === 'failed') return 0;
+  if (analysis.status === 'completed') return 1;
+
+  const stage = analysis.progress?.stage;
+  const progressFraction = getAnalysisProgressFraction(analysis.progress);
+  switch (stage) {
+    case 'preparing_media':
+      return 0.05;
+    case 'transcribing_audio':
+      return 0.1;
+    case 'detecting_scenes':
+      return 0.2;
+    case 'choosing_representative_frames':
+      return 0.2 + 0.45 * progressFraction;
+    case 'describing_representative_frames':
+      return 0.65 + 0.35 * progressFraction;
+    default:
+      return analysis.status === 'queued' ? 0 : progressFraction;
+  }
+}
+
+function evenlySampleFrameIndices(count: number, targetCount: number): number[] {
+  if (count <= 0 || targetCount <= 0) return [];
+  if (count <= targetCount) return Array.from({ length: count }, (_, index) => index);
+
+  const selected: number[] = [];
+  for (let index = 0; index < targetCount; index += 1) {
+    const sampleIndex = Math.min(count - 1, Math.round(index * (count - 1) / Math.max(targetCount - 1, 1)));
+    if (selected[selected.length - 1] !== sampleIndex) {
+      selected.push(sampleIndex);
+    }
+  }
+  return selected;
+}
+
+function selectEvenlySampledFrames(frames: IndexedVideoFrame[], targetCount: number): IndexedVideoFrame[] {
+  return evenlySampleFrameIndices(frames.length, targetCount)
+    .map((index) => frames[index] ?? null)
+    .filter((frame): frame is IndexedVideoFrame => !!frame);
+}
+
+type FrameCoverageSummary = {
+  totalOverviewFrames: number;
+  coveredSourceCount: number;
+  averageGapSeconds: number | null;
+};
+
+function summarizeFrameCoverage(frames: IndexedVideoFrame[]): FrameCoverageSummary {
+  const overviewFrames = frames
+    .filter((frame) => frame.kind === 'overview')
+    .sort((a, b) => a.timelineTime - b.timelineTime);
+  const coveredSourceCount = new Set(
+    overviewFrames
+      .map((frame) => normalizeKnownSourceId(frame.sourceId))
+      .filter((sourceId) => sourceId.length > 0),
+  ).size;
+  if (overviewFrames.length < 2) {
+    return {
+      totalOverviewFrames: overviewFrames.length,
+      coveredSourceCount,
+      averageGapSeconds: null,
+    };
+  }
+
+  const totalGap = overviewFrames.reduce((sum, frame, index) => {
+    if (index === 0) return sum;
+    return sum + Math.max(0, frame.timelineTime - overviewFrames[index - 1].timelineTime);
+  }, 0);
+
+  return {
+    totalOverviewFrames: overviewFrames.length,
+    coveredSourceCount,
+    averageGapSeconds: totalGap / Math.max(overviewFrames.length - 1, 1),
+  };
 }
 
 function getActiveMarkerMention(text: string, caret: number | null): ActiveMarkerMention | null {
@@ -815,6 +922,138 @@ function buildSourceCoverageDetail(params: {
   return parts.join(' ');
 }
 
+function buildServerAnalysisSummary(params: {
+  kind: 'audio' | 'visual';
+  sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
+  readySourceIds: Set<string>;
+  analysisBySourceId: SourceIndexAnalysisStateMap;
+}) {
+  const totalSources = params.sources.length;
+  if (totalSources === 0) {
+    return null;
+  }
+
+  const fractionForSource = (sourceId: string) => {
+    const analysis = params.analysisBySourceId[sourceId] ?? null;
+    const isReady = params.readySourceIds.has(sourceId);
+    return params.kind === 'audio'
+      ? getAudioStageFraction(analysis, isReady)
+      : getVisualStageFraction(analysis, isReady);
+  };
+
+  const readyCount = params.sources.filter((source) => params.readySourceIds.has(source.sourceId)).length;
+  const totalFraction = params.sources.reduce((sum, source) => sum + fractionForSource(source.sourceId), 0);
+  const aggregateFraction = clampProgress(totalFraction / Math.max(totalSources, 1));
+  const inProgressSources = params.sources.filter((source) => {
+    const analysis = params.analysisBySourceId[source.sourceId] ?? null;
+    return !params.readySourceIds.has(source.sourceId) && (analysis?.status === 'queued' || analysis?.status === 'running');
+  });
+  const activeSource = inProgressSources[0] ?? null;
+  const activeAnalysis = activeSource ? params.analysisBySourceId[activeSource.sourceId] ?? null : null;
+  const activeProgress = activeAnalysis?.progress ?? null;
+  const etaCandidates = inProgressSources
+    .map((source) => params.analysisBySourceId[source.sourceId]?.progress?.etaSeconds)
+    .filter((eta): eta is number => typeof eta === 'number' && Number.isFinite(eta) && eta > 0);
+  const processingSuffix = inProgressSources.length > 1 ? ` • +${inProgressSources.length - 1} more processing` : '';
+
+  return {
+    readyCount,
+    totalSources,
+    detail: buildSourceCoverageDetail({
+      sources: params.sources,
+      readySourceIds: params.readySourceIds,
+      readyLabel: params.kind === 'audio' ? 'Audio ready' : 'Visuals ready',
+    }),
+    tone: readyCount >= totalSources ? 'completed' as const : 'active' as const,
+    progress: readyCount >= totalSources
+      ? buildCompletedProgress(params.kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames')
+      : {
+          stage: activeProgress?.stage ?? (params.kind === 'audio' ? 'transcribing_audio' : 'preparing_media'),
+          completed: Math.round(aggregateFraction * 1000),
+          total: 1000,
+          label: activeSource
+            ? `Clip ${params.sources.findIndex((source) => source.sourceId === activeSource.sourceId) + 1}/${totalSources} • ${activeSource.fileName} • ${params.kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${Math.min(activeProgress?.completed ?? 0, Math.max(activeProgress?.total ?? 1, 1))}/${Math.max(activeProgress?.total ?? 1, 1)}`
+            : `${params.kind === 'audio' ? 'Audio' : 'Visuals'} ${readyCount}/${totalSources} clips ready`,
+          etaSeconds: etaCandidates.length > 0 ? Math.max(...etaCandidates) : null,
+        },
+    secondaryLabel: `${readyCount}/${totalSources} clips ready${processingSuffix}`,
+  };
+}
+
+function packFramesForChat(
+  frames: IndexedVideoFrame[],
+  availableSources: Array<{ sourceId: string; duration: number }>,
+): IndexedVideoFrame[] {
+  const overviewFrames = frames
+    .filter((frame) => frame.kind === 'overview' && hasUsableFrameDescription(frame.description))
+    .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
+  if (overviewFrames.length <= MAX_CHAT_OVERVIEW_FRAMES) return overviewFrames;
+
+  const framesBySource = new Map<string, IndexedVideoFrame[]>();
+  overviewFrames.forEach((frame) => {
+    const sourceId = normalizeKnownSourceId(frame.sourceId);
+    const existing = framesBySource.get(sourceId) ?? [];
+    framesBySource.set(sourceId, [...existing, frame]);
+  });
+
+  const orderedSourceIds = availableSources
+    .map((source) => source.sourceId)
+    .filter((sourceId) => framesBySource.has(sourceId));
+  const fallbackSourceIds = [...framesBySource.keys()].filter((sourceId) => !orderedSourceIds.includes(sourceId));
+  const sourceIds = [...orderedSourceIds, ...fallbackSourceIds];
+
+  const reservedSelections = new Map<string, IndexedVideoFrame[]>();
+  const reservedKeys = new Set<string>();
+  sourceIds.forEach((sourceId) => {
+    const selected = selectEvenlySampledFrames(framesBySource.get(sourceId) ?? [], 4);
+    reservedSelections.set(sourceId, selected);
+    selected.forEach((frame) => {
+      reservedKeys.add(`${sourceId}:${frame.timelineTime}:${frame.sourceTime}`);
+    });
+  });
+
+  let packed = sourceIds.flatMap((sourceId) => reservedSelections.get(sourceId) ?? []);
+  if (packed.length >= MAX_CHAT_OVERVIEW_FRAMES) {
+    return selectEvenlySampledFrames(packed, MAX_CHAT_OVERVIEW_FRAMES)
+      .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
+  }
+
+  const remainingSlots = MAX_CHAT_OVERVIEW_FRAMES - packed.length;
+  const sourceDurationById = new Map(availableSources.map((source) => [source.sourceId, Math.max(source.duration, 0)]));
+  const remainingPools = sourceIds.map((sourceId) => {
+    const pool = (framesBySource.get(sourceId) ?? []).filter((frame) => !reservedKeys.has(`${sourceId}:${frame.timelineTime}:${frame.sourceTime}`));
+    return {
+      sourceId,
+      pool,
+      duration: sourceDurationById.get(sourceId) ?? pool.length,
+    };
+  });
+  const totalDuration = remainingPools.reduce((sum, entry) => sum + entry.duration, 0);
+  let leftoverSlots = remainingSlots;
+
+  remainingPools.forEach((entry, index) => {
+    if (leftoverSlots <= 0 || entry.pool.length === 0) return;
+    const proportionalTarget = totalDuration > 0
+      ? Math.round((entry.duration / totalDuration) * remainingSlots)
+      : Math.floor(remainingSlots / Math.max(remainingPools.length - index, 1));
+    const target = Math.min(entry.pool.length, Math.max(0, proportionalTarget));
+    const selected = selectEvenlySampledFrames(entry.pool, target);
+    packed = [...packed, ...selected];
+    leftoverSlots -= selected.length;
+  });
+
+  if (leftoverSlots > 0) {
+    const spillover = remainingPools.flatMap((entry) => entry.pool)
+      .filter((frame) => !packed.includes(frame))
+      .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
+    packed = [...packed, ...selectEvenlySampledFrames(spillover, leftoverSlots)];
+  }
+
+  return packed
+    .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime)
+    .slice(0, MAX_CHAT_OVERVIEW_FRAMES);
+}
+
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
   return action?.type === 'add_marker'
     || action?.type === 'add_markers'
@@ -903,7 +1142,8 @@ function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number
 function getReviewSeekTime(snapshot: EditSnapshot, action: EditAction): number | null {
   const anchor = getReviewAnchorTime(snapshot, action);
   if (anchor === null) return null;
-  return Math.max(0, anchor - REVIEW_PREROLL_SECONDS);
+  const timelineDuration = getTimelineDuration(snapshot.clips, snapshot.transitions);
+  return Math.max(0, Math.min(Math.max(0, timelineDuration), anchor - REVIEW_PREROLL_SECONDS));
 }
 
 function getReviewApplyResult(action: EditAction, reviewCount: number): string {
@@ -977,15 +1217,6 @@ function upsertMarkersFromVisualSearch(
       note: query,
     });
   });
-}
-
-function getDeleteRangesFromAction(action: EditAction): Array<{ start: number; end: number }> | null {
-  if (action.type === 'delete_range') {
-    if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return null;
-    return [{ start: action.deleteStartTime, end: action.deleteEndTime }];
-  }
-  if (action.type === 'delete_ranges') return action.ranges ?? null;
-  return null;
 }
 
 // ─── Action card config ────────────────────────────────────────────────────────
@@ -1600,9 +1831,6 @@ function AssistantMessage({
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
   const updateMessage = useEditorStore(s => s.updateMessage);
-  const setPendingDeleteRanges = useEditorStore(s => s.setPendingDeleteRanges);
-  const clearPendingDeleteRanges = useEditorStore(s => s.clearPendingDeleteRanges);
-  const pendingDeleteRanges = useEditorStore(s => s.pendingDeleteRanges);
   const appliedActions = useEditorStore(s => s.appliedActions);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
@@ -1642,14 +1870,11 @@ function AssistantMessage({
     || msg.actionStatus === 'rejected'
     || msg.autoApplied
     || actionPreviouslyApplied;
-  const isDeleteAction = !!action && (action.type === 'delete_range' || action.type === 'delete_ranges');
   const reviewableAction = !!action
     && action.type !== 'none'
     && action.type !== 'transcribe_request'
-    && action.type !== 'update_ai_settings'
-    && !isDeleteAction;
+    && action.type !== 'update_ai_settings';
   const batchReviewActive = reviewPreviewActive && reviewableAction;
-  const deleteRanges = action ? getDeleteRangesFromAction(action) : null;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const actionResultText = msg.actionResult ?? (
     msg.actionStatus === 'rejected'
@@ -1663,17 +1888,7 @@ function AssistantMessage({
 
   useEffect(() => () => {
     clearPreviewSnapshot(msg.id);
-    clearPendingDeleteRanges(msg.id);
-  }, [clearPreviewSnapshot, clearPendingDeleteRanges, msg.id]);
-
-  useEffect(() => {
-    if (!isDeleteAction || !deleteRanges || actionResolved) return;
-    if (pendingDeleteRanges && pendingDeleteRanges.ownerId !== msg.id) return;
-    if (!pendingDeleteRanges || pendingDeleteRanges.ownerId !== msg.id) {
-      setPendingDeleteRanges(msg.id, deleteRanges);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDeleteAction, actionResolved, msg.id]);
+  }, [clearPreviewSnapshot, msg.id]);
 
   useEffect(() => {
     if (!actionPreviouslyApplied || msg.actionStatus === 'completed' || msg.actionStatus === 'rejected') return;
@@ -1726,33 +1941,6 @@ function AssistantMessage({
     setReviewResult(result);
     void onActionResolved(msg.id, action, result);
   }, [action, clearPreviewSnapshot, commitPreviewSnapshot, msg.id, onActionResolved, recordAppliedAction, reviewBaseSnapshot, reviewSteps.length, updateMessage]);
-
-  const handleAcceptAll = useCallback(() => {
-    if (!action || !deleteRanges) return;
-    const seekTime = getReviewSeekTime({
-      clips: useEditorStore.getState().clips,
-      captions: useEditorStore.getState().captions,
-      transitions: useEditorStore.getState().transitions,
-      markers: useEditorStore.getState().markers,
-      textOverlays: useEditorStore.getState().textOverlays,
-    }, action);
-    applyStoredAction(action);
-    const sourceRanges = sourceRangesForAction(useEditorStore.getState().clips, action);
-    recordAppliedAction(action, action.message, { sourceRanges });
-    clearPendingDeleteRanges(msg.id);
-    const n = deleteRanges.length;
-    if (seekTime !== null) requestSeek(seekTime);
-    updateMessage(msg.id, {
-      actionStatus: 'completed',
-      actionResult: `Committed ${n} cut${n !== 1 ? 's' : ''}.`,
-    });
-    void onActionResolved(msg.id, action, `Committed ${n} cut${n !== 1 ? 's' : ''}.`);
-  }, [action, applyStoredAction, clearPendingDeleteRanges, deleteRanges, msg.id, onActionResolved, recordAppliedAction, requestSeek, updateMessage]);
-
-  const handleCancelDelete = useCallback(() => {
-    clearPendingDeleteRanges(msg.id);
-    updateMessage(msg.id, { actionStatus: 'rejected', actionResult: 'Cancelled.' });
-  }, [clearPendingDeleteRanges, msg.id, updateMessage]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -1917,23 +2105,7 @@ function AssistantMessage({
                     Finish the active review before opening another one.
                   </p>
                 )}
-                {isDeleteAction && !actionResolved ? (
-                  <>
-                    {deleteRanges && (
-                      <p style={{ fontSize: 10, color: 'var(--fg-muted)', margin: '0 0 8px', fontFamily: 'var(--font-serif)' }}>
-                        {deleteRanges.length} cut{deleteRanges.length !== 1 ? 's' : ''} highlighted. Accept to apply.
-                      </p>
-                    )}
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button onClick={handleAcceptAll} style={{ flex: 1, padding: '5px 0', fontSize: 12, fontWeight: 500, background: 'var(--accent)', border: 'none', color: '#000', borderRadius: 4, cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
-                        Accept
-                      </button>
-                      <button onClick={handleCancelDelete} style={{ padding: '5px 10px', fontSize: 12, background: 'none', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer', fontFamily: 'var(--font-serif)' }}>
-                        Cancel
-                      </button>
-                    </div>
-                  </>
-                ) : action?.type === 'update_ai_settings' ? (
+                {action?.type === 'update_ai_settings' ? (
                   <button
                     onClick={handleApplySettings}
                     style={{
@@ -2094,9 +2266,9 @@ function ProgressStatusCard({
   tone?: ProgressCardTone;
 }) {
   const targetProgress = getProgressValue(progress);
-  const etaLabel = formatEtaLabel(progress?.etaSeconds);
   const isCompleted = tone === 'completed';
-  const statusText = progress?.label || etaLabel;
+  const statusText = progress?.label ?? null;
+  const etaKey = `${progress?.etaSeconds ?? 'na'}:${progress?.completed ?? 'na'}:${progress?.total ?? 'na'}:${progress?.stage ?? 'na'}:${progress?.label ?? 'na'}:${isCompleted ? 'done' : 'active'}`;
 
   return (
     <div style={{
@@ -2176,11 +2348,11 @@ function ProgressStatusCard({
           }}>
             {statusText}
           </span>
-          {!isCompleted && etaLabel && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
-              {etaLabel}
-            </span>
-          )}
+          <LiveEtaLabel
+            key={etaKey}
+            etaSeconds={progress?.etaSeconds ?? null}
+            isCompleted={isCompleted}
+          />
         </div>
       )}
       {secondaryLabel && (
@@ -2194,6 +2366,41 @@ function ProgressStatusCard({
         </span>
       )}
     </div>
+  );
+}
+
+function LiveEtaLabel({
+  etaSeconds,
+  isCompleted,
+}: {
+  etaSeconds?: number | null;
+  isCompleted: boolean;
+}) {
+  const [targetMs] = useState<number | null>(() => {
+    if (!etaSeconds || !Number.isFinite(etaSeconds) || etaSeconds <= 0 || isCompleted) {
+      return null;
+    }
+    return Date.now() + etaSeconds * 1000;
+  });
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (targetMs === null || isCompleted) return;
+    const intervalId = window.setInterval(() => {
+      setCountdownNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isCompleted, targetMs]);
+
+  if (isCompleted || targetMs === null) return null;
+
+  const remainingSeconds = Math.ceil((targetMs - countdownNow) / 1000);
+  const label = remainingSeconds <= 0 ? 'Finishing up…' : formatCountdownLabel(remainingSeconds);
+
+  return (
+    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
+      {label}
+    </span>
   );
 }
 
@@ -2299,12 +2506,13 @@ export default function ChatSidebar() {
   const transcriptError = useEditorStore(s => s.transcriptError);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
   const transcriptStartedAtRef = useRef<number | null>(null);
-  const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
+  const analysisOverviewFrames = useEditorStore(s => s.analysisOverviewFrames);
+  const displayOverviewFrames = useEditorStore(s => s.displayOverviewFrames);
   const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
   const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
-  const aiSettings = useEditorStore(s => s.aiSettings);
+  const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
@@ -2336,32 +2544,12 @@ export default function ChatSidebar() {
   const overviewReadySourceIds = useMemo(() => new Set(
     (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
   ), [sourceOverviewFrames]);
-  const missingTranscriptSources = useMemo(() => (
-    availableSources.filter((entry) => (
-      !sourceIndexFreshBySourceId[entry.sourceId]?.transcript
-      && !transcriptReadySourceIds.has(entry.sourceId)
-    ))
-  ), [availableSources, sourceIndexFreshBySourceId, transcriptReadySourceIds]);
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => (
       !sourceIndexFreshBySourceId[entry.sourceId]?.overview
       && !overviewReadySourceIds.has(entry.sourceId)
     ))
   ), [availableSources, overviewReadySourceIds, sourceIndexFreshBySourceId]);
-  const estimatedServerTranscriptEta = useMemo(() => (
-    missingTranscriptSources.reduce((total, entry) => total + estimateTranscriptSeconds(entry.duration), 0)
-  ), [missingTranscriptSources]);
-  const estimatedServerOverviewEta = useMemo(() => (
-    missingOverviewSources.reduce((total, entry) => {
-      const frameCount = getAdaptiveCoarseFrameBudget(
-        entry.duration,
-        Math.max(0.1, aiSettings.frameInspection.overviewIntervalSeconds),
-        aiSettings.frameInspection.maxOverviewFrames,
-      );
-      return total + estimateFrameExtractionSeconds(frameCount) + estimateFrameDescriptionSeconds(frameCount);
-    }, 0)
-  ), [aiSettings, missingOverviewSources]);
-
   useEffect(() => {
     setFrameAnalysisError(null);
   }, [currentProjectId]);
@@ -2473,10 +2661,10 @@ export default function ChatSidebar() {
       (entry) => force || !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
     );
     if (sourcesToIndex.length === 0) {
-      return state.projectedOverviewFrames ?? [];
+      return state.analysisOverviewFrames ?? [];
     }
     if (document.hidden || state.playbackActive) {
-      return state.projectedOverviewFrames ?? [];
+      return state.analysisOverviewFrames ?? [];
     }
     try {
       setFrameAnalysisError(null);
@@ -2553,11 +2741,11 @@ export default function ChatSidebar() {
         label: `Representative frames ready`,
         etaSeconds: 0,
       });
-      return refreshedState.projectedOverviewFrames ?? [];
+      return refreshedState.analysisOverviewFrames ?? [];
     } catch (error) {
       setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
       setFrameIndexingProgress(null);
-      return useEditorStore.getState().projectedOverviewFrames ?? [];
+      return useEditorStore.getState().analysisOverviewFrames ?? [];
     }
     })();
     extractionPromiseRef.current = promise;
@@ -2852,9 +3040,9 @@ export default function ChatSidebar() {
   }
 
   const frameDescriptionsReady = useMemo(() => {
-    if (projectedOverviewFrames === null) return false;
-    return projectedOverviewFrames.every((frame) => hasUsableFrameDescription(frame.description));
-  }, [projectedOverviewFrames]);
+    if (analysisOverviewFrames === null) return false;
+    return analysisOverviewFrames.every((frame) => hasUsableFrameDescription(frame.description));
+  }, [analysisOverviewFrames]);
 
   const buildCurrentTranscript = useCallback(() => {
     const freshState = useEditorStore.getState();
@@ -2871,7 +3059,7 @@ export default function ChatSidebar() {
   ) => {
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
     const baseFrames = useServerSourceIndex
-      ? (useEditorStore.getState().projectedOverviewFrames ?? [])
+      ? (useEditorStore.getState().analysisOverviewFrames ?? [])
       : await ensureFramesExtracted();
     let currentFrames = [...baseFrames];
     let nextHistory = [...history];
@@ -2883,6 +3071,8 @@ export default function ChatSidebar() {
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
+      const packedFrames = packFramesForChat(currentFrames, availableSources);
+      const frameCoverage = summarizeFrameCoverage(currentFrames);
 
       const { message = '', action, visualSearch } = await postChatRequest({
         messages: nextHistory,
@@ -2924,7 +3114,8 @@ export default function ChatSidebar() {
           silenceCandidates,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
-          frames: buildFrameContextPayload(currentFrames, currentClips),
+          frameCoverage,
+          frames: buildFrameContextPayload([...packedFrames, ...currentFrames.filter((frame) => frame.kind === 'dense')], currentClips),
         },
       }, ctrl);
 
@@ -2998,7 +3189,7 @@ export default function ChatSidebar() {
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedMarkers, useServerSourceIndex]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -3139,9 +3330,10 @@ export default function ChatSidebar() {
   }, [clearChatHistory, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = availableSources.length > 0;
+  const overviewFramesForUi = displayOverviewFrames ?? analysisOverviewFrames;
   const usingServerSourceIndex = useServerSourceIndex;
-  const coarseFramesAvailable = (projectedOverviewFrames ?? []).some((frame) => hasUsableFrameDescription(frame.description));
-  const frameAnalysisReady = projectedOverviewFrames !== null && frameDescriptionsReady;
+  const coarseFramesAvailable = (overviewFramesForUi ?? []).some((frame) => hasUsableFrameDescription(frame.description));
+  const frameAnalysisReady = analysisOverviewFrames !== null && frameDescriptionsReady;
   const framesReady = usingServerSourceIndex
     ? frameAnalysisError !== null || frameAnalysisReady || coarseFramesAvailable
     : frameAnalysisError !== null || frameAnalysisReady;
@@ -3171,7 +3363,7 @@ export default function ChatSidebar() {
   const canSendDespiteIndexing = pendingVisualQuery;
   const isAnalyzingSampledFrames = hasVideoSource
     && (transcriptStatus === 'done' || transcriptFailed)
-    && projectedOverviewFrames !== null
+    && analysisOverviewFrames !== null
     && frameAnalysisError === null
     && !frameDescriptionsReady;
   const mediaPreparationBlockingSend = !usingServerSourceIndex && hasVideoSource
@@ -3187,80 +3379,42 @@ export default function ChatSidebar() {
   const analysisStatusCards: AnalysisStatusCard[] = [];
   if (hasVideoSource) {
     if (usingServerSourceIndex) {
-      const totalServerSources = availableSources.length;
-      const completedTranscriptSources = totalServerSources - missingTranscriptSources.length;
-      const completedOverviewSources = totalServerSources - missingOverviewSources.length;
-      const serverAudioPending = missingTranscriptSources.length > 0;
-      const serverVisualPending = missingOverviewSources.length > 0;
-      const serverAnalysisRunning = sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running';
-      const audioCoverageDetail = buildSourceCoverageDetail({
+      const audioSummary = buildServerAnalysisSummary({
+        kind: 'audio',
         sources: availableSources,
         readySourceIds: transcriptReadySourceIds,
-        readyLabel: 'Audio ready',
+        analysisBySourceId: sourceIndexAnalysisBySourceId,
       });
-      const visualCoverageDetail = buildSourceCoverageDetail({
+      const visualSummary = buildServerAnalysisSummary({
+        kind: 'visual',
         sources: availableSources,
         readySourceIds: overviewReadySourceIds,
-        readyLabel: 'Visuals ready',
+        analysisBySourceId: sourceIndexAnalysisBySourceId,
       });
 
-      if (serverAudioPending) {
+      if (audioSummary) {
         analysisStatusCards.push({
           key: 'server-audio-analysis',
           title: 'Audio analysis',
-          progress: {
-            stage: serverAnalysisRunning
-              ? (sourceIndexAnalysis?.progress?.stage === 'transcribing_audio'
-                  ? 'transcribing_audio'
-                  : 'preparing_media')
-              : 'transcribing_audio',
-            completed: Math.max(0, completedTranscriptSources),
-            total: Math.max(1, totalServerSources),
-            label: `Audio ready for ${Math.max(0, completedTranscriptSources)}/${Math.max(1, totalServerSources)} clips`,
-            etaSeconds: estimatedServerTranscriptEta > 0
-              ? estimatedServerTranscriptEta
-              : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
-          },
-          detail: audioCoverageDetail,
-          secondaryLabel: serverAnalysisRunning
-            ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
-            : `${missingTranscriptSources.length} clip${missingTranscriptSources.length === 1 ? '' : 's'} remaining`,
-        });
-      } else if (totalServerSources > 0) {
-        analysisStatusCards.push({
-          key: 'server-audio-analysis',
-          title: 'Audio analysis',
-          progress: buildCompletedProgress('transcribing_audio'),
-          tone: 'completed',
+          progress: audioSummary.progress,
+          detail: audioSummary.detail,
+          secondaryLabel: audioSummary.tone === 'completed'
+            ? 'Completed'
+            : `${getIndexingStageTitle(audioSummary.progress, null)} • ${audioSummary.secondaryLabel}`,
+          tone: audioSummary.tone,
         });
       }
 
-      if (serverVisualPending) {
+      if (visualSummary) {
         analysisStatusCards.push({
           key: 'coarse-indexing',
           title: 'Visual analysis',
-          progress: {
-            stage: serverAnalysisRunning
-              ? (sourceIndexAnalysis?.progress?.stage ?? 'preparing_media')
-              : 'describing_representative_frames',
-            completed: Math.max(0, completedOverviewSources),
-            total: Math.max(1, totalServerSources),
-            label: `Visuals ready for ${Math.max(0, completedOverviewSources)}/${Math.max(1, totalServerSources)} clips`,
-            etaSeconds: estimatedServerOverviewEta > 0
-              ? estimatedServerOverviewEta
-              : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
-          },
-          detail: visualCoverageDetail,
-          secondaryLabel: serverAnalysisRunning
-            ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
-            : `${missingOverviewSources.length} clip${missingOverviewSources.length === 1 ? '' : 's'} remaining`,
-        });
-      } else if (totalServerSources > 0) {
-        analysisStatusCards.push({
-          key: 'coarse-indexing',
-          title: 'Visual analysis',
-          progress: buildCompletedProgress('describing_representative_frames'),
-          tone: 'completed',
+          progress: visualSummary.progress,
+          detail: visualSummary.detail,
+          secondaryLabel: visualSummary.tone === 'completed'
+            ? 'Completed'
+            : `${getIndexingStageTitle(visualSummary.progress, null)} • ${visualSummary.secondaryLabel}`,
+          tone: visualSummary.tone,
         });
       }
     } else if (transcriptStatus === 'loading') {
@@ -3319,7 +3473,9 @@ export default function ChatSidebar() {
     const ta = textareaRef.current;
     if (ta) {
       ta.style.height = 'auto';
-      ta.style.height = `${Math.min(ta.scrollHeight, 300)}px`;
+      const nextHeight = Math.min(ta.scrollHeight, 96);
+      ta.style.height = `${Math.max(nextHeight, 22)}px`;
+      ta.style.overflowY = ta.scrollHeight > 96 ? 'auto' : 'hidden';
     }
   }, []);
 
@@ -3518,7 +3674,7 @@ export default function ChatSidebar() {
           background: 'var(--bg-elevated)',
           border: `1px solid ${composerMuted ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
           borderRadius: 8,
-          padding: '9px 11px 7px',
+          padding: '9px 11px 9px',
           transition: 'border-color 0.2s ease, opacity 0.2s ease',
           opacity: composerMuted ? 0.82 : 1,
         }}>
@@ -3630,40 +3786,42 @@ export default function ChatSidebar() {
               Finish the active edit review before sending another request.
             </p>
           )}
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={handleInput}
-            onKeyDown={handleKeyDown}
-            onClick={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
-            onKeyUp={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
-            placeholder={
-              reviewLocked
-                ? 'Complete the active review…'
-                : isChatLoading
-                  ? 'Autocut is working…'
-                  : isAnalyzingSampledFrames
-                    ? 'Autocut is describing representative frames. You can send now…'
-                  : mediaPreparationBlockingSend
-                    ? 'Autocut is preparing the media. You can keep typing…'
-                  : 'Find events, reference markers, and review cuts…'
-            }
-            rows={1}
-            disabled={composerInputDisabled}
-            style={{
-              resize: 'none',
-              background: 'transparent',
-              border: 'none',
-              color: composerInputDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
-              fontSize: 13,
-              lineHeight: 1.55,
-              minHeight: 20,
-              maxHeight: 300,
-              width: '100%',
-              fontFamily: 'var(--font-serif)',
-            }}
-          />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInput}
+              onKeyDown={handleKeyDown}
+              onClick={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+              onKeyUp={(event) => syncActiveMarkerMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+              placeholder={
+                reviewLocked
+                  ? 'Finish the active review…'
+                  : isChatLoading
+                    ? 'Autocut is working…'
+                    : isAnalyzingSampledFrames
+                      ? 'Visuals are loading. You can type…'
+                    : mediaPreparationBlockingSend
+                      ? 'Media is loading. You can type…'
+                    : 'Ask about the video or review cuts…'
+              }
+              rows={1}
+              disabled={composerInputDisabled}
+              style={{
+                resize: 'none',
+                overflowY: 'hidden',
+                background: 'transparent',
+                border: 'none',
+                color: composerInputDisabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
+                fontSize: 13,
+                lineHeight: 1.55,
+                minHeight: 22,
+                maxHeight: 96,
+                width: '100%',
+                fontFamily: 'var(--font-serif)',
+                flex: 1,
+              }}
+            />
             {isChatLoading ? (
               <button
                 onClick={handleStop}
@@ -3676,6 +3834,7 @@ export default function ChatSidebar() {
                   cursor: 'pointer',
                   flexShrink: 0,
                   transition: 'background 0.15s',
+                  marginBottom: 1,
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.15)'; }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
@@ -3694,6 +3853,7 @@ export default function ChatSidebar() {
                   cursor: canSubmitMessage ? 'pointer' : 'default',
                   flexShrink: 0,
                   transition: 'background 0.15s',
+                  marginBottom: 1,
                 }}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill={canSubmitMessage ? '#000' : 'rgba(255,255,255,0.25)'}>

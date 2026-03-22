@@ -42,12 +42,11 @@ export default function Timeline({
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const currentTime = useEditorStore(s => s.currentTime);
-  const pendingDeleteRanges = useEditorStore(s => s.pendingDeleteRanges);
-  const clips = useEditorStore(s => s.pendingDeleteRanges ? s.clips : (s.previewSnapshot?.clips ?? s.clips));
-  const captions = useEditorStore(s => s.pendingDeleteRanges ? s.captions : (s.previewSnapshot?.captions ?? s.captions));
-  const transitions = useEditorStore(s => s.pendingDeleteRanges ? s.transitions : (s.previewSnapshot?.transitions ?? s.transitions));
-  const markers = useEditorStore(s => s.pendingDeleteRanges ? s.markers : (s.previewSnapshot?.markers ?? s.markers));
-  const textOverlays = useEditorStore(s => s.pendingDeleteRanges ? s.textOverlays : (s.previewSnapshot?.textOverlays ?? s.textOverlays));
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
+  const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
+  const markers = useEditorStore(s => s.previewSnapshot?.markers ?? s.markers);
+  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
   const selectedItem = useEditorStore(s => s.selectedItem);
   const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
@@ -741,22 +740,6 @@ export default function Timeline({
             </EffectTrackRow>
           )}
 
-          {pendingDeleteRanges?.ranges.map((range, i) => {
-            const left = tPx(range.start);
-            const width = Math.max(1, tPx(range.end) - left);
-            return (
-              <div key={i} style={{
-                position: 'absolute',
-                left, width,
-                top: RULER_H, bottom: 0,
-                background: 'rgba(239, 68, 68, 0.25)',
-                borderLeft: '1px solid rgba(239, 68, 68, 0.6)',
-                borderRight: '1px solid rgba(239, 68, 68, 0.6)',
-                zIndex: 8,
-                pointerEvents: 'none',
-              }} />
-            );
-          })}
           <TimelinePlayheadOverlay
             currentTime={currentTime}
             scrollRef={scrollRef}

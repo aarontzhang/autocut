@@ -139,6 +139,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         : null,
       sourceIndexFreshBySourceId: sourceIndexData?.sourceIndexFreshBySourceId ?? undefined,
       analysis: sourceIndexData?.analysis ?? null,
+      analysisBySourceId: sourceIndexData?.analysisBySourceId ?? {},
     });
     return sourceIndexData;
   }, [hydrateSourceIndex, updateSource]);

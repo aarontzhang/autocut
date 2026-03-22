@@ -144,6 +144,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
+  const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
   const [leadLayer, setLeadLayer] = useState<LayerId>('primary');
 
   const primaryVideoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -151,7 +152,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const currentTimeRef = useRef(0);
   const playbackIntentRef = useRef(false);
   const videoContainerRef = useRef<HTMLDivElement>(null);
-  const pendingDeleteRangesRef = useRef<ReturnType<typeof useEditorStore.getState>['pendingDeleteRanges']>(null);
   const animationFrameRef = useRef<number | null>(null);
   const videoFrameRequestRef = useRef<number | null>(null);
   const playbackTickRef = useRef<() => void>(() => {});
@@ -178,19 +178,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoData = useEditorStore((s) => s.videoData);
   const currentTime = useEditorStore((s) => s.currentTime);
   const videoDuration = useEditorStore((s) => s.videoDuration);
-  const pendingDeleteRanges = useEditorStore((s) => s.pendingDeleteRanges);
-  const clips = useEditorStore((s) => (
-    s.pendingDeleteRanges ? s.clips : (s.previewSnapshot?.clips ?? s.clips)
-  ));
-  const manualCaptions = useEditorStore((s) => (
-    s.pendingDeleteRanges ? s.captions : (s.previewSnapshot?.captions ?? s.captions)
-  ));
-  const transitions = useEditorStore((s) => (
-    s.pendingDeleteRanges ? s.transitions : (s.previewSnapshot?.transitions ?? s.transitions)
-  ));
-  const textOverlays = useEditorStore((s) => (
-    s.pendingDeleteRanges ? s.textOverlays : (s.previewSnapshot?.textOverlays ?? s.textOverlays)
-  ));
+  const clips = useEditorStore((s) => s.previewSnapshot?.clips ?? s.clips);
+  const manualCaptions = useEditorStore((s) => s.previewSnapshot?.captions ?? s.captions);
+  const transitions = useEditorStore((s) => s.previewSnapshot?.transitions ?? s.transitions);
+  const textOverlays = useEditorStore((s) => s.previewSnapshot?.textOverlays ?? s.textOverlays);
 
   const clipById = useMemo(() => new Map(clips.map((clip) => [clip.id, clip])), [clips]);
   const resolvedSources = useMemo(() => resolveProjectSources({
@@ -247,10 +238,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
-
-  useEffect(() => {
-    pendingDeleteRangesRef.current = pendingDeleteRanges;
-  }, [pendingDeleteRanges]);
 
   const getVideoElement = useCallback((layer: LayerId) => (
     layer === 'primary' ? primaryVideoElementRef.current : secondaryVideoRef.current
@@ -389,9 +376,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       ?? (primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null);
     const spareLayerId = getOtherLayer(leadLayerId);
     const secondaryVideo = getVideoElement(spareLayerId);
+    const shouldPreloadUpcomingLayer = Boolean(
+      upcomingEntry
+      && secondaryVideo
+      && (
+        upcomingEntry.sourceId !== primaryEntry.sourceId
+        || upcomingEntry.transitionIn
+        || primaryEntry.transitionOut
+      ),
+    );
 
     if (
-      upcomingEntry
+      shouldPreloadUpcomingLayer
+      && upcomingEntry
       && secondaryVideo
     ) {
       const upcomingSource = sourceById.get(upcomingEntry.sourceId);
@@ -405,6 +402,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       layerClipIdRef.current[spareLayerId] = upcomingEntry.clipId;
     } else {
       layerClipIdRef.current[spareLayerId] = null;
+      layerSourceIdRef.current[spareLayerId] = null;
+      pauseVideo(secondaryVideo);
     }
 
     if (activeEntries.length < 2) {
@@ -521,28 +520,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         setCurrentTime(timelineTime);
       }
       syncLayers(timelineTime, { allowPlay: true });
-
-      const pending = pendingDeleteRangesRef.current;
-      if (pending && pending.ranges.length > 0) {
-        const sorted = [...pending.ranges].sort((a, b) => a.start - b.start);
-        let skipEnd: number | null = null;
-        for (const range of sorted) {
-          if (timelineTime >= range.start && timelineTime < range.end) {
-            skipEnd = range.end;
-          } else if (skipEnd !== null && range.start <= skipEnd) {
-            skipEnd = Math.max(skipEnd, range.end);
-          }
-        }
-        if (skipEnd !== null) {
-          seekToTimelineTime(skipEnd);
-          return;
-        }
-      }
     } else if (nextEntry) {
       const handoffTime = Math.max(nextEntry.timelineStart, primaryEntry.timelineEnd);
       currentTimeRef.current = handoffTime;
       setCurrentTime(handoffTime);
       const nextSourceTime = getEntrySourceTime(nextEntry, handoffTime);
+      const shouldStayOnLeadLayer = nextEntry.sourceId === primaryEntry.sourceId && !nextEntry.transitionIn;
+
+      if (shouldStayOnLeadLayer) {
+        if (Math.abs(primaryVideo.currentTime - nextSourceTime) > DRIFT_EPSILON) {
+          primaryVideo.currentTime = Math.max(0, nextSourceTime);
+        }
+        layerClipIdRef.current[leadLayerRef.current] = nextEntry.clipId;
+        syncLayers(handoffTime, { allowPlay: true });
+        if (playbackIntentRef.current && primaryVideo.paused) {
+          primaryVideo.play().catch(() => {});
+        }
+        return;
+      }
 
       const spareLayerId = getOtherLayer(leadLayerRef.current);
       const spareVideo = getVideoElement(spareLayerId);
@@ -575,7 +570,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current = totalTimelineDuration;
       setCurrentTime(totalTimelineDuration);
     }
-  }, [getLeadVideo, getVideoElement, pauseInactiveVideo, pauseVideo, renderTimeline, seekToTimelineTime, setCurrentTime, setLeadLayerSafely, syncLayers, totalTimelineDuration]);
+  }, [getLeadVideo, getVideoElement, pauseInactiveVideo, pauseVideo, renderTimeline, setCurrentTime, setLeadLayerSafely, syncLayers, totalTimelineDuration]);
 
   useEffect(() => {
     playbackTickRef.current = handlePlaybackTick;
@@ -730,6 +725,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
+              setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.primary;
               if (sourceId) {
                 setSourceDuration(sourceId, el.duration);
@@ -742,20 +738,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               syncAfterSourceLoad('primary', el);
             }}
             onLoadedData={(event) => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
             onCanPlay={(event) => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
             onLoadStart={() => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(false);
+              }
+            }}
+            onError={() => {
+              if (leadLayerRef.current === 'primary') {
+                setIsVideoReady(false);
+                setVideoLoadError('Could not load this video source.');
               }
             }}
             playsInline
@@ -778,6 +783,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             playsInline
             preload="auto"
             onLoadedMetadata={(event) => {
+              setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.secondary;
               if (sourceId) {
                 setSourceDuration(sourceId, event.currentTarget.duration);
@@ -793,20 +799,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
             onLoadedData={(event) => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
             onCanPlay={(event) => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
             onLoadStart={() => {
+              setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(false);
+              }
+            }}
+            onError={() => {
+              if (leadLayerRef.current === 'secondary') {
+                setIsVideoReady(false);
+                setVideoLoadError('Could not load this video source.');
               }
             }}
           />
@@ -835,19 +850,25 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 pointerEvents: 'none',
               }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: 'rgba(255,255,255,0.72)' }}>
-                <div
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: '50%',
-                    border: '2px solid rgba(255,255,255,0.16)',
-                    borderTopColor: 'var(--accent)',
-                    animation: 'spin 0.8s linear infinite',
-                  }}
-                />
-                <span style={{ fontSize: 12, fontFamily: 'var(--font-serif)' }}>Loading video...</span>
-              </div>
+              {videoLoadError ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: 'rgba(255,255,255,0.82)', textAlign: 'center', maxWidth: 220 }}>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-serif)' }}>{videoLoadError}</span>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, color: 'rgba(255,255,255,0.72)' }}>
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: '50%',
+                      border: '2px solid rgba(255,255,255,0.16)',
+                      borderTopColor: 'var(--accent)',
+                      animation: 'spin 0.8s linear infinite',
+                    }}
+                  />
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-serif)' }}>Loading video...</span>
+                </div>
+              )}
             </div>
           )}
 

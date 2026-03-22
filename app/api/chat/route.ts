@@ -1251,7 +1251,7 @@ export async function POST(req: NextRequest) {
 - Silence removal: trim ${settings.silenceRemoval.paddingSeconds}s from each silent gap edge; skip any silent gap shorter than ${settings.silenceRemoval.minDurationSeconds}s after trimming
 - Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
-- Coarse representative frames: taper toward about one frame every ${settings.frameInspection.overviewIntervalSeconds}s on long videos, capped at ${settings.frameInspection.maxOverviewFrames} frames
+- Coarse representative frames: long-video default target is about one frame every ${settings.frameInspection.overviewIntervalSeconds}s before adaptive taper, capped at ${settings.frameInspection.maxOverviewFrames} frames
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
 
@@ -1261,6 +1261,13 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const clipSummaries = ((context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[])
       .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS);
+    const frameCoverage = context?.frameCoverage && typeof context.frameCoverage === 'object'
+      ? context.frameCoverage as {
+          totalOverviewFrames?: unknown;
+          coveredSourceCount?: unknown;
+          averageGapSeconds?: unknown;
+        }
+      : null;
     const contextLines = [
       `Video duration: ${(context?.videoDuration ?? 0).toFixed(2)} seconds`,
       `Number of clips: ${clipSummaries.length || context?.clipCount || 1}`,
@@ -1283,6 +1290,16 @@ Honor these defaults unless the user explicitly asks for something different in 
         return `clip ${c.index} timeline [${fmtSec(start)}–${fmtSec(cursor)}] from source [${fmtSec(c.sourceStart)}–${fmtSec(c.sourceStart + c.sourceDuration)}] at ${(c.speed ?? 1).toFixed(2)}x`;
       });
       contextLines.push(`Timeline: ${summaries.join(' | ')}`);
+    }
+    if (frameCoverage) {
+      const totalOverviewFrames = Number(frameCoverage.totalOverviewFrames ?? 0);
+      const coveredSourceCount = Number(frameCoverage.coveredSourceCount ?? 0);
+      const averageGapSeconds = Number(frameCoverage.averageGapSeconds ?? NaN);
+      if (Number.isFinite(totalOverviewFrames) && totalOverviewFrames > 0) {
+        contextLines.push(
+          `Current representative-frame coverage: ${Math.floor(totalOverviewFrames)} coarse frames across ${Math.max(1, Math.floor(coveredSourceCount))} source clip${Math.floor(coveredSourceCount) === 1 ? '' : 's'}${Number.isFinite(averageGapSeconds) && averageGapSeconds > 0 ? `, average visible gap about ${fmtSec(averageGapSeconds)}` : ''}.`
+        );
+      }
     }
 
     if (priorVisualSearch && (!context?.projectId || priorVisualSearch.projectId === context.projectId)) {
@@ -1457,7 +1474,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Minimum silence duration after padding: ${settings.silenceRemoval.minDurationSeconds}s\n` +
       `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
       `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
-      `- Long-video coarse frame spacing target: ~${settings.frameInspection.overviewIntervalSeconds}s\n` +
+      `- Long-video coarse frame spacing default target: ~${settings.frameInspection.overviewIntervalSeconds}s before adaptive taper\n` +
       `- Max coarse representative frames: ${settings.frameInspection.maxOverviewFrames}\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`

@@ -2,7 +2,13 @@ import { NextResponse } from 'next/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported, getLatestAnalysisJobForAsset } from '@/lib/analysisJobs';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import type { CaptionEntry, ProjectSource, SourceIndexAnalysisState, SourceIndexState } from '@/lib/types';
+import type {
+  CaptionEntry,
+  ProjectSource,
+  SourceIndexAnalysisState,
+  SourceIndexAnalysisStateMap,
+  SourceIndexState,
+} from '@/lib/types';
 
 type ProjectRow = {
   id: string;
@@ -49,34 +55,128 @@ type AssetLookupRow = {
   indexed_at: string | null;
 };
 
-function pickAggregateAnalysis(analyses: SourceIndexAnalysisState[]): SourceIndexAnalysisState | null {
-  if (analyses.length === 0) return null;
+function clampFraction(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
 
-  const running = analyses.find((analysis) => analysis.status === 'running');
-  if (running) return running;
+function getProgressFraction(analysis: SourceIndexAnalysisState | null): number {
+  const completed = analysis?.progress?.completed ?? 0;
+  const total = analysis?.progress?.total ?? 0;
+  if (!Number.isFinite(completed) || !Number.isFinite(total) || total <= 0) return 0;
+  return clampFraction(completed / total);
+}
 
-  const queued = analyses.find((analysis) => analysis.status === 'queued');
-  if (queued) return queued;
+function buildCompletedAnalysis(): SourceIndexAnalysisState {
+  return {
+    jobId: null,
+    status: 'completed',
+    error: null,
+    progress: {
+      stage: 'describing_representative_frames',
+      completed: 1,
+      total: 1,
+      label: 'Completed',
+      etaSeconds: 0,
+    },
+  };
+}
 
-  const failed = analyses.find((analysis) => analysis.status === 'failed');
-  if (failed) return failed;
+function getAudioFraction(analysis: SourceIndexAnalysisState | null, hasTranscript: boolean): number {
+  if (hasTranscript) return 1;
+  const stage = analysis?.progress?.stage;
+  if (!analysis || analysis.status === 'failed') return 0;
+  if (analysis.status === 'completed') return 1;
+  if (stage === 'transcribing_audio') return getProgressFraction(analysis);
+  if (stage === 'detecting_scenes' || stage === 'choosing_representative_frames' || stage === 'describing_representative_frames') {
+    return 1;
+  }
+  return 0;
+}
 
-  if (analyses.every((analysis) => analysis.status === 'completed')) {
-    return {
-      jobId: null,
-      status: 'completed',
-      error: null,
-      progress: {
-        stage: 'describing_representative_frames',
-        completed: analyses.length,
-        total: Math.max(1, analyses.length),
-        label: 'Completed',
-        etaSeconds: 0,
-      },
-    };
+function getVisualFraction(analysis: SourceIndexAnalysisState | null, hasOverview: boolean): number {
+  if (hasOverview) return 1;
+  if (!analysis || analysis.status === 'failed') return 0;
+  if (analysis.status === 'completed') return 1;
+
+  const stage = analysis?.progress?.stage;
+  const progressFraction = getProgressFraction(analysis);
+  switch (stage) {
+    case 'preparing_media':
+      return 0.05;
+    case 'transcribing_audio':
+      return 0.1;
+    case 'detecting_scenes':
+      return 0.2;
+    case 'choosing_representative_frames':
+      return 0.2 + 0.45 * progressFraction;
+    case 'describing_representative_frames':
+      return 0.65 + 0.35 * progressFraction;
+    default:
+      return analysis.status === 'queued' ? 0 : progressFraction;
+  }
+}
+
+type AggregateEntry = {
+  sourceId: string;
+  fileName: string;
+  analysis: SourceIndexAnalysisState | null;
+  hasTranscript: boolean;
+  hasOverview: boolean;
+};
+
+function buildAggregateAnalysis(entries: AggregateEntry[]): SourceIndexAnalysisState | null {
+  if (entries.length === 0) return null;
+
+  const analyses = entries
+    .map((entry) => entry.analysis)
+    .filter((analysis): analysis is SourceIndexAnalysisState => !!analysis);
+
+  const runningEntry = entries.find((entry) => entry.analysis?.status === 'running');
+  const queuedEntry = entries.find((entry) => entry.analysis?.status === 'queued');
+  const failedEntry = entries.find((entry) => entry.analysis?.status === 'failed');
+  const allCompleted = entries.every((entry) => (
+    entry.hasTranscript && entry.hasOverview
+  ));
+
+  if (allCompleted) {
+    return buildCompletedAnalysis();
   }
 
-  return analyses[0] ?? null;
+  const status = runningEntry
+    ? 'running'
+    : queuedEntry
+      ? 'queued'
+      : failedEntry
+        ? 'failed'
+        : analyses.some((analysis) => analysis.status === 'completed')
+          ? 'running'
+          : null;
+
+  if (!status) return null;
+
+  const combinedFraction = entries.reduce((total, entry) => {
+    const audioFraction = getAudioFraction(entry.analysis, entry.hasTranscript);
+    const visualFraction = getVisualFraction(entry.analysis, entry.hasOverview);
+    return total + (audioFraction + visualFraction) / 2;
+  }, 0) / Math.max(entries.length, 1);
+
+  const activeEntry = runningEntry ?? queuedEntry ?? failedEntry ?? entries[0];
+  const etaCandidates = entries
+    .map((entry) => entry.analysis?.progress?.etaSeconds)
+    .filter((eta): eta is number => typeof eta === 'number' && Number.isFinite(eta) && eta > 0);
+
+  return {
+    jobId: activeEntry.analysis?.jobId ?? null,
+    status,
+    error: failedEntry?.analysis?.error ?? null,
+    progress: {
+      stage: activeEntry.analysis?.progress?.stage ?? 'queued',
+      completed: Math.round(clampFraction(combinedFraction) * 1000),
+      total: 1000,
+      label: `${entries.filter((entry) => entry.hasTranscript && entry.hasOverview).length}/${entries.length} clips ready`,
+      etaSeconds: etaCandidates.length > 0 ? Math.max(...etaCandidates) : null,
+    },
+  };
 }
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -133,7 +233,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const sourceIndexFreshBySourceId: Record<string, SourceIndexState> = {};
   const assetIdToSourceId = new Map<string, string>();
   const normalizedSources: Array<ProjectSource & { indexedAt: string | null }> = [];
-  const analyses: SourceIndexAnalysisState[] = [];
+  const analysisBySourceId: SourceIndexAnalysisStateMap = {};
 
   for (const source of sources) {
     let asset = source.storagePath ? assetByStoragePath.get(source.storagePath) ?? null : null;
@@ -168,9 +268,20 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         ?? ((asset.status !== 'ready' || !asset.indexed_at)
           ? await ensureAssetIndexingJob(supabase, id, asset.id)
           : null);
-      if (analysis) {
-        analyses.push(analysis);
-      }
+      analysisBySourceId[source.id] = analysis ?? (asset.status === 'ready' && asset.indexed_at ? buildCompletedAnalysis() : {
+        jobId: null,
+        status: asset.status === 'indexing' ? 'queued' : null,
+        error: null,
+        progress: asset.status === 'indexing'
+          ? {
+              stage: 'queued',
+              completed: 0,
+              total: 1,
+              label: 'Queued',
+              etaSeconds: null,
+            }
+          : null,
+      });
     }
 
     sourceIndexFreshBySourceId[source.id] = {
@@ -190,13 +301,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   }
 
   const assetIds = Array.from(assetIdToSourceId.keys());
-  const activeAnalysis = pickAggregateAnalysis(analyses);
   if (assetIds.length === 0) {
     return NextResponse.json({
       sourceTranscriptCaptions: [],
       sourceOverviewFrames: [],
       sourceIndexFreshBySourceId,
-      analysis: activeAnalysis,
+      analysis: null,
+      analysisBySourceId,
       sources: normalizedSources,
     });
   }
@@ -274,11 +385,23 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       }];
     });
 
+  const aggregateEntries: AggregateEntry[] = normalizedSources
+    .filter((source) => !!source.assetId)
+    .map((source) => ({
+      sourceId: source.id,
+      fileName: source.fileName,
+      analysis: analysisBySourceId[source.id] ?? null,
+      hasTranscript: sourceIndexFreshBySourceId[source.id]?.transcript === true,
+      hasOverview: sourceIndexFreshBySourceId[source.id]?.overview === true,
+    }));
+  const activeAnalysis = buildAggregateAnalysis(aggregateEntries);
+
   return NextResponse.json({
     sourceTranscriptCaptions,
     sourceOverviewFrames,
     sourceIndexFreshBySourceId,
     analysis: activeAnalysis,
+    analysisBySourceId,
     sources: normalizedSources,
   });
 }
