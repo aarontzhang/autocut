@@ -21,6 +21,45 @@ function persistSourceOverviewFrame(frame: {
   };
 }
 
+export function buildProjectEditState(state: ReturnType<typeof useEditorStore.getState>) {
+  return {
+    clips: state.clips,
+    captions: state.captions,
+    transitions: state.transitions,
+    markers: state.markers,
+    textOverlays: state.textOverlays,
+    messages: state.messages,
+    appliedActions: state.appliedActions,
+    aiSettings: state.aiSettings,
+    backgroundTranscript: state.backgroundTranscript,
+    transcriptStatus: state.transcriptStatus,
+    transcriptError: state.transcriptError,
+    sources: state.sources,
+    sourceTranscriptCaptions: state.sourceTranscriptCaptions,
+    sourceOverviewFrames: (state.sourceOverviewFrames ?? [])
+      .filter(frame => !!frame.description?.trim() || !!frame.image)
+      .map(persistSourceOverviewFrame),
+    sourceIndexFreshBySourceId: state.sourceIndexFreshBySourceId,
+    sourceIndex: state.sourceIndex,
+    videoDuration: state.videoDuration,
+  };
+}
+
+export async function saveProjectEditState(
+  projectId: string,
+  state: ReturnType<typeof useEditorStore.getState>,
+) {
+  const editState = buildProjectEditState(state);
+  const res = await fetch(`/api/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edit_state: editState }),
+  });
+  if (!res.ok) {
+    throw new Error('Save failed');
+  }
+}
+
 export function useAutoSave() {
   const clips = useEditorStore(s => s.clips);
   const captions = useEditorStore(s => s.captions);
@@ -58,33 +97,7 @@ export function useAutoSave() {
     timerRef.current = setTimeout(async () => {
       try {
         const state = useEditorStore.getState();
-        const editState = {
-          clips: state.clips,
-          captions: state.captions,
-          transitions: state.transitions,
-          markers: state.markers,
-          textOverlays: state.textOverlays,
-          messages: state.messages,
-          appliedActions: state.appliedActions,
-          aiSettings: state.aiSettings,
-          backgroundTranscript: state.backgroundTranscript,
-          transcriptStatus: state.transcriptStatus,
-          transcriptError: state.transcriptError,
-          sources: state.sources,
-          sourceTranscriptCaptions: state.sourceTranscriptCaptions,
-          sourceOverviewFrames: (state.sourceOverviewFrames ?? [])
-            .filter(frame => !!frame.description?.trim() || !!frame.image)
-            .map(persistSourceOverviewFrame),
-          sourceIndexFreshBySourceId: state.sourceIndexFreshBySourceId,
-          sourceIndex: state.sourceIndex,
-          videoDuration: state.videoDuration,
-        };
-        const res = await fetch(`/api/projects/${currentProjectId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ edit_state: editState }),
-        });
-        if (!res.ok) throw new Error('Save failed');
+        await saveProjectEditState(currentProjectId, state);
         setSaveStatus('saved');
         setTimeout(() => {
           if (useEditorStore.getState().saveStatus === 'saved') {

@@ -10,7 +10,7 @@ import MediaPanel from './MediaPanel';
 import Timeline from './Timeline';
 import ChatSidebar from '../chat/ChatSidebar';
 import ExportProgress from './ExportProgress';
-import { useAutoSave } from '@/lib/useAutoSave';
+import { saveProjectEditState, useAutoSave } from '@/lib/useAutoSave';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { createSignedUrls, uploadProjectMedia } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
@@ -26,6 +26,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const playerRef = useRef<VideoPlayerHandle>(null);
   const lastSignedMediaRefreshAtRef = useRef(0);
   const projectLoadSequenceRef = useRef(0);
+  const projectSyncQueueRef = useRef(Promise.resolve());
 
   const [chatWidth, setChatWidth] = useState(340);
   const [timelineHeight, setTimelineHeight] = useState(300);
@@ -142,6 +143,20 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     });
     return sourceIndexData;
   }, [hydrateSourceIndex, updateSource]);
+
+  const queueProjectStateSync = useCallback((targetProjectId: string) => {
+    projectSyncQueueRef.current = projectSyncQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await saveProjectEditState(targetProjectId, useEditorStore.getState());
+        await refreshSourceIndex(targetProjectId);
+      })
+      .catch((error) => {
+        console.warn('Failed to sync project sources:', error);
+      });
+
+    return projectSyncQueueRef.current;
+  }, [refreshSourceIndex]);
 
   useAutoSave();
 
@@ -324,7 +339,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       try {
         const sourceIndexData = await refreshSourceIndex(projectId);
         const status = sourceIndexData?.analysis?.status;
-        if (!cancelled && (status === 'queued' || status === 'running')) {
+        const hasPendingIndexedSources = Array.isArray(sourceIndexData?.sources)
+          && sourceIndexData.sources.some((source: { status?: unknown }) => (
+            source?.status === 'pending' || source?.status === 'indexing'
+          ));
+        if (!cancelled && (status === 'queued' || status === 'running' || hasPendingIndexedSources)) {
           if (intervalId === null) {
             intervalId = window.setInterval(() => {
               void refresh();
@@ -442,6 +461,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       },
     );
 
+    void queueProjectStateSync(targetProjectId);
+
     if (!user) return;
 
     await Promise.all(addedSources.map(async (source, index) => {
@@ -454,25 +475,32 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           assetId: uploaded.assetId,
           status: uploaded.assetId ? 'indexing' : 'pending',
         });
+        void queueProjectStateSync(targetProjectId);
         handleStorageUploadSuccess();
       } catch (error) {
         console.warn('Background upload failed:', error);
         updateSource(source.id, { status: 'error' });
+        void queueProjectStateSync(targetProjectId);
         handleStorageUploadError(error);
       }
     }));
-  }, [handleStorageUploadError, handleStorageUploadSuccess, importSourceDrafts, projectId, readVideoDuration, updateSource, user]);
+    await queueProjectStateSync(targetProjectId);
+  }, [handleStorageUploadError, handleStorageUploadSuccess, importSourceDrafts, projectId, queueProjectStateSync, readVideoDuration, updateSource, user]);
+
+  const hasDraggedVideoFiles = useCallback((dataTransfer: DataTransfer) => (
+    Array.from(dataTransfer.files).some((file) => file.type.startsWith('video/'))
+  ), []);
 
   const handleRootDrop = useCallback((e: React.DragEvent) => {
+    if (!hasDraggedVideoFiles(e.dataTransfer)) return;
     e.preventDefault();
     void importSources(Array.from(e.dataTransfer.files), 'append');
-  }, [importSources]);
+  }, [hasDraggedVideoFiles, importSources]);
 
   const handleRootDragOver = useCallback((e: React.DragEvent) => {
-    if (!hasSources) {
-      e.preventDefault();
-    }
-  }, [hasSources]);
+    if (!hasDraggedVideoFiles(e.dataTransfer)) return;
+    e.preventDefault();
+  }, [hasDraggedVideoFiles]);
 
   const isActiveProjectReady = currentProjectId === projectId;
   const shouldShowProjectLoading = Boolean(projectId) && (isProjectLoading || !isActiveProjectReady);
@@ -480,8 +508,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   return (
     <div
       style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)', overflow: 'hidden' }}
-      onDrop={!hasSources ? handleRootDrop : undefined}
-      onDragOver={!hasSources ? handleRootDragOver : undefined}
+      onDrop={handleRootDrop}
+      onDragOver={handleRootDragOver}
     >
       <TopBar />
       {(storageNotice || quota?.warningLevel === 'warning' || quota?.warningLevel === 'critical' || quota?.warningLevel === 'limit') && (

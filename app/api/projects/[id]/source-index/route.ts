@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ensureAssetIndexingJob, getLatestAnalysisJobForAsset } from '@/lib/analysisJobs';
+import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported, getLatestAnalysisJobForAsset } from '@/lib/analysisJobs';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import type { CaptionEntry, ProjectSource, SourceIndexAnalysisState, SourceIndexState } from '@/lib/types';
@@ -40,6 +40,43 @@ function buildProjectSources(project: ProjectRow): ProjectSource[] {
     status: project.video_path ? 'pending' : 'ready',
     isPrimary: true,
   }];
+}
+
+type AssetLookupRow = {
+  id: string;
+  storage_path: string;
+  status: ProjectSource['status'];
+  indexed_at: string | null;
+};
+
+function pickAggregateAnalysis(analyses: SourceIndexAnalysisState[]): SourceIndexAnalysisState | null {
+  if (analyses.length === 0) return null;
+
+  const running = analyses.find((analysis) => analysis.status === 'running');
+  if (running) return running;
+
+  const queued = analyses.find((analysis) => analysis.status === 'queued');
+  if (queued) return queued;
+
+  const failed = analyses.find((analysis) => analysis.status === 'failed');
+  if (failed) return failed;
+
+  if (analyses.every((analysis) => analysis.status === 'completed')) {
+    return {
+      jobId: null,
+      status: 'completed',
+      error: null,
+      progress: {
+        stage: 'describing_representative_frames',
+        completed: analyses.length,
+        total: Math.max(1, analyses.length),
+        label: 'Completed',
+        etaSeconds: 0,
+      },
+    };
+  }
+
+  return analyses[0] ?? null;
 }
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -90,21 +127,38 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (assetError) return NextResponse.json({ error: assetError.message }, { status: 500 });
 
   const assetByStoragePath = new Map(
-    ((assetRows ?? []) as Array<{
-      id: string;
-      storage_path: string;
-      status: ProjectSource['status'];
-      indexed_at: string | null;
-    }>).map((asset) => [asset.storage_path, asset]),
+    ((assetRows ?? []) as AssetLookupRow[]).map((asset) => [asset.storage_path, asset]),
   );
 
   const sourceIndexFreshBySourceId: Record<string, SourceIndexState> = {};
   const assetIdToSourceId = new Map<string, string>();
   const normalizedSources: Array<ProjectSource & { indexedAt: string | null }> = [];
-  let activeAnalysis: SourceIndexAnalysisState | null = null;
+  const analyses: SourceIndexAnalysisState[] = [];
 
   for (const source of sources) {
-    const asset = source.storagePath ? assetByStoragePath.get(source.storagePath) ?? null : null;
+    let asset = source.storagePath ? assetByStoragePath.get(source.storagePath) ?? null : null;
+    if (!asset && source.storagePath) {
+      try {
+        const ensuredAsset = await ensurePrimaryMediaAssetIfSupported(supabase, id, source.storagePath);
+        if (ensuredAsset) {
+          asset = {
+            id: ensuredAsset.id,
+            storage_path: ensuredAsset.storagePath,
+            status: ensuredAsset.status,
+            indexed_at: ensuredAsset.indexedAt,
+          };
+          assetByStoragePath.set(source.storagePath, asset);
+        }
+      } catch (error) {
+        console.warn('[source-index] failed to ensure media asset for source', {
+          projectId: id,
+          sourceId: source.id,
+          storagePath: source.storagePath,
+          error,
+        });
+      }
+    }
+
     if (asset?.id) {
       assetIdToSourceId.set(asset.id, source.id);
     }
@@ -114,8 +168,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         ?? ((asset.status !== 'ready' || !asset.indexed_at)
           ? await ensureAssetIndexingJob(supabase, id, asset.id)
           : null);
-      if (!activeAnalysis || analysis?.status === 'running' || analysis?.status === 'queued') {
-        activeAnalysis = analysis ?? activeAnalysis;
+      if (analysis) {
+        analyses.push(analysis);
       }
     }
 
@@ -136,6 +190,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   }
 
   const assetIds = Array.from(assetIdToSourceId.keys());
+  const activeAnalysis = pickAggregateAnalysis(analyses);
   if (assetIds.length === 0) {
     return NextResponse.json({
       sourceTranscriptCaptions: [],
