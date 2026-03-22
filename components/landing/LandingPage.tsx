@@ -255,7 +255,7 @@ function HeroEditorMock() {
                 maxWidth: '88%',
                 lineHeight: 1.5,
               }}>
-                Trim the long traverses and keep the sharpest turns
+                Cut the slower parts and keep the best turns
               </div>
             </div>
 
