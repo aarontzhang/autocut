@@ -424,6 +424,15 @@ function buildAggregateAnalysis(states: SourceIndexAnalysisState[]): SourceIndex
   };
 }
 
+function shouldEnsureIndexingJob(input: {
+  asset: AssetLookupRow;
+  latestJob: AnalysisJobRow | null;
+}) {
+  if (input.latestJob) return false;
+  if (input.asset.indexed_at) return false;
+  return input.asset.status === 'pending';
+}
+
 async function loadProjectAndSources(projectId: string, userId: string) {
   const supabase = await getSupabaseServer();
   const { data: project, error: projectError } = await supabase
@@ -495,7 +504,7 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
     if (asset?.id) {
       assetIdToSourceId.set(asset.id, source.id);
       let latestJob = await getLatestAnalysisJobRow(projectId, asset.id);
-      if (!latestJob && (asset.status !== 'ready' || !asset.indexed_at)) {
+      if (shouldEnsureIndexingJob({ asset, latestJob })) {
         await ensureAssetIndexingJob(supabase, projectId, asset.id);
         latestJob = await getLatestAnalysisJobRow(projectId, asset.id);
       }

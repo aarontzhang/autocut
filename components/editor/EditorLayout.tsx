@@ -366,8 +366,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
     let cancelled = false;
     let intervalId: number | null = null;
+    let inFlight = false;
 
     const refresh = async () => {
+      if (cancelled || inFlight || document.visibilityState !== 'visible') return;
+      inFlight = true;
       try {
         const sourceIndexData = await refreshSourceIndex(projectId);
         const analysisBySourceId = sourceIndexData?.analysisBySourceId && typeof sourceIndexData.analysisBySourceId === 'object'
@@ -394,6 +397,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         if (!cancelled) {
           console.warn('Failed to refresh source index:', error);
         }
+      } finally {
+        inFlight = false;
       }
     };
 

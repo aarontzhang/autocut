@@ -985,6 +985,13 @@ function buildServerSourceAnalysisCards(params: {
   actionLoadingKey: string | null;
   onAction: (sourceId: string, action: 'pause' | 'resume') => void;
 }): ServerSourceAnalysisCard[] {
+  const shouldRenderTask = (task: SourceIndexTaskState) => (
+    task.status === 'queued'
+    || task.status === 'running'
+    || task.status === 'paused'
+    || task.status === 'failed'
+  );
+
   return params.sources.flatMap((source, index) => {
     const analysis = params.analysisBySourceId[source.sourceId] ?? null;
     const audioTask = analysis?.audio ?? {
@@ -1025,10 +1032,14 @@ function buildServerSourceAnalysisCards(params: {
       };
     };
 
-    return [
-      buildCard('audio', audioTask),
-      buildCard('visual', visualTask),
-    ];
+    const cards: ServerSourceAnalysisCard[] = [];
+    if (shouldRenderTask(audioTask)) {
+      cards.push(buildCard('audio', audioTask));
+    }
+    if (shouldRenderTask(visualTask)) {
+      cards.push(buildCard('visual', visualTask));
+    }
+    return cards;
   });
 }
 
