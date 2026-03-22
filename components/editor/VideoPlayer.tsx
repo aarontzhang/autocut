@@ -260,7 +260,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     leadLayerRef.current = nextLayer;
     setLeadLayer(nextLayer);
     syncExternalVideoRef(nextLayer);
-  }, [syncExternalVideoRef]);
+    const nextVideo = getVideoElement(nextLayer);
+    if (nextVideo) {
+      setIsVideoReady(nextVideo.readyState >= 2);
+      if (nextVideo.videoWidth > 0 && nextVideo.videoHeight > 0) {
+        setVideoDimensions({ width: nextVideo.videoWidth, height: nextVideo.videoHeight });
+      }
+    }
+  }, [getVideoElement, syncExternalVideoRef]);
 
   const setPrimaryVideoElement = useCallback((node: HTMLVideoElement | null) => {
     primaryVideoElementRef.current = node;
@@ -405,9 +412,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       secondaryVideo.currentTime = Math.max(0, incomingSourceTime);
     }
 
-    const mix = getTransitionMix(boundary, timelineTime);
-    applyClipEffects(primaryVideo, primaryClip, mix.outgoingVolume);
-    applyClipEffects(secondaryVideo, incomingClip, mix.incomingVolume);
+    // Keep transition audio as a single active stream to avoid repeated speech
+    // on jump-cut style transitions while still rendering the visual blend.
+    applyClipEffects(primaryVideo, primaryClip, 1);
+    applyClipEffects(secondaryVideo, incomingClip, 0);
 
     if (options?.allowPlay && playbackIntentRef.current) {
       if (primaryVideo.paused) {
