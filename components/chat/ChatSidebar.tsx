@@ -1410,11 +1410,59 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
   }
 }
 
+function ReviewCheckboxButton({
+  checked,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      data-checked={checked ? 'true' : 'false'}
+      className="chat-review-checkbox"
+      onClick={(event) => {
+        event.stopPropagation();
+        onChange(!checked);
+      }}
+    >
+      <span className="chat-review-checkbox__box" aria-hidden="true">
+        <svg
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{
+            width: 14,
+            height: 14,
+            opacity: checked ? 1 : 0,
+            transform: checked ? 'scale(1)' : 'scale(0.72)',
+            transition: 'opacity 140ms ease, transform 140ms ease',
+          }}
+        >
+          <path
+            d="M3.5 8.4L6.4 11.2L12.5 4.8"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
+    </button>
+  );
+}
+
 function ActionDetails({ action }: { action: EditAction }) {
   if (action.type === 'delete_ranges') {
     const ranges = action.ranges ?? [];
     return (
-      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+      <div style={{ padding: '6px 12px 8px', display: 'flex', flexDirection: 'column' }}>
         {ranges.map((r, i) => (
           <div key={i} style={{
             padding: '4px 0',
@@ -1506,7 +1554,7 @@ function ActionDetails({ action }: { action: EditAction }) {
 
   if (action.type === 'add_captions') {
     return (
-      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+      <div style={{ padding: '6px 12px 8px', display: 'flex', flexDirection: 'column' }}>
         {(action.captions ?? []).map((c, i) => (
           <div key={i} style={{
             padding: '3px 0',
@@ -1580,7 +1628,7 @@ function ActionDetails({ action }: { action: EditAction }) {
 
   if (action.type === 'add_text_overlay') {
     return (
-      <div style={{ padding: '6px 12px 8px', maxHeight: 184, overflowY: 'auto' }}>
+      <div style={{ padding: '6px 12px 8px', display: 'flex', flexDirection: 'column' }}>
         {(action.textOverlays ?? []).map((t, i) => (
           <div key={i} style={{
             padding: '2px 0',
@@ -2220,17 +2268,28 @@ function AssistantMessage({
             <ActionDetails action={activeReviewAction!} />
             {batchReviewActive && reviewSteps.length > 0 && (
               <div style={{ padding: '8px 12px 10px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 11, color: 'var(--fg-secondary)', fontFamily: 'var(--font-serif)' }}>
-                  <input
-                    type="checkbox"
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    marginBottom: 10,
+                    fontSize: 11,
+                    color: 'var(--fg-secondary)',
+                    fontFamily: 'var(--font-serif)',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => toggleReviewAll(!allReviewItemsChecked)}
+                >
+                  <ReviewCheckboxButton
                     checked={allReviewItemsChecked}
-                    onChange={(event) => toggleReviewAll(event.target.checked)}
-                    style={{ accentColor: 'var(--accent)' }}
+                    onChange={toggleReviewAll}
+                    ariaLabel={allReviewItemsChecked ? 'Deselect all proposed edits' : 'Select all proposed edits'}
                   />
-                  Select all
+                  <span>Select all</span>
                   <span style={{ marginLeft: 'auto', color: 'var(--fg-muted)' }}>{checkedReviewCount}/{reviewSteps.length} selected</span>
-                </label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {reviewSteps.map((item) => {
                     const isFocused = activeReviewFocusItemId === item.id;
                     return (
@@ -2239,21 +2298,20 @@ function AssistantMessage({
                         style={{
                           display: 'flex',
                           alignItems: 'center',
-                          gap: 8,
-                          padding: '7px 8px',
-                          borderRadius: 6,
-                          border: isFocused ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(255,255,255,0.08)',
-                          background: isFocused ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
+                          gap: 10,
+                          padding: '10px 12px',
+                          borderRadius: 12,
+                          border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                          background: isFocused
+                            ? 'linear-gradient(180deg, rgba(33,212,255,0.12), rgba(255,255,255,0.04))'
+                            : 'linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02))',
+                          boxShadow: isFocused ? '0 0 0 1px rgba(33,212,255,0.08)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
                         }}
                       >
-                        <input
-                          type="checkbox"
+                        <ReviewCheckboxButton
                           checked={item.checked}
-                          onChange={(event) => {
-                            event.stopPropagation();
-                            toggleReviewItem(item.id, event.target.checked);
-                          }}
-                          style={{ accentColor: 'var(--accent)', margin: 0 }}
+                          onChange={(checked) => toggleReviewItem(item.id, checked)}
+                          ariaLabel={`${item.checked ? 'Deselect' : 'Select'} ${item.label}`}
                         />
                         <button
                           type="button"
@@ -2277,11 +2335,16 @@ function AssistantMessage({
                             <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontWeight: 600, fontFamily: 'var(--font-serif)' }}>
                               {item.label}
                             </span>
-                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
                               {item.summary || item.action.message}
                             </span>
                           </span>
-                          <span style={{ fontSize: 10, color: isFocused ? '#d1d5db' : 'var(--fg-muted)', fontFamily: 'var(--font-serif)', flexShrink: 0 }}>
+                          <span style={{
+                            fontSize: 10,
+                            color: isFocused ? 'var(--accent-strong)' : 'var(--fg-muted)',
+                            fontFamily: 'var(--font-serif)',
+                            flexShrink: 0,
+                          }}>
                             {isFocused ? 'Previewing' : 'Preview'}
                           </span>
                         </button>
