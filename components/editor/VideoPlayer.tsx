@@ -378,7 +378,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
     if (
       upcomingEntry
-      && upcomingEntry.sourceId !== primaryEntry.sourceId
       && secondaryVideo
     ) {
       const upcomingSource = sourceById.get(upcomingEntry.sourceId);
@@ -528,15 +527,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setCurrentTime(handoffTime);
       const nextSourceTime = getEntrySourceTime(nextEntry, handoffTime);
 
-      if (nextEntry.sourceId === primaryEntry.sourceId) {
-        primaryVideo.currentTime = Math.max(0, nextSourceTime);
-        syncLayers(handoffTime, { allowPlay: true });
-        if (playbackIntentRef.current && primaryVideo.paused) {
-          primaryVideo.play().catch(() => {});
-        }
-        return;
-      }
-
       const spareLayerId = getOtherLayer(leadLayerRef.current);
       const spareVideo = getVideoElement(spareLayerId);
       const spareIsReady = Boolean(
@@ -551,6 +541,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         }
         pauseVideo(primaryVideo);
         setLeadLayerSafely(spareLayerId);
+      } else {
+        primaryVideo.currentTime = Math.max(0, nextSourceTime);
       }
 
       syncLayers(handoffTime, { allowPlay: true });
