@@ -58,8 +58,13 @@ function buildResolvedEntry(
   runtime: SourceRuntimeMedia | undefined,
   fallback?: LegacyPrimarySourceInput,
 ): ResolvedProjectSourceMedia {
-  const playerUrl = runtime?.playerUrl ?? fallback?.videoUrl ?? '';
-  const processingUrl = runtime?.processingUrl ?? fallback?.processingVideoUrl ?? fallback?.videoUrl ?? '';
+  const playerUrl = runtime?.objectUrl || runtime?.playerUrl || fallback?.videoUrl || '';
+  const processingUrl = runtime?.processingUrl
+    || runtime?.objectUrl
+    || runtime?.playerUrl
+    || fallback?.processingVideoUrl
+    || fallback?.videoUrl
+    || '';
   const duration = source.duration > 0 ? source.duration : Math.max(0, fallback?.videoDuration ?? 0);
 
   return {
@@ -93,8 +98,13 @@ function buildFallbackPrimarySource(
     assetId: null,
     status: fallback.storagePath ? 'pending' : 'ready',
     isPrimary: true,
-    playerUrl: runtime?.playerUrl ?? fallback.videoUrl ?? '',
-    processingUrl: runtime?.processingUrl ?? fallback.processingVideoUrl ?? fallback.videoUrl ?? '',
+    playerUrl: runtime?.objectUrl || runtime?.playerUrl || fallback.videoUrl || '',
+    processingUrl: runtime?.processingUrl
+      || runtime?.objectUrl
+      || runtime?.playerUrl
+      || fallback.processingVideoUrl
+      || fallback.videoUrl
+      || '',
   };
 }
 

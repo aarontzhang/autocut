@@ -40,7 +40,12 @@ async function proxyProjectMedia(request: NextRequest, params: Promise<{ id: str
     ? project.edit_state.sources as ProjectSource[]
     : [];
   const requestedSource = persistedSources.find((source) => source.id === requestedSourceId) ?? null;
-  const storagePath = requestedSource?.storagePath ?? project?.video_path ?? null;
+  if (requestedSourceId !== MAIN_SOURCE_ID && !requestedSource) {
+    return NextResponse.json({ error: 'Requested source not found' }, { status: 404 });
+  }
+  const storagePath = requestedSourceId === MAIN_SOURCE_ID
+    ? (requestedSource?.storagePath ?? project?.video_path ?? null)
+    : (requestedSource?.storagePath ?? null);
 
   if (!storagePath) {
     return NextResponse.json({ error: 'Project media not found' }, { status: 404 });

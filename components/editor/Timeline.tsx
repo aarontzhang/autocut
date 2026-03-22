@@ -201,6 +201,12 @@ export default function Timeline({
     seekToTimelineTime(pxToTimelineTime(clientX, containerEl));
   }, [pxToTimelineTime, seekToTimelineTime]);
 
+  const canHandleTimelineDrop = useCallback((dataTransfer: DataTransfer) => (
+    Array.from(dataTransfer.types).includes('application/x-autocut-source-id')
+    || Array.from(dataTransfer.types).includes('Files')
+    || dataTransfer.files.length > 0
+  ), []);
+
   const handleTrackDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     const container = scrollRef.current;
     if (!container) return;
@@ -217,6 +223,12 @@ export default function Timeline({
       void onImportSources(files, 'insert', timelineTime);
     }
   }, [insertClipFromSource, onImportSources, pxToTimelineTime]);
+
+  const handleTimelineDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!canHandleTimelineDrop(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }, [canHandleTimelineDrop]);
 
   const scrubPlayhead = useCallback((clientX: number, dragInfo: PlayheadDragInfo) => {
     const el = scrollRef.current;
@@ -389,7 +401,11 @@ export default function Timeline({
           {hasTransitions && <EffectHeader label="Trans." color="rgba(255,255,255,0.5)" />}
         </div>
 
-        <div style={{ position: 'relative', width: totalW, minWidth: '100%', flexShrink: 0 }}>
+        <div
+          style={{ position: 'relative', width: totalW, minWidth: '100%', flexShrink: 0 }}
+          onDragOver={handleTimelineDragOver}
+          onDrop={handleTrackDrop}
+        >
           <div
             style={{
               height: RULER_H,
@@ -495,11 +511,7 @@ export default function Timeline({
             height={TRACK_HEIGHT}
             onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}
             onDrop={handleTrackDrop}
-            onDragOver={(event) => {
-              if (Array.from(event.dataTransfer.types).includes('application/x-autocut-source-id') || event.dataTransfer.files.length > 0) {
-                event.preventDefault();
-              }
-            }}
+            onDragOver={handleTimelineDragOver}
           >
             {videoDuration > 0 && schedule.map((entry, index) => {
               const clip = clips.find(item => item.id === entry.clipId);
@@ -524,7 +536,12 @@ export default function Timeline({
             })}
           </TrackRow>
 
-          <TrackRow height={TRACK_HEIGHT} onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}>
+          <TrackRow
+            height={TRACK_HEIGHT}
+            onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}
+            onDrop={handleTrackDrop}
+            onDragOver={handleTimelineDragOver}
+          >
             {videoDuration > 0 && schedule.map((entry) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;

@@ -4,6 +4,13 @@ import { useMemo, useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { formatTimeShort } from '@/lib/timelineUtils';
 
+function formatSourceStatus(status: string) {
+  if (status === 'ready') return 'Ready';
+  if (status === 'indexing') return 'Indexing';
+  if (status === 'error') return 'Issue';
+  return 'Pending';
+}
+
 export default function MediaPanel({
   onImportSources,
 }: {
@@ -18,6 +25,11 @@ export default function MediaPanel({
     sources.map((source) => ({
       ...source,
       previewUrl: sourceRuntimeById[source.id]?.objectUrl || sourceRuntimeById[source.id]?.playerUrl || '',
+      isPlayable: Boolean(
+        sourceRuntimeById[source.id]?.objectUrl
+        || sourceRuntimeById[source.id]?.playerUrl
+        || sourceRuntimeById[source.id]?.file,
+      ),
     }))
   ), [sourceRuntimeById, sources]);
 
@@ -47,7 +59,7 @@ export default function MediaPanel({
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {sourceCards.map((source) => (
           <div
             key={source.id}
@@ -58,21 +70,28 @@ export default function MediaPanel({
               event.dataTransfer.setData('text/plain', source.fileName);
             }}
             style={{
-              borderRadius: 10,
+              position: 'relative',
+              flex: '1 1 0',
+              minHeight: 0,
+              borderRadius: 14,
               overflow: 'hidden',
-              border: source.isPrimary ? '1px solid rgba(96,165,250,0.55)' : '1px solid var(--border-mid)',
+              border: '1px solid var(--border-mid)',
               background: 'var(--bg-elevated)',
               cursor: 'grab',
+              boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.03)',
             }}
           >
-            <div style={{ width: '100%', aspectRatio: '16/9', background: '#000', position: 'relative', overflow: 'hidden' }}>
+            <div style={{ position: 'absolute', inset: 0, background: '#000' }}>
               {source.previewUrl ? (
                 <video
                   src={source.previewUrl}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  draggable={false}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
                   muted
                   preload="metadata"
                   playsInline
+                  disablePictureInPicture
+                  controls={false}
                 />
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)' }}>
@@ -83,14 +102,18 @@ export default function MediaPanel({
                 <div style={{
                   position: 'absolute', bottom: 8, left: 8,
                   fontSize: 10, fontFamily: 'var(--font-serif)', color: '#fff',
-                  background: 'rgba(0,0,0,0.7)', padding: '2px 6px', borderRadius: 4,
+                  background: 'rgba(0,0,0,0.68)', padding: '2px 6px', borderRadius: 999,
                 }}>
                   {formatTimeShort(source.duration)}
                 </div>
               )}
               <button
                 type="button"
-                onClick={() => appendClipFromSource(source.id)}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  appendClipFromSource(source.id);
+                }}
                 style={{
                   position: 'absolute',
                   right: 8,
@@ -105,33 +128,40 @@ export default function MediaPanel({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  zIndex: 2,
                 }}
                 title="Append to timeline"
               >
                 +
               </button>
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  background: 'linear-gradient(180deg, rgba(0,0,0,0.02) 0%, rgba(0,0,0,0.08) 46%, rgba(0,0,0,0.72) 100%)',
+                  pointerEvents: 'none',
+                }}
+              />
             </div>
-            <div style={{ padding: '10px 11px', display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg-primary)', lineHeight: 1.4, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {source.fileName || 'Source video'}
-                </p>
-                {source.isPrimary && (
-                  <span style={{
-                    flexShrink: 0,
-                    fontSize: 9,
-                    padding: '2px 5px',
-                    borderRadius: 999,
-                    background: 'rgba(59,130,246,0.18)',
-                    color: 'rgba(191,219,254,0.95)',
-                    fontFamily: 'var(--font-serif)',
-                  }}>
-                    Primary
-                  </span>
-                )}
-              </div>
-              <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'capitalize' }}>
-                {source.status}
+            <div
+              style={{
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                bottom: 0,
+                padding: '10px 44px 10px 11px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 3,
+                pointerEvents: 'none',
+              }}
+            >
+              <p style={{ fontSize: 12, fontWeight: 600, color: '#fff', lineHeight: 1.35, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {source.fileName || 'Source video'}
+              </p>
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.72)', fontFamily: 'var(--font-serif)' }}>
+                {formatSourceStatus(source.status)}
+                {source.status !== 'error' && source.isPlayable ? ' • Playable now' : ''}
               </span>
             </div>
           </div>
