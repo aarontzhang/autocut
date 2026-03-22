@@ -407,6 +407,39 @@ function replaceEntriesForSources<T extends { sourceId?: string | null }>(
   return merged.length > 0 ? merged : null;
 }
 
+function hasEntriesForSource<T extends { sourceId?: string | null }>(
+  entries: T[] | null | undefined,
+  sourceId: string,
+) {
+  return (entries ?? []).some((entry) => normalizeSourceId(entry.sourceId) === sourceId);
+}
+
+function mergeHydratedEntriesForSources<T extends { sourceId?: string | null }>(
+  current: T[] | null,
+  incoming: T[] | null,
+  sourceIds: string[],
+  preservedSourceIds?: Set<string>,
+): T[] | null {
+  if (incoming === null) {
+    return preservedSourceIds && preservedSourceIds.size > 0
+      ? current
+      : null;
+  }
+
+  let next = current;
+  for (const sourceId of sourceIds) {
+    const incomingForSource = incoming.filter((entry) => normalizeSourceId(entry.sourceId) === sourceId);
+    if (incomingForSource.length > 0) {
+      next = replaceEntriesForSource(next, sourceId, incomingForSource);
+      continue;
+    }
+    if (!preservedSourceIds?.has(sourceId)) {
+      next = replaceEntriesForSource(next, sourceId, null);
+    }
+  }
+  return next;
+}
+
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   silenceRemoval: {
     paddingSeconds: 0.12,
@@ -1950,18 +1983,68 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   hydrateSourceIndex: (payload) => set((state) => {
     const validSourceIds = new Set(state.sources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
-    const sourceTranscriptCaptions = payload.sourceTranscriptCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
-      .filter((entry): entry is CaptionEntry => !!entry) ?? state.sourceTranscriptCaptions;
-    const sourceOverviewFrames = payload.sourceOverviewFrames
-      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
-      .filter((entry): entry is SourceIndexedFrame => !!entry) ?? state.sourceOverviewFrames;
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
-    const sourceIndexFreshBySourceId = mergeSourceIndexStateMap(
+    const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running';
+    const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
+      .filter((entry): entry is CaptionEntry => !!entry) ?? null;
+    const normalizedIncomingOverviewFrames = payload.sourceOverviewFrames
+      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
+      .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
+    const sourceIds = state.sources.map((source) => source.id);
+
+    const preservedTranscriptSources = new Set<string>();
+    const preservedOverviewSources = new Set<string>();
+    for (const sourceId of sourceIds) {
+      if (
+        isAnalysisActive
+        && !hasEntriesForSource(normalizedIncomingTranscriptCaptions, sourceId)
+        && hasEntriesForSource(state.sourceTranscriptCaptions, sourceId)
+      ) {
+        preservedTranscriptSources.add(sourceId);
+      }
+      if (
+        isAnalysisActive
+        && !hasEntriesForSource(normalizedIncomingOverviewFrames, sourceId)
+        && hasEntriesForSource(state.sourceOverviewFrames, sourceId)
+      ) {
+        preservedOverviewSources.add(sourceId);
+      }
+    }
+
+    const sourceTranscriptCaptions = payload.sourceTranscriptCaptions !== undefined
+      ? mergeHydratedEntriesForSources(
+          state.sourceTranscriptCaptions,
+          normalizedIncomingTranscriptCaptions,
+          sourceIds,
+          preservedTranscriptSources,
+        )
+      : state.sourceTranscriptCaptions;
+    const sourceOverviewFrames = payload.sourceOverviewFrames !== undefined
+      ? mergeHydratedEntriesForSources(
+          state.sourceOverviewFrames,
+          normalizedIncomingOverviewFrames,
+          sourceIds,
+          preservedOverviewSources,
+        )
+      : state.sourceOverviewFrames;
+    let sourceIndexFreshBySourceId = mergeSourceIndexStateMap(
       state.sourceIndexFreshBySourceId,
       payload.sourceIndexFreshBySourceId,
       state.sources,
     );
+    for (const sourceId of sourceIds) {
+      if (hasEntriesForSource(sourceTranscriptCaptions, sourceId)) {
+        sourceIndexFreshBySourceId = patchSourceIndexState(sourceIndexFreshBySourceId, sourceId, {
+          transcript: true,
+        });
+      }
+      if (hasEntriesForSource(sourceOverviewFrames, sourceId)) {
+        sourceIndexFreshBySourceId = patchSourceIndexState(sourceIndexFreshBySourceId, sourceId, {
+          overview: true,
+        });
+      }
+    }
     const transcriptStatus = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
       ? (analysis?.status === 'running' ? 'loading' : 'done')
       : analysis?.status === 'queued' || analysis?.status === 'running'

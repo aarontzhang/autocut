@@ -15,8 +15,7 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import { createSignedUrls, uploadProjectMedia } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
-import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { resolvePrimaryProjectSource } from '@/lib/sourceMedia';
+import { resolveProjectSources } from '@/lib/sourceMedia';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -239,7 +238,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   }, [currentTime, deleteSelectedItem, redo, setCurrentTime, undo]);
 
   useEffect(() => {
-    const primarySource = resolvePrimaryProjectSource({
+    const availableSources = resolveProjectSources({
       sources,
       runtimeBySourceId: sourceRuntimeById,
       primaryFallback: {
@@ -249,40 +248,65 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         processingVideoUrl,
         videoDuration,
       },
-    });
-    const source = primarySource?.source ?? null;
-    const isTranscriptFresh = sourceIndexFreshBySourceId[MAIN_SOURCE_ID]?.transcript;
-    if (!source || videoDuration <= 0 || isTranscriptFresh || transcriptStatus === 'loading' || transcriptStatus === 'error' || document.hidden || playbackActive) {
+    }).filter((entry) => entry.source && entry.duration > 0);
+    const shouldUseServerIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+    const sourcesToTranscribe = availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
+    if (
+      shouldUseServerIndex
+      || sourcesToTranscribe.length === 0
+      || transcriptStatus === 'loading'
+      || transcriptStatus === 'error'
+      || document.hidden
+      || playbackActive
+    ) {
       return;
     }
-    const ranges = buildOverlappingRanges(0, videoDuration);
+
+    const workPlan = sourcesToTranscribe.map((entry) => ({
+      sourceId: entry.sourceId,
+      source: entry.source!,
+      ranges: buildOverlappingRanges(0, entry.duration),
+    }));
+    const totalRanges = workPlan.reduce((total, entry) => total + Math.max(entry.ranges.length, 1), 0);
     setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'loading');
-    setTranscriptProgress({ completed: 0, total: Math.max(ranges.length, 1) });
+    setTranscriptProgress({ completed: 0, total: Math.max(totalRanges, 1) });
     (async () => {
       try {
-        const rawWords: CaptionEntry[] = await transcribeSourceRanges(
-          source,
-          ranges,
-          aiSettings.captions.wordsPerCaption,
-          {
-            sourceId: MAIN_SOURCE_ID,
-            onProgress: (progress) => {
-              setTranscriptProgress(progress);
+        let completedRanges = 0;
+
+        for (const entry of workPlan) {
+          const rawWords: CaptionEntry[] = await transcribeSourceRanges(
+            entry.source,
+            entry.ranges,
+            aiSettings.captions.wordsPerCaption,
+            {
+              sourceId: entry.sourceId,
+              onProgress: (progress) => {
+                setTranscriptProgress({
+                  completed: Math.min(totalRanges, completedRanges + progress.completed),
+                  total: Math.max(totalRanges, 1),
+                });
+              },
             },
-          },
-        );
-        setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'done', rawWords);
+          );
+          completedRanges += Math.max(entry.ranges.length, 1);
+          setBackgroundTranscript(
+            useEditorStore.getState().backgroundTranscript,
+            completedRanges >= totalRanges ? 'done' : 'loading',
+            rawWords,
+          );
+        }
       } catch (error) {
         console.warn('Background transcription failed:', error);
         setBackgroundTranscript(
-          null,
+          useEditorStore.getState().backgroundTranscript,
           'error',
           undefined,
           error instanceof Error ? error.message : 'Audio transcription did not finish.',
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, currentProjectId, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;

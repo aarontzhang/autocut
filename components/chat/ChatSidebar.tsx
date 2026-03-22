@@ -386,6 +386,10 @@ function estimateFrameDescriptionSeconds(frameCount: number): number {
   return Math.max(6, waves * 5);
 }
 
+function normalizeKnownSourceId(sourceId?: string | null): string {
+  return sourceId && sourceId.trim().length > 0 ? sourceId : MAIN_SOURCE_ID;
+}
+
 function estimateRemainingSecondsFromObservedRate(
   startedAtMs: number,
   completed: number,
@@ -2229,8 +2233,11 @@ export default function ChatSidebar() {
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
   const transcriptStartedAtRef = useRef<number | null>(null);
   const projectedOverviewFrames = useEditorStore(s => s.projectedOverviewFrames);
+  const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
+  const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
+  const aiSettings = useEditorStore(s => s.aiSettings);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
@@ -2256,12 +2263,37 @@ export default function ChatSidebar() {
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
   const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+  const transcriptReadySourceIds = useMemo(() => new Set(
+    (sourceTranscriptCaptions ?? []).map((caption) => normalizeKnownSourceId(caption.sourceId)),
+  ), [sourceTranscriptCaptions]);
+  const overviewReadySourceIds = useMemo(() => new Set(
+    (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
+  ), [sourceOverviewFrames]);
   const missingTranscriptSources = useMemo(() => (
-    availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript)
-  ), [availableSources, sourceIndexFreshBySourceId]);
+    availableSources.filter((entry) => (
+      !sourceIndexFreshBySourceId[entry.sourceId]?.transcript
+      && !transcriptReadySourceIds.has(entry.sourceId)
+    ))
+  ), [availableSources, sourceIndexFreshBySourceId, transcriptReadySourceIds]);
   const missingOverviewSources = useMemo(() => (
-    availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
-  ), [availableSources, sourceIndexFreshBySourceId]);
+    availableSources.filter((entry) => (
+      !sourceIndexFreshBySourceId[entry.sourceId]?.overview
+      && !overviewReadySourceIds.has(entry.sourceId)
+    ))
+  ), [availableSources, overviewReadySourceIds, sourceIndexFreshBySourceId]);
+  const estimatedServerTranscriptEta = useMemo(() => (
+    missingTranscriptSources.reduce((total, entry) => total + estimateTranscriptSeconds(entry.duration), 0)
+  ), [missingTranscriptSources]);
+  const estimatedServerOverviewEta = useMemo(() => (
+    missingOverviewSources.reduce((total, entry) => {
+      const frameCount = getAdaptiveCoarseFrameBudget(
+        entry.duration,
+        Math.max(0.1, aiSettings.frameInspection.overviewIntervalSeconds),
+        aiSettings.frameInspection.maxOverviewFrames,
+      );
+      return total + estimateFrameExtractionSeconds(frameCount) + estimateFrameDescriptionSeconds(frameCount);
+    }, 0)
+  ), [aiSettings, missingOverviewSources]);
 
   useEffect(() => {
     setFrameAnalysisError(null);
@@ -3035,7 +3067,7 @@ export default function ChatSidebar() {
       const serverVisualPending = missingOverviewSources.length > 0;
       const serverAnalysisRunning = sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running';
 
-      if (serverAudioPending || serverAnalysisRunning) {
+      if (serverAudioPending) {
         analysisStatusCards.push({
           key: 'server-audio-analysis',
           title: 'Audio analysis',
@@ -3048,9 +3080,9 @@ export default function ChatSidebar() {
             completed: Math.max(0, completedTranscriptSources),
             total: Math.max(1, totalServerSources),
             label: `Indexed audio for ${Math.max(0, completedTranscriptSources)}/${Math.max(1, totalServerSources)} sources`,
-            etaSeconds: sourceIndexAnalysis?.progress?.stage === 'transcribing_audio'
-              ? (sourceIndexAnalysis.progress?.etaSeconds ?? null)
-              : null,
+            etaSeconds: estimatedServerTranscriptEta > 0
+              ? estimatedServerTranscriptEta
+              : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
           },
           detail: 'Each source transcript becomes available as soon as that clip finishes processing.',
           secondaryLabel: serverAnalysisRunning
@@ -3066,7 +3098,7 @@ export default function ChatSidebar() {
         });
       }
 
-      if (serverVisualPending || serverAnalysisRunning) {
+      if (serverVisualPending) {
         analysisStatusCards.push({
           key: 'coarse-indexing',
           title: 'Visual analysis',
@@ -3077,7 +3109,9 @@ export default function ChatSidebar() {
             completed: Math.max(0, completedOverviewSources),
             total: Math.max(1, totalServerSources),
             label: `Indexed visuals for ${Math.max(0, completedOverviewSources)}/${Math.max(1, totalServerSources)} sources`,
-            etaSeconds: sourceIndexAnalysis?.progress?.etaSeconds ?? null,
+            etaSeconds: estimatedServerOverviewEta > 0
+              ? estimatedServerOverviewEta
+              : (sourceIndexAnalysis?.progress?.etaSeconds ?? null),
           },
           detail: 'Representative frames and scene context land per source as indexing finishes.',
           secondaryLabel: serverAnalysisRunning
