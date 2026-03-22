@@ -7,6 +7,7 @@ import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 
 const VIDEO_IMAGE = 'https://images.unsplash.com/photo-1633077353753-cc4f0df5eb88?w=900&q=85&auto=format&fit=crop';
+const SIGN_IN_HREF = '/auth/login';
 
 type HeroTrackSegment = {
   w: string;
@@ -634,6 +635,7 @@ export default function LandingPage() {
           }
           .lp-feat .lp-feat-graphic { order: 1; }
           .lp-quote { padding: 48px 20px; }
+          .lp-contact { padding: 0 20px 48px; }
           .lp-nav { padding: 0 20px; }
           .lp-footer { padding: 16px 20px; }
         }
@@ -659,12 +661,12 @@ export default function LandingPage() {
           <AutocutMark size={32} withTile />
           <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-0.02em' }}>Autocut</span>
         </div>
-        <Link href="/waitlist" className="iridescent-button" style={{
+        <Link href={SIGN_IN_HREF} className="iridescent-button" style={{
           display: 'inline-block', padding: '8px 20px',
           borderRadius: 20, fontSize: 13, fontWeight: 600,
           textDecoration: 'none', letterSpacing: '-0.01em',
         }}>
-          Join the waitlist
+          Sign in
         </Link>
       </nav>
 
@@ -690,12 +692,12 @@ export default function LandingPage() {
             Tell Autocut what you want changed. Cut the filler, trim a section, place markers. It finds the right moments and applies every edit directly to your timeline.
           </p>
           <div>
-            <Link href="/waitlist" className="iridescent-button" style={{
+            <Link href={SIGN_IN_HREF} className="iridescent-button" style={{
               display: 'inline-block', padding: '12px 28px',
               borderRadius: 24, fontSize: 14, fontWeight: 600,
               textDecoration: 'none', letterSpacing: '-0.01em',
             }}>
-              Join the waitlist →
+              Sign in →
             </Link>
           </div>
         </div>
@@ -762,13 +764,59 @@ export default function LandingPage() {
         }}>
           The best creators spend their time creating, not clicking through timelines.
         </p>
-        <Link href="/waitlist" className="iridescent-button" style={{
+        <Link href={SIGN_IN_HREF} className="iridescent-button" style={{
           display: 'inline-block', padding: '13px 32px',
           borderRadius: 26, fontSize: 14, fontWeight: 600,
           textDecoration: 'none', letterSpacing: '-0.01em',
         }}>
-          Join the waitlist →
+          Sign in →
         </Link>
+      </section>
+
+      <section className="lp-contact" style={{
+        padding: '0 32px 64px',
+      }}>
+        <div style={{
+          maxWidth: 720,
+          margin: '0 auto',
+          padding: '28px 32px',
+          borderRadius: 24,
+          border: '1px solid rgba(255,255,255,0.08)',
+          background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.24)',
+          textAlign: 'center',
+        }}>
+          <p style={{
+            margin: '0 0 10px',
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            color: 'rgba(33,212,255,0.72)',
+          }}>
+            Interested?
+          </p>
+          <p style={{
+            margin: 0,
+            fontSize: 'clamp(20px, 2.4vw, 30px)',
+            lineHeight: 1.35,
+            letterSpacing: '-0.03em',
+            color: 'rgba(255,255,255,0.9)',
+          }}>
+            Text me, the founder, personally at{' '}
+            <a
+              href="tel:5087456868"
+              style={{
+                color: '#7fe7ff',
+                textDecoration: 'none',
+                fontWeight: 700,
+              }}
+            >
+              508-745-6868
+            </a>
+            .
+          </p>
+        </div>
       </section>
 
       {/* ── Footer ───────────────────────────────────────────── */}

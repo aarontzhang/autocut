@@ -39,7 +39,7 @@ export async function proxy(request: NextRequest) {
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
-    url.pathname = '/waitlist';
+    url.pathname = '/auth/login';
     return NextResponse.redirect(url);
   }
 
