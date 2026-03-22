@@ -59,7 +59,7 @@ export default function MediaPanel({
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {sourceCards.map((source) => (
           <div
             key={source.id}
@@ -71,8 +71,10 @@ export default function MediaPanel({
             }}
             style={{
               position: 'relative',
-              flex: '1 1 0',
-              minHeight: 0,
+              flexShrink: 0,
+              width: '100%',
+              aspectRatio: '16 / 9',
+              minHeight: 150,
               borderRadius: 14,
               overflow: 'hidden',
               border: '1px solid var(--border-mid)',
@@ -100,7 +102,7 @@ export default function MediaPanel({
               )}
               {source.duration > 0 && (
                 <div style={{
-                  position: 'absolute', bottom: 8, left: 8,
+                  position: 'absolute', top: 8, left: 8,
                   fontSize: 10, fontFamily: 'var(--font-serif)', color: '#fff',
                   background: 'rgba(0,0,0,0.68)', padding: '2px 6px', borderRadius: 999,
                 }}>
@@ -161,7 +163,6 @@ export default function MediaPanel({
               </p>
               <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.72)', fontFamily: 'var(--font-serif)' }}>
                 {formatSourceStatus(source.status)}
-                {source.status !== 'error' && source.isPlayable ? ' • Playable now' : ''}
               </span>
             </div>
           </div>

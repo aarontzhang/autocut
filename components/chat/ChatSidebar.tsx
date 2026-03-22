@@ -2256,6 +2256,9 @@ export default function ChatSidebar() {
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
   const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+  const missingTranscriptSources = useMemo(() => (
+    availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript)
+  ), [availableSources, sourceIndexFreshBySourceId]);
   const missingOverviewSources = useMemo(() => (
     availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.overview)
   ), [availableSources, sourceIndexFreshBySourceId]);
@@ -3025,18 +3028,66 @@ export default function ChatSidebar() {
   const analysisStatusCards: AnalysisStatusCard[] = [];
   if (hasVideoSource) {
     if (usingServerSourceIndex) {
-      if (sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running') {
+      const totalServerSources = availableSources.length;
+      const completedTranscriptSources = totalServerSources - missingTranscriptSources.length;
+      const completedOverviewSources = totalServerSources - missingOverviewSources.length;
+      const serverAudioPending = missingTranscriptSources.length > 0;
+      const serverVisualPending = missingOverviewSources.length > 0;
+      const serverAnalysisRunning = sourceIndexAnalysis?.status === 'queued' || sourceIndexAnalysis?.status === 'running';
+
+      if (serverAudioPending || serverAnalysisRunning) {
         analysisStatusCards.push({
-          key: 'coarse-indexing',
-          title: 'Coarse indexing',
-          progress: sourceIndexAnalysis.progress,
-          detail: 'Transcript and representative frames become usable as they arrive.',
-          secondaryLabel: getIndexingStageTitle(sourceIndexAnalysis.progress, null),
+          key: 'server-audio-analysis',
+          title: 'Audio analysis',
+          progress: {
+            stage: serverAnalysisRunning
+              ? (sourceIndexAnalysis?.progress?.stage === 'transcribing_audio'
+                  ? 'transcribing_audio'
+                  : 'preparing_media')
+              : 'transcribing_audio',
+            completed: Math.max(0, completedTranscriptSources),
+            total: Math.max(1, totalServerSources),
+            label: `Indexed audio for ${Math.max(0, completedTranscriptSources)}/${Math.max(1, totalServerSources)} sources`,
+            etaSeconds: sourceIndexAnalysis?.progress?.stage === 'transcribing_audio'
+              ? (sourceIndexAnalysis.progress?.etaSeconds ?? null)
+              : null,
+          },
+          detail: 'Each source transcript becomes available as soon as that clip finishes processing.',
+          secondaryLabel: serverAnalysisRunning
+            ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
+            : `${missingTranscriptSources.length} source${missingTranscriptSources.length === 1 ? '' : 's'} remaining`,
         });
-      } else if (sourceIndexAnalysis?.status === 'completed' && (coarseFramesAvailable || transcriptStatus === 'done')) {
+      } else if (totalServerSources > 0) {
+        analysisStatusCards.push({
+          key: 'server-audio-analysis',
+          title: 'Audio analysis',
+          progress: buildCompletedProgress('transcribing_audio'),
+          tone: 'completed',
+        });
+      }
+
+      if (serverVisualPending || serverAnalysisRunning) {
         analysisStatusCards.push({
           key: 'coarse-indexing',
-          title: 'Coarse indexing',
+          title: 'Visual analysis',
+          progress: {
+            stage: serverAnalysisRunning
+              ? (sourceIndexAnalysis?.progress?.stage ?? 'preparing_media')
+              : 'describing_representative_frames',
+            completed: Math.max(0, completedOverviewSources),
+            total: Math.max(1, totalServerSources),
+            label: `Indexed visuals for ${Math.max(0, completedOverviewSources)}/${Math.max(1, totalServerSources)} sources`,
+            etaSeconds: sourceIndexAnalysis?.progress?.etaSeconds ?? null,
+          },
+          detail: 'Representative frames and scene context land per source as indexing finishes.',
+          secondaryLabel: serverAnalysisRunning
+            ? getIndexingStageTitle(sourceIndexAnalysis?.progress ?? null, null)
+            : `${missingOverviewSources.length} source${missingOverviewSources.length === 1 ? '' : 's'} remaining`,
+        });
+      } else if (totalServerSources > 0) {
+        analysisStatusCards.push({
+          key: 'coarse-indexing',
+          title: 'Visual analysis',
           progress: buildCompletedProgress('describing_representative_frames'),
           tone: 'completed',
         });

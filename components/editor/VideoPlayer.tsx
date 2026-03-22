@@ -336,6 +336,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [applyClipEffects, clipById, pauseSecondaryVideo, renderTimeline, sourceById, videoRef]);
 
+  const resumePlaybackIfNeeded = useCallback((video: HTMLVideoElement | null) => {
+    if (!video || !playbackIntentRef.current) return;
+    syncLayers(currentTimeRef.current, { allowPlay: true });
+    if (video.paused) {
+      video.play().catch(() => {});
+    }
+  }, [syncLayers]);
+
   const seekToTimelineTime = useCallback((timelineTime: number) => {
     if (renderTimeline.length === 0) return;
     const clampedTimelineTime = Math.max(0, Math.min(totalTimelineDuration, timelineTime));
@@ -578,9 +586,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               }
               setIsVideoReady(el.readyState >= 2);
               seekToTimelineTime(currentTimeRef.current);
+              resumePlaybackIfNeeded(el);
             }}
-            onLoadedData={(event) => setIsVideoReady(event.currentTarget.readyState >= 2)}
-            onCanPlay={(event) => setIsVideoReady(event.currentTarget.readyState >= 2)}
+            onLoadedData={(event) => {
+              setIsVideoReady(event.currentTarget.readyState >= 2);
+              resumePlaybackIfNeeded(event.currentTarget);
+            }}
+            onCanPlay={(event) => {
+              setIsVideoReady(event.currentTarget.readyState >= 2);
+              resumePlaybackIfNeeded(event.currentTarget);
+            }}
             onLoadStart={() => setIsVideoReady(false)}
             onClick={togglePlay}
             playsInline
@@ -609,6 +624,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               if (secondaryLayerSourceId) {
                 setSourceDuration(secondaryLayerSourceId, event.currentTarget.duration);
               }
+              resumePlaybackIfNeeded(event.currentTarget);
+            }}
+            onCanPlay={(event) => {
+              resumePlaybackIfNeeded(event.currentTarget);
             }}
           />
 
