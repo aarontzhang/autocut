@@ -16,6 +16,7 @@ import { createSignedUrls, uploadProjectMedia } from '@/lib/projectMedia';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
+import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -334,16 +335,22 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           sources: Array.isArray(data.sources) ? data.sources : undefined,
         });
         if (projectLoadSequenceRef.current !== loadSequence) return;
-        try {
-          const sourceIndexData = await refreshSourceIndex(projectId);
-          if (projectLoadSequenceRef.current !== loadSequence || !sourceIndexData) {
-            return;
+        setIsProjectLoading(false);
+        void (async () => {
+          try {
+            const sourceIndexData = await refreshSourceIndex(projectId);
+            if (projectLoadSequenceRef.current !== loadSequence || !sourceIndexData) {
+              return;
+            }
+            await refreshSignedMediaUrls(projectId);
+          } catch (error) {
+            console.warn('Failed to hydrate source index:', error);
+          } finally {
+            if (projectLoadSequenceRef.current === loadSequence) {
+              lastSignedMediaRefreshAtRef.current = Date.now();
+            }
           }
-          await refreshSignedMediaUrls(projectId);
-        } catch (error) {
-          console.warn('Failed to hydrate source index:', error);
-        }
-        lastSignedMediaRefreshAtRef.current = Date.now();
+        })();
       } catch (e) {
         console.error('Failed to load project', e);
       } finally {
@@ -363,12 +370,17 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const refresh = async () => {
       try {
         const sourceIndexData = await refreshSourceIndex(projectId);
-        const status = sourceIndexData?.analysis?.status;
+        const analysisBySourceId = sourceIndexData?.analysisBySourceId && typeof sourceIndexData.analysisBySourceId === 'object'
+          ? Object.values(sourceIndexData.analysisBySourceId as Record<string, { status?: unknown }>)
+          : [];
+        const hasActiveAnalysis = analysisBySourceId.some((analysis) => (
+          analysis?.status === 'queued' || analysis?.status === 'running'
+        ));
         const hasPendingIndexedSources = Array.isArray(sourceIndexData?.sources)
           && sourceIndexData.sources.some((source: { status?: unknown }) => (
             source?.status === 'pending' || source?.status === 'indexing'
           ));
-        if (!cancelled && (status === 'queued' || status === 'running' || hasPendingIndexedSources)) {
+        if (!cancelled && (hasActiveAnalysis || hasPendingIndexedSources)) {
           if (intervalId === null) {
             intervalId = window.setInterval(() => {
               void refresh();
@@ -454,9 +466,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     for (const file of videoFiles) {
       const objectUrl = URL.createObjectURL(file);
       const duration = await readVideoDuration(objectUrl);
-      if (duration > 30 * 60) {
+      if (duration > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
         URL.revokeObjectURL(objectUrl);
-        setStorageNotice('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
+        setStorageNotice(getVideoDurationLimitErrorMessage());
         continue;
       }
       drafts.push({

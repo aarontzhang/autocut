@@ -7,8 +7,15 @@ import {
   removeTrackedStorageUploads,
   upsertTrackedStorageUpload,
 } from '@/lib/server/storageQuota';
+import { readStoredVideoDurationSeconds } from '@/lib/server/videoDuration';
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { STORAGE_QUOTA_BYTES, getQuotaErrorMessage, type ManagedUploadKind } from '@/lib/storageQuota';
+import {
+  MAX_UPLOAD_VIDEO_DURATION_SECONDS,
+  STORAGE_QUOTA_BYTES,
+  getQuotaErrorMessage,
+  getVideoDurationLimitErrorMessage,
+  type ManagedUploadKind,
+} from '@/lib/storageQuota';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 
 function isUploadKind(value: unknown): value is ManagedUploadKind {
@@ -90,6 +97,25 @@ export async function POST(request: NextRequest) {
       error: getQuotaErrorMessage(quota),
       quota,
     }, { status: 413 });
+  }
+
+  try {
+    const durationSeconds = await readStoredVideoDurationSeconds(supabase, storagePath);
+    if (durationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+      await removeStorageObjects([storagePath]);
+      await removeTrackedStorageUploads([storagePath]);
+
+      if (kind === 'project-main') {
+        await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
+      }
+
+      return NextResponse.json({
+        error: getVideoDurationLimitErrorMessage(),
+      }, { status: 413 });
+    }
+  } catch (durationError) {
+    console.error('[uploads.finalize] failed to validate uploaded video duration', durationError);
+    return NextResponse.json({ error: 'Failed to validate uploaded video duration' }, { status: 500 });
   }
 
   let assetId: string | null = null;

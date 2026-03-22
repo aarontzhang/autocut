@@ -229,11 +229,33 @@ export interface AnalysisProgress {
   etaSeconds?: number | null;
 }
 
+export type AnalysisJobStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed';
+
+export type SourceIndexTaskStatus =
+  | AnalysisJobStatus
+  | 'unavailable';
+
+export interface SourceIndexTaskState {
+  status: SourceIndexTaskStatus;
+  completed: number;
+  total: number;
+  etaSeconds?: number | null;
+  reason?: string | null;
+}
+
 export interface SourceIndexAnalysisState {
   jobId?: string | null;
-  status: 'queued' | 'running' | 'completed' | 'failed' | null;
+  status: AnalysisJobStatus | null;
   error?: string | null;
+  pauseRequested?: boolean | null;
   progress: AnalysisProgress | null;
+  audio?: SourceIndexTaskState | null;
+  visual?: SourceIndexTaskState | null;
 }
 
 export type SourceIndexAnalysisStateMap = Record<string, SourceIndexAnalysisState>;

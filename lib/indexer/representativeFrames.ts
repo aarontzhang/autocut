@@ -11,11 +11,21 @@ export function getAdaptiveCoarseFrameBudget(
   maxCoarseFrames: number,
 ): number {
   if (duration <= 0 || maxCoarseFrames <= 0) return 0;
-  const longVideoInterval = Math.max(0.5, preferredLongIntervalSeconds);
-  const shortVideoInterval = Math.max(0.35, Math.min(longVideoInterval, longVideoInterval * 0.22));
-  const taper = 1 - Math.exp(-Math.max(duration, 0) / 180);
-  const averageSpacing = shortVideoInterval + (longVideoInterval - shortVideoInterval) * taper;
-  return Math.max(1, Math.min(maxCoarseFrames, Math.floor(duration / averageSpacing) + 1));
+  const shortVideoInterval = Math.max(0.9, Math.min(preferredLongIntervalSeconds * 0.45, 2.25));
+  const longVideoInterval = Math.max(shortVideoInterval, preferredLongIntervalSeconds * 2.4);
+  const normalizedDuration = clamp01((duration - 90) / (30 * 60 - 90));
+  const durationTaper = Math.pow(normalizedDuration, 0.72);
+  const averageSpacing = shortVideoInterval + (longVideoInterval - shortVideoInterval) * durationTaper;
+  const softCap = duration >= 20 * 60
+    ? 180
+    : duration >= 10 * 60
+      ? 240
+      : maxCoarseFrames;
+  return Math.max(1, Math.min(maxCoarseFrames, softCap, Math.floor(duration / averageSpacing) + 1));
+}
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value));
 }
 
 export function buildCoarseRepresentativeWindows(

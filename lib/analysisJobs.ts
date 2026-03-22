@@ -28,10 +28,11 @@ function mapAnalysis(row: Record<string, unknown>): SourceIndexAnalysisState {
     : null;
   return {
     jobId: typeof row.id === 'string' ? row.id : null,
-    status: row.status === 'queued' || row.status === 'running' || row.status === 'completed' || row.status === 'failed'
+    status: row.status === 'queued' || row.status === 'running' || row.status === 'paused' || row.status === 'completed' || row.status === 'failed'
       ? row.status
       : null,
     error: typeof row.error === 'string' ? row.error : null,
+    pauseRequested: row.pause_requested === true,
     progress: progress && typeof progress.stage === 'string' && Number.isFinite(progress.completed) && Number.isFinite(progress.total)
       ? {
           stage: progress.stage as NonNullable<SourceIndexAnalysisState['progress']>['stage'],
@@ -116,7 +117,7 @@ export async function getLatestAnalysisJobForAsset(
   try {
     const { data, error } = await supabase
       .from('analysis_jobs')
-      .select('id, status, error, progress, updated_at')
+      .select('id, status, error, progress, pause_requested, updated_at')
       .eq('project_id', projectId)
       .eq('asset_id', assetId)
       .eq('job_type', 'index_asset')
@@ -140,11 +141,11 @@ export async function ensureAssetIndexingJob(
   try {
     const { data: existing, error: existingError } = await supabase
       .from('analysis_jobs')
-      .select('id, status, error, progress')
+      .select('id, status, error, progress, pause_requested')
       .eq('project_id', projectId)
       .eq('asset_id', assetId)
       .eq('job_type', 'index_asset')
-      .in('status', ['queued', 'running'])
+      .in('status', ['queued', 'running', 'paused'])
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -159,6 +160,7 @@ export async function ensureAssetIndexingJob(
         asset_id: assetId,
         job_type: 'index_asset',
         status: 'queued',
+        pause_requested: false,
         progress: {
           stage: 'queued',
           completed: 0,

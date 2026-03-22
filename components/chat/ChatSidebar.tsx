@@ -13,6 +13,7 @@ import {
   SilenceCandidate,
   SourceIndexAnalysisState,
   SourceIndexAnalysisStateMap,
+  SourceIndexTaskState,
   SourceIndexedFrame,
   VisualSearchSession,
 } from '@/lib/types';
@@ -95,6 +96,21 @@ type AnalysisStatusCard = {
   detail?: string | null;
   secondaryLabel?: string | null;
   tone?: ProgressCardTone;
+};
+
+type ServerSourceAnalysisCard = {
+  key: string;
+  title: string;
+  clipLabel: string;
+  statusLine: string;
+  helperText?: string | null;
+  etaSeconds?: number | null;
+  tone: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'unavailable';
+  action?: {
+    label: 'Pause' | 'Resume';
+    onClick: () => void;
+    disabled?: boolean;
+  } | null;
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
@@ -293,46 +309,6 @@ function formatCountdownLabel(totalSeconds: number): string {
   const minutes = Math.floor(safeSeconds / 60);
   const seconds = safeSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, '0')} left`;
-}
-
-function getAnalysisProgressFraction(progress: IndexingProgress | null): number {
-  if (!progress || progress.total <= 0) return 0;
-  return clampProgress(progress.completed / progress.total);
-}
-
-function getAudioStageFraction(analysis: SourceIndexAnalysisState | null, hasTranscript: boolean): number {
-  if (hasTranscript) return 1;
-  if (!analysis || analysis.status === 'failed') return 0;
-  if (analysis.status === 'completed') return 1;
-  const stage = analysis.progress?.stage;
-  if (stage === 'transcribing_audio') return getAnalysisProgressFraction(analysis.progress);
-  if (stage === 'detecting_scenes' || stage === 'choosing_representative_frames' || stage === 'describing_representative_frames') {
-    return 1;
-  }
-  return 0;
-}
-
-function getVisualStageFraction(analysis: SourceIndexAnalysisState | null, hasOverview: boolean): number {
-  if (hasOverview) return 1;
-  if (!analysis || analysis.status === 'failed') return 0;
-  if (analysis.status === 'completed') return 1;
-
-  const stage = analysis.progress?.stage;
-  const progressFraction = getAnalysisProgressFraction(analysis.progress);
-  switch (stage) {
-    case 'preparing_media':
-      return 0.05;
-    case 'transcribing_audio':
-      return 0.1;
-    case 'detecting_scenes':
-      return 0.2;
-    case 'choosing_representative_frames':
-      return 0.2 + 0.45 * progressFraction;
-    case 'describing_representative_frames':
-      return 0.65 + 0.35 * progressFraction;
-    default:
-      return analysis.status === 'queued' ? 0 : progressFraction;
-  }
 }
 
 function evenlySampleFrameIndices(count: number, targetCount: number): number[] {
@@ -954,13 +930,6 @@ function formatFrameDescriptionProgressLabel(params: {
   return `Analyzing visuals ${completedFrames}/${totalFrames}`;
 }
 
-function formatSourceList(names: string[], maxVisible = 2): string {
-  if (names.length === 0) return '';
-  if (names.length <= maxVisible) return names.join(', ');
-  const visible = names.slice(0, maxVisible).join(', ');
-  return `${visible}, +${names.length - maxVisible} more`;
-}
-
 function formatSourceScopedProgressLabel(params: {
   sourceIndex: number;
   totalSources: number;
@@ -973,96 +942,94 @@ function formatSourceScopedProgressLabel(params: {
   return `Clip ${sourceIndex}/${totalSources} • ${fileName} • ${actionLabel} ${completed}/${Math.max(total, 1)}`;
 }
 
-function buildSourceCoverageDetail(params: {
-  sources: Array<{ sourceId: string; fileName: string; status: string }>;
-  readySourceIds: Set<string>;
-  readyLabel: string;
-}): string | null {
-  const readyNames: string[] = [];
-  const processingNames: string[] = [];
-  const waitingNames: string[] = [];
-  const issueNames: string[] = [];
-
-  params.sources.forEach((source) => {
-    if (params.readySourceIds.has(source.sourceId)) {
-      readyNames.push(source.fileName);
-      return;
-    }
-    if (source.status === 'error') {
-      issueNames.push(source.fileName);
-      return;
-    }
-    if (source.status === 'indexing') {
-      processingNames.push(source.fileName);
-      return;
-    }
-    waitingNames.push(source.fileName);
-  });
-
-  const parts = [`Tracking all ${params.sources.length} clip${params.sources.length === 1 ? '' : 's'}.`];
-  if (readyNames.length > 0) parts.push(`${params.readyLabel}: ${formatSourceList(readyNames)}.`);
-  if (processingNames.length > 0) parts.push(`Processing: ${formatSourceList(processingNames)}.`);
-  if (waitingNames.length > 0) parts.push(`Waiting: ${formatSourceList(waitingNames)}.`);
-  if (issueNames.length > 0) parts.push(`Issue: ${formatSourceList(issueNames)}.`);
-  return parts.join(' ');
+function getServerTaskStatusTone(status: SourceIndexTaskState['status']): ServerSourceAnalysisCard['tone'] {
+  switch (status) {
+    case 'running':
+      return 'running';
+    case 'paused':
+      return 'paused';
+    case 'completed':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'unavailable':
+      return 'unavailable';
+    case 'queued':
+    default:
+      return 'queued';
+  }
 }
 
-function buildServerAnalysisSummary(params: {
-  kind: 'audio' | 'visual';
-  sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
-  readySourceIds: Set<string>;
-  analysisBySourceId: SourceIndexAnalysisStateMap;
-}) {
-  const totalSources = params.sources.length;
-  if (totalSources === 0) {
-    return null;
+function formatServerTaskStatusLine(kind: 'audio' | 'visual', task: SourceIndexTaskState): string {
+  const actionLabel = kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals';
+  switch (task.status) {
+    case 'running':
+      return `${actionLabel} ${Math.min(task.completed, task.total)}/${task.total}`;
+    case 'paused':
+      return `${kind === 'audio' ? 'Audio paused' : 'Visuals paused'} ${Math.min(task.completed, task.total)}/${task.total}`;
+    case 'completed':
+      return `${actionLabel} ${task.total}/${task.total}`;
+    case 'failed':
+      return 'Failed';
+    case 'unavailable':
+      return 'Unavailable';
+    case 'queued':
+    default:
+      return 'Queued';
   }
+}
 
-  const fractionForSource = (sourceId: string) => {
-    const analysis = params.analysisBySourceId[sourceId] ?? null;
-    const isReady = params.readySourceIds.has(sourceId);
-    return params.kind === 'audio'
-      ? getAudioStageFraction(analysis, isReady)
-      : getVisualStageFraction(analysis, isReady);
-  };
-
-  const readyCount = params.sources.filter((source) => params.readySourceIds.has(source.sourceId)).length;
-  const totalFraction = params.sources.reduce((sum, source) => sum + fractionForSource(source.sourceId), 0);
-  const aggregateFraction = clampProgress(totalFraction / Math.max(totalSources, 1));
-  const inProgressSources = params.sources.filter((source) => {
+function buildServerSourceAnalysisCards(params: {
+  sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
+  analysisBySourceId: SourceIndexAnalysisStateMap;
+  actionLoadingKey: string | null;
+  onAction: (sourceId: string, action: 'pause' | 'resume') => void;
+}): ServerSourceAnalysisCard[] {
+  return params.sources.flatMap((source, index) => {
     const analysis = params.analysisBySourceId[source.sourceId] ?? null;
-    return !params.readySourceIds.has(source.sourceId) && (analysis?.status === 'queued' || analysis?.status === 'running');
-  });
-  const activeSource = inProgressSources[0] ?? null;
-  const activeAnalysis = activeSource ? params.analysisBySourceId[activeSource.sourceId] ?? null : null;
-  const activeProgress = activeAnalysis?.progress ?? null;
-  const etaCandidates = inProgressSources
-    .map((source) => params.analysisBySourceId[source.sourceId]?.progress?.etaSeconds)
-    .filter((eta): eta is number => typeof eta === 'number' && Number.isFinite(eta) && eta > 0);
-  const processingSuffix = inProgressSources.length > 1 ? ` • +${inProgressSources.length - 1} more processing` : '';
+    const audioTask = analysis?.audio ?? {
+      status: source.status === 'error' ? 'failed' : 'queued',
+      completed: 0,
+      total: 1,
+      etaSeconds: null,
+      reason: source.status === 'error' ? 'Upload failed.' : null,
+    };
+    const visualTask = analysis?.visual ?? {
+      status: source.status === 'error' ? 'failed' : 'queued',
+      completed: 0,
+      total: 1,
+      etaSeconds: null,
+      reason: source.status === 'error' ? 'Upload failed.' : null,
+    };
 
-  return {
-    readyCount,
-    totalSources,
-    detail: buildSourceCoverageDetail({
-      sources: params.sources,
-      readySourceIds: params.readySourceIds,
-      readyLabel: params.kind === 'audio' ? 'Audio ready' : 'Visuals ready',
-    }),
-    tone: readyCount >= totalSources ? 'completed' as const : 'active' as const,
-    progress: readyCount >= totalSources
-      ? buildCompletedProgress(params.kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames')
-      : {
-          stage: activeProgress?.stage ?? (params.kind === 'audio' ? 'transcribing_audio' : 'preparing_media'),
-          completed: Math.round(aggregateFraction * 1000),
-          total: 1000,
-          label: activeSource
-            ? `Clip ${params.sources.findIndex((source) => source.sourceId === activeSource.sourceId) + 1}/${totalSources} • ${activeSource.fileName} • ${params.kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${Math.min(activeProgress?.completed ?? 0, Math.max(activeProgress?.total ?? 1, 1))}/${Math.max(activeProgress?.total ?? 1, 1)}`
-            : `${params.kind === 'audio' ? 'Audio' : 'Visuals'} ${readyCount}/${totalSources} clips ready`,
-          etaSeconds: etaCandidates.length > 0 ? Math.max(...etaCandidates) : null,
-        },
-    secondaryLabel: `${readyCount}/${totalSources} clips ready${processingSuffix}`,
-  };
+    const buildCard = (kind: 'audio' | 'visual', task: SourceIndexTaskState): ServerSourceAnalysisCard => {
+      const actionType = task.status === 'running' || task.status === 'queued'
+        ? 'pause'
+        : task.status === 'paused'
+          ? 'resume'
+          : null;
+      const actionKey = actionType ? `${source.sourceId}:${actionType}` : null;
+      return {
+        key: `${source.sourceId}:${kind}`,
+        title: kind === 'audio' ? 'Audio analysis' : 'Visual analysis',
+        clipLabel: `Clip ${index + 1}/${params.sources.length}`,
+        statusLine: formatServerTaskStatusLine(kind, task),
+        helperText: task.reason ?? null,
+        etaSeconds: task.status === 'running' ? task.etaSeconds ?? null : null,
+        tone: getServerTaskStatusTone(task.status),
+        action: actionType ? {
+          label: actionType === 'pause' ? 'Pause' : 'Resume',
+          onClick: () => params.onAction(source.sourceId, actionType),
+          disabled: params.actionLoadingKey === actionKey,
+        } : null,
+      };
+    };
+
+    return [
+      buildCard('audio', audioTask),
+      buildCard('visual', visualTask),
+    ];
+  });
 }
 
 function packFramesForChat(
@@ -2714,6 +2681,99 @@ function EmptyState({
   );
 }
 
+function SourceAnalysisStatusCard(props: ServerSourceAnalysisCard) {
+  const toneStyles = props.tone === 'failed'
+    ? {
+        border: '1px solid rgba(248,113,113,0.28)',
+        background: 'linear-gradient(180deg, rgba(127,29,29,0.22), rgba(69,10,10,0.14))',
+        titleColor: '#fca5a5',
+        textColor: 'rgba(254,202,202,0.9)',
+      }
+    : props.tone === 'completed'
+      ? {
+          border: '1px solid rgba(34,197,94,0.18)',
+          background: 'linear-gradient(180deg, rgba(17,94,89,0.22), rgba(6,78,59,0.12))',
+          titleColor: 'rgba(167,243,208,0.95)',
+          textColor: 'rgba(209,250,229,0.9)',
+        }
+      : props.tone === 'paused'
+        ? {
+            border: '1px solid rgba(251,191,36,0.18)',
+            background: 'linear-gradient(180deg, rgba(120,53,15,0.22), rgba(69,26,3,0.12))',
+            titleColor: 'rgba(253,224,71,0.95)',
+            textColor: 'rgba(254,240,138,0.88)',
+          }
+        : {
+            border: '1px solid rgba(255,255,255,0.08)',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
+            titleColor: 'var(--fg-secondary)',
+            textColor: 'var(--fg-muted)',
+          };
+
+  return (
+    <div style={{
+      marginLeft: 22,
+      padding: '12px 13px',
+      borderRadius: 10,
+      border: toneStyles.border,
+      background: toneStyles.background,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <span style={{ fontSize: 11, color: toneStyles.titleColor, fontFamily: 'var(--font-serif)' }}>
+          {props.title}
+        </span>
+        {props.action && (
+          <button
+            type="button"
+            onClick={props.action.onClick}
+            disabled={props.action.disabled}
+            style={{
+              height: 24,
+              padding: '0 9px',
+              borderRadius: 999,
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: props.action.disabled ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.06)',
+              color: props.action.disabled ? 'rgba(255,255,255,0.3)' : 'var(--fg-secondary)',
+              fontSize: 10,
+              fontFamily: 'var(--font-serif)',
+              cursor: props.action.disabled ? 'default' : 'pointer',
+            }}
+          >
+            {props.action.label}
+          </button>
+        )}
+      </div>
+      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
+        {props.clipLabel}
+      </span>
+      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
+        {props.statusLine}
+      </span>
+      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
+        {props.tone === 'completed'
+          ? 'Completed'
+          : props.etaSeconds && Number.isFinite(props.etaSeconds) && props.etaSeconds > 0
+            ? formatCountdownLabel(props.etaSeconds)
+            : props.tone === 'paused'
+              ? 'Paused'
+              : props.tone === 'failed'
+                ? 'Failed'
+                : props.tone === 'unavailable'
+                  ? 'Unavailable'
+                  : 'Waiting to start'}
+      </span>
+      {props.helperText && (
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
+          {props.helperText}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ─── Main sidebar ──────────────────────────────────────────────────────────────
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
@@ -2747,6 +2807,7 @@ export default function ChatSidebar() {
   const [loadingStatus, setLoadingStatus] = useState('');
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
+  const [analysisActionKey, setAnalysisActionKey] = useState<string | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoData = useEditorStore(s => s.videoData);
@@ -2760,10 +2821,11 @@ export default function ChatSidebar() {
   const analysisOverviewFrames = useEditorStore(s => s.analysisOverviewFrames);
   const displayOverviewFrames = useEditorStore(s => s.displayOverviewFrames);
   const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
-  const sourceTranscriptCaptions = useEditorStore(s => s.sourceTranscriptCaptions);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
+  const hydrateSourceIndex = useEditorStore(s => s.hydrateSourceIndex);
+  const updateSource = useEditorStore(s => s.updateSource);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
@@ -2789,9 +2851,6 @@ export default function ChatSidebar() {
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
   const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
-  const transcriptReadySourceIds = useMemo(() => new Set(
-    (sourceTranscriptCaptions ?? []).map((caption) => normalizeKnownSourceId(caption.sourceId)),
-  ), [sourceTranscriptCaptions]);
   const overviewReadySourceIds = useMemo(() => new Set(
     (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
   ), [sourceOverviewFrames]);
@@ -2803,7 +2862,80 @@ export default function ChatSidebar() {
   ), [availableSources, overviewReadySourceIds, sourceIndexFreshBySourceId]);
   useEffect(() => {
     setFrameAnalysisError(null);
+    setAnalysisActionKey(null);
   }, [currentProjectId]);
+
+  const applyServerSourceIndexPayload = useCallback((payload: {
+    sourceTranscriptCaptions?: CaptionEntry[] | null;
+    sourceOverviewFrames?: SourceIndexedFrame[] | null;
+    sourceIndexFreshBySourceId?: Record<string, unknown>;
+    analysis?: SourceIndexAnalysisState | null;
+    analysisBySourceId?: SourceIndexAnalysisStateMap;
+    sources?: Array<{
+      id?: string;
+      storagePath?: string | null;
+      assetId?: string | null;
+      duration?: number;
+      status?: string;
+    }>;
+  }) => {
+    if (Array.isArray(payload.sources)) {
+      payload.sources.forEach((source) => {
+        if (typeof source?.id !== 'string') return;
+        updateSource(source.id, {
+          storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
+          assetId: typeof source.assetId === 'string' ? source.assetId : null,
+          duration: typeof source.duration === 'number' ? source.duration : undefined,
+          status: source.status as typeof sources[number]['status'],
+        });
+      });
+    }
+    hydrateSourceIndex({
+      sourceTranscriptCaptions: Array.isArray(payload.sourceTranscriptCaptions) ? payload.sourceTranscriptCaptions : null,
+      sourceOverviewFrames: Array.isArray(payload.sourceOverviewFrames) ? payload.sourceOverviewFrames : null,
+      sourceIndexFreshBySourceId: payload.sourceIndexFreshBySourceId as typeof sourceIndexFreshBySourceId,
+      analysis: payload.analysis ?? null,
+      analysisBySourceId: payload.analysisBySourceId ?? {},
+    });
+  }, [hydrateSourceIndex, updateSource]);
+
+  const handleServerAnalysisAction = useCallback(async (sourceId: string, action: 'pause' | 'resume') => {
+    if (!currentProjectId) return;
+    const actionKey = `${sourceId}:${action}`;
+    setAnalysisActionKey(actionKey);
+    try {
+      const res = await fetch(`/api/projects/${currentProjectId}/source-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceId, action }),
+      });
+      const data = await parseJsonResponse<{
+        error?: string;
+        sourceTranscriptCaptions?: CaptionEntry[] | null;
+        sourceOverviewFrames?: SourceIndexedFrame[] | null;
+        sourceIndexFreshBySourceId?: Record<string, unknown>;
+        analysis?: SourceIndexAnalysisState | null;
+        analysisBySourceId?: SourceIndexAnalysisStateMap;
+        sources?: Array<{
+          id?: string;
+          storagePath?: string | null;
+          assetId?: string | null;
+          duration?: number;
+          status?: string;
+        }>;
+      }>(res);
+      if (!res.ok) {
+        throw new Error(data?.error ?? 'Failed to update source analysis.');
+      }
+      if (data) {
+        applyServerSourceIndexPayload(data);
+      }
+    } catch (error) {
+      console.warn('Failed to update source analysis state.', error);
+    } finally {
+      setAnalysisActionKey((current) => (current === actionKey ? null : current));
+    }
+  }, [applyServerSourceIndexPayload, currentProjectId]);
 
   useEffect(() => {
     if (transcriptStatus === 'loading' && (transcriptProgress === null || transcriptProgress.completed === 0)) {
@@ -3653,47 +3785,16 @@ export default function ChatSidebar() {
     ? 'Coarse indexing can take a while on longer videos.'
     : null;
   const analysisStatusCards: AnalysisStatusCard[] = [];
+  const serverAnalysisCards = usingServerSourceIndex
+    ? buildServerSourceAnalysisCards({
+        sources: availableSources,
+        analysisBySourceId: sourceIndexAnalysisBySourceId,
+        actionLoadingKey: analysisActionKey,
+        onAction: handleServerAnalysisAction,
+      })
+    : [];
   if (hasVideoSource) {
-    if (usingServerSourceIndex) {
-      const audioSummary = buildServerAnalysisSummary({
-        kind: 'audio',
-        sources: availableSources,
-        readySourceIds: transcriptReadySourceIds,
-        analysisBySourceId: sourceIndexAnalysisBySourceId,
-      });
-      const visualSummary = buildServerAnalysisSummary({
-        kind: 'visual',
-        sources: availableSources,
-        readySourceIds: overviewReadySourceIds,
-        analysisBySourceId: sourceIndexAnalysisBySourceId,
-      });
-
-      if (audioSummary) {
-        analysisStatusCards.push({
-          key: 'server-audio-analysis',
-          title: 'Audio analysis',
-          progress: audioSummary.progress,
-          detail: audioSummary.detail,
-          secondaryLabel: audioSummary.tone === 'completed'
-            ? 'Completed'
-            : `${getIndexingStageTitle(audioSummary.progress, null)} • ${audioSummary.secondaryLabel}`,
-          tone: audioSummary.tone,
-        });
-      }
-
-      if (visualSummary) {
-        analysisStatusCards.push({
-          key: 'coarse-indexing',
-          title: 'Visual analysis',
-          progress: visualSummary.progress,
-          detail: visualSummary.detail,
-          secondaryLabel: visualSummary.tone === 'completed'
-            ? 'Completed'
-            : `${getIndexingStageTitle(visualSummary.progress, null)} • ${visualSummary.secondaryLabel}`,
-          tone: visualSummary.tone,
-        });
-      }
-    } else if (transcriptStatus === 'loading') {
+    if (!usingServerSourceIndex && transcriptStatus === 'loading') {
       analysisStatusCards.push({
         key: 'audio-analysis',
         title: 'Audio analysis',
@@ -3906,18 +4007,31 @@ export default function ChatSidebar() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
-        {(analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
+        {((usingServerSourceIndex && serverAnalysisCards.length > 0) || analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: messages.length === 0 ? 18 : 12 }}>
-            {analysisStatusCards.map((card) => (
-              <ProgressStatusCard
-                key={card.key}
-                title={card.title}
-                progress={card.progress}
-                detail={card.detail}
-                secondaryLabel={card.secondaryLabel}
-                tone={card.tone}
-              />
-            ))}
+            {usingServerSourceIndex
+              ? serverAnalysisCards.map((card) => (
+                  <SourceAnalysisStatusCard
+                    key={card.key}
+                    title={card.title}
+                    clipLabel={card.clipLabel}
+                    statusLine={card.statusLine}
+                    helperText={card.helperText}
+                    etaSeconds={card.etaSeconds}
+                    tone={card.tone}
+                    action={card.action}
+                  />
+                ))
+              : analysisStatusCards.map((card) => (
+                  <ProgressStatusCard
+                    key={card.key}
+                    title={card.title}
+                    progress={card.progress}
+                    detail={card.detail}
+                    secondaryLabel={card.secondaryLabel}
+                    tone={card.tone}
+                  />
+                ))}
             {transcriptUnavailableNotice && (
               <StatusNoticeCard
                 title="Transcript unavailable"

@@ -9,9 +9,14 @@ import { uploadVideoToSupabase } from '@/lib/uploadVideo';
 import AutocutMark from '@/components/branding/AutocutMark';
 import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
-import { STORAGE_FILE_LIMIT_BYTES, STORAGE_QUOTA_BYTES, formatStorageBytes, getFileSizeErrorMessage } from '@/lib/storageQuota';
-
-const MAX_VIDEO_DURATION_SECONDS = 30 * 60;
+import {
+  MAX_UPLOAD_VIDEO_DURATION_SECONDS,
+  STORAGE_FILE_LIMIT_BYTES,
+  STORAGE_QUOTA_BYTES,
+  formatStorageBytes,
+  getFileSizeErrorMessage,
+  getVideoDurationLimitErrorMessage,
+} from '@/lib/storageQuota';
 
 function readFileDuration(file: File): Promise<number> {
   return new Promise((resolve) => {
@@ -59,8 +64,8 @@ export default function UploadScreen() {
       return;
     }
     const duration = await readFileDuration(file);
-    if (duration > MAX_VIDEO_DURATION_SECONDS) {
-      setUploadError('Videos over 30 minutes are not supported yet. Please trim or split the video first.');
+    if (duration > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+      setUploadError(getVideoDurationLimitErrorMessage());
       setUploadProgress(null);
       return;
     }

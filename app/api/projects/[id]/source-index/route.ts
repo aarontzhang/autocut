@@ -1,13 +1,16 @@
-import { NextResponse } from 'next/server';
-import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported, getLatestAnalysisJobForAsset } from '@/lib/analysisJobs';
+import { NextRequest, NextResponse } from 'next/server';
+import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import type {
+  AnalysisProgress,
+  AnalysisJobStatus,
   CaptionEntry,
   ProjectSource,
   SourceIndexAnalysisState,
   SourceIndexAnalysisStateMap,
   SourceIndexState,
+  SourceIndexTaskState,
 } from '@/lib/types';
 
 type ProjectRow = {
@@ -16,6 +19,22 @@ type ProjectRow = {
   video_path: string | null;
   video_filename: string | null;
   edit_state?: Record<string, unknown> | null;
+};
+
+type AssetLookupRow = {
+  id: string;
+  storage_path: string;
+  status: ProjectSource['status'];
+  indexed_at: string | null;
+};
+
+type AnalysisJobRow = {
+  id: string;
+  status: AnalysisJobStatus;
+  error: string | null;
+  progress: AnalysisProgress | null;
+  result: Record<string, unknown> | null;
+  pause_requested: boolean;
 };
 
 function buildProjectSources(project: ProjectRow): ProjectSource[] {
@@ -48,170 +67,392 @@ function buildProjectSources(project: ProjectRow): ProjectSource[] {
   }];
 }
 
-type AssetLookupRow = {
-  id: string;
-  storage_path: string;
-  status: ProjectSource['status'];
-  indexed_at: string | null;
-};
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+}
+
+function toFiniteNumber(value: unknown, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseProgress(value: unknown): AnalysisProgress | null {
+  const record = asRecord(value);
+  if (!record || typeof record.stage !== 'string') return null;
+  const completed = toFiniteNumber(record.completed, NaN);
+  const total = toFiniteNumber(record.total, NaN);
+  if (!Number.isFinite(completed) || !Number.isFinite(total)) return null;
+  return {
+    stage: record.stage as AnalysisProgress['stage'],
+    completed,
+    total: Math.max(1, total),
+    label: typeof record.label === 'string' ? record.label : null,
+    etaSeconds: Number.isFinite(record.etaSeconds) ? Number(record.etaSeconds) : null,
+  };
+}
+
+async function getLatestAnalysisJobRow(
+  projectId: string,
+  assetId: string,
+): Promise<AnalysisJobRow | null> {
+  const supabase = await getSupabaseServer();
+  const { data, error } = await supabase
+    .from('analysis_jobs')
+    .select('id, status, error, progress, result, pause_requested')
+    .eq('project_id', projectId)
+    .eq('asset_id', assetId)
+    .eq('job_type', 'index_asset')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return {
+    id: String(data.id),
+    status: data.status as AnalysisJobStatus,
+    error: typeof data.error === 'string' ? data.error : null,
+    progress: parseProgress(data.progress),
+    result: asRecord(data.result),
+    pause_requested: data.pause_requested === true,
+  };
+}
 
 function clampFraction(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
-function getProgressFraction(analysis: SourceIndexAnalysisState | null): number {
-  const completed = analysis?.progress?.completed ?? 0;
-  const total = analysis?.progress?.total ?? 0;
-  if (!Number.isFinite(completed) || !Number.isFinite(total) || total <= 0) return 0;
-  return clampFraction(completed / total);
+function getProgressFraction(progress: AnalysisProgress | null) {
+  if (!progress || progress.total <= 0) return 0;
+  return clampFraction(progress.completed / progress.total);
 }
 
-function buildCompletedAnalysis(): SourceIndexAnalysisState {
+function getTranscriptCheckpoint(result: Record<string, unknown> | null) {
+  const transcript = asRecord(result?.transcript);
+  const completedChunkKeys = Array.isArray(transcript?.completedChunkKeys)
+    ? transcript!.completedChunkKeys.filter((value): value is string => typeof value === 'string')
+    : [];
   return {
-    jobId: null,
-    status: 'completed',
-    error: null,
-    progress: {
-      stage: 'describing_representative_frames',
-      completed: 1,
-      total: 1,
-      label: 'Completed',
-      etaSeconds: 0,
-    },
+    totalChunks: Math.max(1, toFiniteNumber(transcript?.totalChunks, completedChunkKeys.length || 1)),
+    completedChunkKeys,
   };
 }
 
-function getAudioFraction(analysis: SourceIndexAnalysisState | null, hasTranscript: boolean): number {
-  if (hasTranscript) return 1;
-  const stage = analysis?.progress?.stage;
-  if (!analysis || analysis.status === 'failed') return 0;
-  if (analysis.status === 'completed') return 1;
-  if (stage === 'transcribing_audio') return getProgressFraction(analysis);
-  if (stage === 'detecting_scenes' || stage === 'choosing_representative_frames' || stage === 'describing_representative_frames') {
-    return 1;
-  }
-  return 0;
+function getVisualCheckpoint(result: Record<string, unknown> | null) {
+  const visual = asRecord(result?.visual);
+  return {
+    plannedWindowCount: Math.max(0, toFiniteNumber(visual?.plannedWindowCount, 0)),
+    plannedSceneCount: Math.max(0, toFiniteNumber(visual?.plannedSceneCount, 0)),
+  };
 }
 
-function getVisualFraction(analysis: SourceIndexAnalysisState | null, hasOverview: boolean): number {
-  if (hasOverview) return 1;
-  if (!analysis || analysis.status === 'failed') return 0;
-  if (analysis.status === 'completed') return 1;
-
-  const stage = analysis?.progress?.stage;
-  const progressFraction = getProgressFraction(analysis);
-  switch (stage) {
-    case 'preparing_media':
-      return 0.05;
-    case 'transcribing_audio':
-      return 0.1;
-    case 'detecting_scenes':
-      return 0.2;
-    case 'choosing_representative_frames':
-      return 0.2 + 0.45 * progressFraction;
-    case 'describing_representative_frames':
-      return 0.65 + 0.35 * progressFraction;
-    default:
-      return analysis.status === 'queued' ? 0 : progressFraction;
-  }
+function buildTaskState(input: {
+  status: SourceIndexTaskState['status'];
+  completed: number;
+  total: number;
+  etaSeconds?: number | null;
+  reason?: string | null;
+}): SourceIndexTaskState {
+  return {
+    status: input.status,
+    completed: Math.max(0, Math.min(input.completed, Math.max(1, input.total))),
+    total: Math.max(1, input.total),
+    etaSeconds: Number.isFinite(input.etaSeconds) ? Number(input.etaSeconds) : null,
+    reason: typeof input.reason === 'string' && input.reason.trim().length > 0 ? input.reason.trim() : null,
+  };
 }
 
-type AggregateEntry = {
-  sourceId: string;
-  fileName: string;
-  analysis: SourceIndexAnalysisState | null;
-  hasTranscript: boolean;
-  hasOverview: boolean;
-};
+function buildAudioTaskState(input: {
+  job: AnalysisJobRow | null;
+  transcriptRowCount: number;
+}): SourceIndexTaskState {
+  const checkpoint = getTranscriptCheckpoint(input.job?.result ?? null);
+  const hasTranscript = input.transcriptRowCount > 0;
+  const activeProgress = input.job?.progress?.stage === 'transcribing_audio' ? input.job.progress : null;
+  const completed = activeProgress
+    ? activeProgress.completed
+    : Math.max(checkpoint.completedChunkKeys.length, hasTranscript ? checkpoint.totalChunks : 0);
+  const total = activeProgress?.total ?? checkpoint.totalChunks;
 
-function buildAggregateAnalysis(entries: AggregateEntry[]): SourceIndexAnalysisState | null {
-  if (entries.length === 0) return null;
-
-  const analyses = entries
-    .map((entry) => entry.analysis)
-    .filter((analysis): analysis is SourceIndexAnalysisState => !!analysis);
-
-  const runningEntry = entries.find((entry) => entry.analysis?.status === 'running');
-  const queuedEntry = entries.find((entry) => entry.analysis?.status === 'queued');
-  const failedEntry = entries.find((entry) => entry.analysis?.status === 'failed');
-  const allCompleted = entries.every((entry) => (
-    entry.hasTranscript && entry.hasOverview
-  ));
-
-  if (allCompleted) {
-    return buildCompletedAnalysis();
+  if (!input.job) {
+    return buildTaskState({
+      status: hasTranscript ? 'completed' : 'queued',
+      completed: hasTranscript ? total : 0,
+      total,
+    });
   }
 
-  const status = runningEntry
+  if (input.job.status === 'completed' && !hasTranscript) {
+    return buildTaskState({
+      status: 'unavailable',
+      completed: checkpoint.completedChunkKeys.length,
+      total,
+      reason: 'No transcript generated',
+    });
+  }
+
+  if (input.job.status === 'failed' && !hasTranscript) {
+    return buildTaskState({
+      status: 'failed',
+      completed: checkpoint.completedChunkKeys.length,
+      total,
+      reason: input.job.error,
+    });
+  }
+
+  if (hasTranscript && (!activeProgress || input.job.progress?.stage !== 'transcribing_audio')) {
+    return buildTaskState({
+      status: 'completed',
+      completed: total,
+      total,
+    });
+  }
+
+  if (input.job.status === 'paused') {
+    return buildTaskState({
+      status: 'paused',
+      completed,
+      total,
+    });
+  }
+
+  if (input.job.status === 'queued') {
+    return buildTaskState({
+      status: 'queued',
+      completed,
+      total,
+    });
+  }
+
+  if (input.job.status === 'running') {
+    return buildTaskState({
+      status: 'running',
+      completed,
+      total,
+      etaSeconds: activeProgress?.etaSeconds ?? null,
+      reason: input.job.pause_requested ? 'Pausing after the current transcript chunk.' : null,
+    });
+  }
+
+  return buildTaskState({
+    status: hasTranscript ? 'completed' : 'queued',
+    completed,
+    total,
+  });
+}
+
+function buildVisualTaskState(input: {
+  job: AnalysisJobRow | null;
+  visualRowCount: number;
+  describedVisualRowCount: number;
+  sceneCount: number;
+}): SourceIndexTaskState {
+  const checkpoint = getVisualCheckpoint(input.job?.result ?? null);
+  const totalSelections = Math.max(
+    1,
+    checkpoint.plannedWindowCount + Math.max(checkpoint.plannedSceneCount, input.sceneCount),
+    input.visualRowCount,
+  );
+  const activeProgress = input.job?.progress?.stage === 'choosing_representative_frames'
+    || input.job?.progress?.stage === 'describing_representative_frames'
+    ? input.job.progress
+    : null;
+
+  if (!input.job) {
+    return buildTaskState({
+      status: input.describedVisualRowCount >= totalSelections ? 'completed' : 'queued',
+      completed: input.describedVisualRowCount,
+      total: totalSelections,
+    });
+  }
+
+  if (input.job.status === 'failed' && input.describedVisualRowCount < totalSelections) {
+    return buildTaskState({
+      status: 'failed',
+      completed: input.describedVisualRowCount,
+      total: totalSelections,
+      reason: input.job.error,
+    });
+  }
+
+  if (input.describedVisualRowCount >= totalSelections && totalSelections > 0) {
+    return buildTaskState({
+      status: 'completed',
+      completed: totalSelections,
+      total: totalSelections,
+    });
+  }
+
+  if (input.job.status === 'paused') {
+    return buildTaskState({
+      status: 'paused',
+      completed: activeProgress?.completed ?? input.describedVisualRowCount,
+      total: activeProgress?.total ?? totalSelections,
+    });
+  }
+
+  if (input.job.status === 'queued') {
+    return buildTaskState({
+      status: 'queued',
+      completed: input.describedVisualRowCount,
+      total: totalSelections,
+    });
+  }
+
+  if (input.job.status === 'running') {
+    return buildTaskState({
+      status: 'running',
+      completed: activeProgress?.completed ?? input.describedVisualRowCount,
+      total: activeProgress?.total ?? totalSelections,
+      etaSeconds: activeProgress?.etaSeconds ?? null,
+      reason: input.job.pause_requested ? 'Pausing after the current visual batch.' : null,
+    });
+  }
+
+  if (input.job.status === 'completed') {
+    return buildTaskState({
+      status: 'completed',
+      completed: Math.max(input.describedVisualRowCount, totalSelections),
+      total: totalSelections,
+    });
+  }
+
+  return buildTaskState({
+    status: 'queued',
+    completed: input.describedVisualRowCount,
+    total: totalSelections,
+  });
+}
+
+function resolveOverallStatus(audio: SourceIndexTaskState, visual: SourceIndexTaskState): AnalysisJobStatus {
+  const statuses = [audio.status, visual.status];
+  if (statuses.includes('running')) return 'running';
+  if (statuses.includes('queued')) return 'queued';
+  if (statuses.includes('paused')) return 'paused';
+  if (statuses.includes('failed')) return 'failed';
+  return 'completed';
+}
+
+function buildAggregateProgress(audio: SourceIndexTaskState, visual: SourceIndexTaskState): AnalysisProgress {
+  const toFraction = (task: SourceIndexTaskState) => {
+    if (task.status === 'completed' || task.status === 'unavailable') return 1;
+    return getProgressFraction({
+      stage: 'queued',
+      completed: task.completed,
+      total: task.total,
+    });
+  };
+  const combinedFraction = (toFraction(audio) + toFraction(visual)) / 2;
+  return {
+    stage: audio.status === 'running' ? 'transcribing_audio' : 'describing_representative_frames',
+    completed: Math.round(combinedFraction * 1000),
+    total: 1000,
+    label: `${audio.status === 'completed' || audio.status === 'unavailable' ? 1 : 0}/${visual.status === 'completed' ? 1 : 0}`,
+    etaSeconds: Math.max(audio.etaSeconds ?? 0, visual.etaSeconds ?? 0) || null,
+  };
+}
+
+function buildSourceAnalysisState(input: {
+  job: AnalysisJobRow | null;
+  transcriptRowCount: number;
+  visualRowCount: number;
+  describedVisualRowCount: number;
+  sceneCount: number;
+}): SourceIndexAnalysisState {
+  const audio = buildAudioTaskState({
+    job: input.job,
+    transcriptRowCount: input.transcriptRowCount,
+  });
+  const visual = buildVisualTaskState({
+    job: input.job,
+    visualRowCount: input.visualRowCount,
+    describedVisualRowCount: input.describedVisualRowCount,
+    sceneCount: input.sceneCount,
+  });
+
+  return {
+    jobId: input.job?.id ?? null,
+    status: resolveOverallStatus(audio, visual),
+    error: input.job?.error ?? null,
+    pauseRequested: input.job?.pause_requested ?? false,
+    progress: input.job?.progress ?? buildAggregateProgress(audio, visual),
+    audio,
+    visual,
+  };
+}
+
+function buildAggregateAnalysis(states: SourceIndexAnalysisState[]): SourceIndexAnalysisState | null {
+  if (states.length === 0) return null;
+  const statuses = states.map((state) => state.status);
+  const status = statuses.includes('running')
     ? 'running'
-    : queuedEntry
+    : statuses.includes('queued')
       ? 'queued'
-      : failedEntry
-        ? 'failed'
-        : analyses.some((analysis) => analysis.status === 'completed')
-          ? 'running'
-          : null;
-
-  if (!status) return null;
-
-  const combinedFraction = entries.reduce((total, entry) => {
-    const audioFraction = getAudioFraction(entry.analysis, entry.hasTranscript);
-    const visualFraction = getVisualFraction(entry.analysis, entry.hasOverview);
-    return total + (audioFraction + visualFraction) / 2;
-  }, 0) / Math.max(entries.length, 1);
-
-  const activeEntry = runningEntry ?? queuedEntry ?? failedEntry ?? entries[0];
-  const etaCandidates = entries
-    .map((entry) => entry.analysis?.progress?.etaSeconds)
-    .filter((eta): eta is number => typeof eta === 'number' && Number.isFinite(eta) && eta > 0);
+      : statuses.includes('paused')
+        ? 'paused'
+        : statuses.includes('failed')
+          ? 'failed'
+          : 'completed';
+  const fraction = states.reduce((sum, state) => {
+    const audio = state.audio ? (state.audio.status === 'completed' || state.audio.status === 'unavailable'
+      ? 1
+      : state.audio.completed / Math.max(state.audio.total, 1)) : 0;
+    const visual = state.visual ? (state.visual.status === 'completed'
+      ? 1
+      : state.visual.completed / Math.max(state.visual.total, 1)) : 0;
+    return sum + ((audio + visual) / 2);
+  }, 0) / Math.max(states.length, 1);
 
   return {
-    jobId: activeEntry.analysis?.jobId ?? null,
+    jobId: states.find((state) => state.jobId)?.jobId ?? null,
     status,
-    error: failedEntry?.analysis?.error ?? null,
+    error: states.find((state) => state.status === 'failed')?.error ?? null,
+    pauseRequested: states.some((state) => state.pauseRequested),
     progress: {
-      stage: activeEntry.analysis?.progress?.stage ?? 'queued',
-      completed: Math.round(clampFraction(combinedFraction) * 1000),
+      stage: status === 'running' ? 'transcribing_audio' : 'describing_representative_frames',
+      completed: Math.round(clampFraction(fraction) * 1000),
       total: 1000,
-      label: `${entries.filter((entry) => entry.hasTranscript && entry.hasOverview).length}/${entries.length} clips ready`,
-      etaSeconds: etaCandidates.length > 0 ? Math.max(...etaCandidates) : null,
+      label: `${states.filter((state) => (
+        state.visual?.status === 'completed'
+        && (state.audio?.status === 'completed' || state.audio?.status === 'unavailable')
+      )).length}/${states.length} clips ready`,
+      etaSeconds: Math.max(...states.map((state) => Math.max(state.audio?.etaSeconds ?? 0, state.visual?.etaSeconds ?? 0)), 0) || null,
     },
+    audio: null,
+    visual: null,
   };
 }
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+async function loadProjectAndSources(projectId: string, userId: string) {
   const supabase = await getSupabaseServer();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const { data: project, error: projectError } = await supabase
     .from('projects')
     .select('id, user_id, video_path, video_filename, edit_state')
-    .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('id', projectId)
+    .eq('user_id', userId)
     .maybeSingle<ProjectRow>();
 
-  if (projectError) return NextResponse.json({ error: projectError.message }, { status: 500 });
-  if (!project) {
-    return NextResponse.json({
-      sourceTranscriptCaptions: [],
-      sourceOverviewFrames: [],
-      sourceIndexFreshBySourceId: {},
-      analysis: null,
-      sources: [],
-    });
-  }
+  if (projectError) throw projectError;
+  return {
+    project,
+    sources: project ? buildProjectSources(project) : [],
+  };
+}
 
-  const sources = buildProjectSources(project);
-  if (sources.length === 0) {
-    return NextResponse.json({
+async function buildSourceIndexResponse(projectId: string, userId: string) {
+  const supabase = await getSupabaseServer();
+  const { project, sources } = await loadProjectAndSources(projectId, userId);
+
+  if (!project || sources.length === 0) {
+    return {
       sourceTranscriptCaptions: [],
       sourceOverviewFrames: [],
       sourceIndexFreshBySourceId: {},
       analysis: null,
+      analysisBySourceId: {},
       sources: [],
-    });
+    };
   }
 
   const storagePaths = sources
@@ -221,10 +462,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { data: assetRows, error: assetError } = await supabase
     .from('media_assets')
     .select('id, storage_path, status, indexed_at')
-    .eq('project_id', id)
+    .eq('project_id', projectId)
     .in('storage_path', storagePaths.length > 0 ? storagePaths : ['']);
 
-  if (assetError) return NextResponse.json({ error: assetError.message }, { status: 500 });
+  if (assetError) throw assetError;
 
   const assetByStoragePath = new Map(
     ((assetRows ?? []) as AssetLookupRow[]).map((asset) => [asset.storage_path, asset]),
@@ -232,56 +473,33 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const sourceIndexFreshBySourceId: Record<string, SourceIndexState> = {};
   const assetIdToSourceId = new Map<string, string>();
+  const jobByAssetId = new Map<string, AnalysisJobRow | null>();
   const normalizedSources: Array<ProjectSource & { indexedAt: string | null }> = [];
   const analysisBySourceId: SourceIndexAnalysisStateMap = {};
 
   for (const source of sources) {
     let asset = source.storagePath ? assetByStoragePath.get(source.storagePath) ?? null : null;
     if (!asset && source.storagePath) {
-      try {
-        const ensuredAsset = await ensurePrimaryMediaAssetIfSupported(supabase, id, source.storagePath);
-        if (ensuredAsset) {
-          asset = {
-            id: ensuredAsset.id,
-            storage_path: ensuredAsset.storagePath,
-            status: ensuredAsset.status,
-            indexed_at: ensuredAsset.indexedAt,
-          };
-          assetByStoragePath.set(source.storagePath, asset);
-        }
-      } catch (error) {
-        console.warn('[source-index] failed to ensure media asset for source', {
-          projectId: id,
-          sourceId: source.id,
-          storagePath: source.storagePath,
-          error,
-        });
+      const ensuredAsset = await ensurePrimaryMediaAssetIfSupported(supabase, projectId, source.storagePath);
+      if (ensuredAsset) {
+        asset = {
+          id: ensuredAsset.id,
+          storage_path: ensuredAsset.storagePath,
+          status: ensuredAsset.status,
+          indexed_at: ensuredAsset.indexedAt,
+        };
+        assetByStoragePath.set(source.storagePath, asset);
       }
     }
 
     if (asset?.id) {
       assetIdToSourceId.set(asset.id, source.id);
-    }
-
-    if (asset?.id) {
-      const analysis = await getLatestAnalysisJobForAsset(supabase, id, asset.id)
-        ?? ((asset.status !== 'ready' || !asset.indexed_at)
-          ? await ensureAssetIndexingJob(supabase, id, asset.id)
-          : null);
-      analysisBySourceId[source.id] = analysis ?? (asset.status === 'ready' && asset.indexed_at ? buildCompletedAnalysis() : {
-        jobId: null,
-        status: asset.status === 'indexing' ? 'queued' : null,
-        error: null,
-        progress: asset.status === 'indexing'
-          ? {
-              stage: 'queued',
-              completed: 0,
-              total: 1,
-              label: 'Queued',
-              etaSeconds: null,
-            }
-          : null,
-      });
+      let latestJob = await getLatestAnalysisJobRow(projectId, asset.id);
+      if (!latestJob && (asset.status !== 'ready' || !asset.indexed_at)) {
+        await ensureAssetIndexingJob(supabase, projectId, asset.id);
+        latestJob = await getLatestAnalysisJobRow(projectId, asset.id);
+      }
+      jobByAssetId.set(asset.id, latestJob);
     }
 
     sourceIndexFreshBySourceId[source.id] = {
@@ -302,106 +520,203 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const assetIds = Array.from(assetIdToSourceId.keys());
   if (assetIds.length === 0) {
-    return NextResponse.json({
+    return {
       sourceTranscriptCaptions: [],
       sourceOverviewFrames: [],
       sourceIndexFreshBySourceId,
       analysis: null,
       analysisBySourceId,
       sources: normalizedSources,
-    });
+    };
   }
 
-  const { data: transcriptRows, error: transcriptError } = await supabase
-    .from('asset_transcript_words')
-    .select('asset_id, start_time, end_time, text')
-    .in('asset_id', assetIds)
-    .order('start_time', { ascending: true });
+  const [{ data: transcriptRows, error: transcriptError }, { data: visualRows, error: visualError }, { data: sceneRows, error: sceneError }] = await Promise.all([
+    supabase
+      .from('asset_transcript_words')
+      .select('asset_id, start_time, end_time, text')
+      .in('asset_id', assetIds)
+      .order('start_time', { ascending: true }),
+    supabase
+      .from('asset_visual_index')
+      .select('asset_id, source_time, sample_kind, metadata')
+      .in('asset_id', assetIds)
+      .in('sample_kind', ['coarse_window_rep', 'scene_rep'])
+      .order('source_time', { ascending: true }),
+    supabase
+      .from('asset_scenes')
+      .select('asset_id, scene_index')
+      .in('asset_id', assetIds),
+  ]);
 
-  if (transcriptError) {
-    return NextResponse.json({ error: transcriptError.message }, { status: 500 });
-  }
+  if (transcriptError) throw transcriptError;
+  if (visualError) throw visualError;
+  if (sceneError) throw sceneError;
 
-  const { data: visualRows, error: visualError } = await supabase
-    .from('asset_visual_index')
-    .select('asset_id, source_time, sample_kind, metadata')
-    .in('asset_id', assetIds)
-    .in('sample_kind', ['coarse_window_rep', 'scene_rep'])
-    .order('source_time', { ascending: true });
-
-  if (visualError) {
-    return NextResponse.json({ error: visualError.message }, { status: 500 });
-  }
+  const transcriptCountByAssetId = new Map<string, number>();
+  const visualCountByAssetId = new Map<string, number>();
+  const describedVisualCountByAssetId = new Map<string, number>();
+  const sceneCountByAssetId = new Map<string, number>();
 
   const sourceTranscriptCaptions: CaptionEntry[] = ((transcriptRows ?? []) as Array<{
     asset_id: string;
     start_time: number;
     end_time: number;
     text: string;
-  }>)
-    .flatMap((row) => {
-      const sourceId = assetIdToSourceId.get(row.asset_id);
-      if (!sourceId) return [];
-      sourceIndexFreshBySourceId[sourceId] = {
-        ...sourceIndexFreshBySourceId[sourceId],
-        transcript: true,
-      };
-      return [{
-        sourceId,
-        startTime: Number(row.start_time ?? 0),
-        endTime: Number(row.end_time ?? row.start_time ?? 0),
-        text: String(row.text ?? ''),
-      }];
-    });
+  }>).flatMap((row) => {
+    const sourceId = assetIdToSourceId.get(row.asset_id);
+    if (!sourceId) return [];
+    transcriptCountByAssetId.set(row.asset_id, (transcriptCountByAssetId.get(row.asset_id) ?? 0) + 1);
+    sourceIndexFreshBySourceId[sourceId] = {
+      ...sourceIndexFreshBySourceId[sourceId],
+      transcript: true,
+    };
+    return [{
+      sourceId,
+      startTime: Number(row.start_time ?? 0),
+      endTime: Number(row.end_time ?? row.start_time ?? 0),
+      text: String(row.text ?? ''),
+    }];
+  });
 
   const sourceOverviewFrames = ((visualRows ?? []) as Array<{
     asset_id: string;
     source_time: number;
     sample_kind: string;
     metadata?: Record<string, unknown> | null;
-  }>)
-    .flatMap((row) => {
-      const sourceId = assetIdToSourceId.get(row.asset_id);
-      if (!sourceId) return [];
-      const freshness = sourceIndexFreshBySourceId[sourceId];
-      sourceIndexFreshBySourceId[sourceId] = {
-        ...freshness,
-        overview: true,
+  }>).flatMap((row) => {
+    const sourceId = assetIdToSourceId.get(row.asset_id);
+    if (!sourceId) return [];
+    visualCountByAssetId.set(row.asset_id, (visualCountByAssetId.get(row.asset_id) ?? 0) + 1);
+    const metadata = asRecord(row.metadata) ?? {};
+    if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
+      describedVisualCountByAssetId.set(row.asset_id, (describedVisualCountByAssetId.get(row.asset_id) ?? 0) + 1);
+    }
+    const freshness = sourceIndexFreshBySourceId[sourceId];
+    sourceIndexFreshBySourceId[sourceId] = {
+      ...freshness,
+      overview: true,
+    };
+    return [{
+      sourceId,
+      sourceTime: Number(row.source_time ?? 0),
+      description: typeof metadata.description === 'string' ? metadata.description : undefined,
+      assetId: row.asset_id,
+      indexedAt: freshness?.indexedAt ?? null,
+      sampleKind: row.sample_kind === 'scene_rep' || row.sample_kind === 'coarse_window_rep'
+        ? row.sample_kind
+        : 'coarse_window_rep',
+      score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
+      sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
+    }];
+  });
+
+  for (const row of (sceneRows ?? []) as Array<{ asset_id: string; scene_index: number }>) {
+    sceneCountByAssetId.set(row.asset_id, (sceneCountByAssetId.get(row.asset_id) ?? 0) + 1);
+  }
+
+  for (const source of normalizedSources) {
+    const assetId = source.assetId;
+    if (!assetId) {
+      analysisBySourceId[source.id] = {
+        jobId: null,
+        status: 'queued',
+        error: null,
+        pauseRequested: false,
+        progress: null,
+        audio: buildTaskState({ status: 'queued', completed: 0, total: 1 }),
+        visual: buildTaskState({ status: 'queued', completed: 0, total: 1 }),
       };
-      const metadata = row.metadata && typeof row.metadata === 'object'
-        ? row.metadata as Record<string, unknown>
-        : {};
-      return [{
-        sourceId,
-        sourceTime: Number(row.source_time ?? 0),
-        description: typeof metadata.description === 'string' ? metadata.description : undefined,
-        assetId: row.asset_id,
-        indexedAt: freshness?.indexedAt ?? null,
-        sampleKind: row.sample_kind === 'scene_rep' || row.sample_kind === 'coarse_window_rep'
-          ? row.sample_kind
-          : 'coarse_window_rep',
-        score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
-        sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
-      }];
+      continue;
+    }
+
+    analysisBySourceId[source.id] = buildSourceAnalysisState({
+      job: jobByAssetId.get(assetId) ?? null,
+      transcriptRowCount: transcriptCountByAssetId.get(assetId) ?? 0,
+      visualRowCount: visualCountByAssetId.get(assetId) ?? 0,
+      describedVisualRowCount: describedVisualCountByAssetId.get(assetId) ?? 0,
+      sceneCount: sceneCountByAssetId.get(assetId) ?? 0,
     });
+  }
 
-  const aggregateEntries: AggregateEntry[] = normalizedSources
-    .filter((source) => !!source.assetId)
-    .map((source) => ({
-      sourceId: source.id,
-      fileName: source.fileName,
-      analysis: analysisBySourceId[source.id] ?? null,
-      hasTranscript: sourceIndexFreshBySourceId[source.id]?.transcript === true,
-      hasOverview: sourceIndexFreshBySourceId[source.id]?.overview === true,
-    }));
-  const activeAnalysis = buildAggregateAnalysis(aggregateEntries);
-
-  return NextResponse.json({
+  return {
     sourceTranscriptCaptions,
     sourceOverviewFrames,
     sourceIndexFreshBySourceId,
-    analysis: activeAnalysis,
+    analysis: buildAggregateAnalysis(Object.values(analysisBySourceId)),
     analysisBySourceId,
     sources: normalizedSources,
-  });
+  };
+}
+
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const supabase = await getSupabaseServer();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  try {
+    const payload = await buildSourceIndexResponse(id, user.id);
+    return NextResponse.json(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to load source index';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const supabase = await getSupabaseServer();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const body = await request.json().catch(() => ({}));
+  const sourceId = typeof body.sourceId === 'string' ? body.sourceId : '';
+  const action = body.action === 'pause' || body.action === 'resume' ? body.action : null;
+
+  if (!sourceId || !action) {
+    return NextResponse.json({ error: 'Invalid source-index action' }, { status: 400 });
+  }
+
+  try {
+    const { sources } = await loadProjectAndSources(id, user.id);
+    const source = sources.find((entry) => entry.id === sourceId);
+    if (!source?.storagePath) {
+      return NextResponse.json({ error: 'Source not found' }, { status: 404 });
+    }
+
+    const asset = await ensurePrimaryMediaAssetIfSupported(supabase, id, source.storagePath);
+    if (!asset?.id) {
+      return NextResponse.json({ error: 'Source asset not found' }, { status: 404 });
+    }
+
+    let job = await getLatestAnalysisJobRow(id, asset.id);
+    if (!job) {
+      const ensured = await ensureAssetIndexingJob(supabase, id, asset.id);
+      job = ensured ? await getLatestAnalysisJobRow(id, asset.id) : null;
+    }
+
+    if (!job) {
+      return NextResponse.json({ error: 'Analysis job not found' }, { status: 404 });
+    }
+
+    if (action === 'pause') {
+      const patch = job.status === 'queued'
+        ? { status: 'paused', pause_requested: false, locked_at: null, locked_by: null }
+        : { pause_requested: true };
+      const { error } = await supabase.from('analysis_jobs').update(patch).eq('id', job.id);
+      if (error) throw error;
+    } else {
+      const patch = job.status === 'paused'
+        ? { status: 'queued', pause_requested: false, locked_at: null, locked_by: null, error: null }
+        : { pause_requested: false };
+      const { error } = await supabase.from('analysis_jobs').update(patch).eq('id', job.id);
+      if (error) throw error;
+    }
+
+    const payload = await buildSourceIndexResponse(id, user.id);
+    return NextResponse.json(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to update source analysis';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }

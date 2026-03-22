@@ -84,13 +84,23 @@ async function runWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
 function getAdaptiveCoarseFrameBudget(duration, preferredLongIntervalSeconds, maxCoarseFrames) {
   if (duration <= 0 || maxCoarseFrames <= 0) return 0;
-  const longVideoInterval = Math.max(0.5, preferredLongIntervalSeconds);
-  const shortVideoInterval = Math.max(0.35, Math.min(longVideoInterval, longVideoInterval * 0.22));
-  const taper = 1 - Math.exp(-Math.max(duration, 0) / 180);
-  const averageSpacing = shortVideoInterval + (longVideoInterval - shortVideoInterval) * taper;
-  return Math.max(1, Math.min(maxCoarseFrames, Math.floor(duration / averageSpacing) + 1));
+  const shortVideoInterval = Math.max(0.9, Math.min(preferredLongIntervalSeconds * 0.45, 2.25));
+  const longVideoInterval = Math.max(shortVideoInterval, preferredLongIntervalSeconds * 2.4);
+  const normalizedDuration = clamp01((duration - 90) / (30 * 60 - 90));
+  const durationTaper = Math.pow(normalizedDuration, 0.72);
+  const averageSpacing = shortVideoInterval + (longVideoInterval - shortVideoInterval) * durationTaper;
+  const softCap = duration >= 20 * 60
+    ? 180
+    : duration >= 10 * 60
+      ? 240
+      : maxCoarseFrames;
+  return Math.max(1, Math.min(maxCoarseFrames, softCap, Math.floor(duration / averageSpacing) + 1));
 }
 
 function buildCoarseRepresentativeWindows(duration, preferredLongIntervalSeconds, maxCoarseFrames) {
@@ -185,10 +195,104 @@ function timestampsToSceneBoundaries(timestamps, sourceDuration, minSceneDuratio
     return time - arr[index - 1] >= minSceneDurationSeconds;
   });
   return starts.map((start, index) => ({
-    id: `scene_${randomUUID().slice(0, 8)}`,
+    id: `scene_${index}_${Math.round(start * 1000)}_${Math.round((starts[index + 1] ?? sourceDuration) * 1000)}`,
     sourceStart: start,
     sourceEnd: starts[index + 1] ?? sourceDuration,
   }));
+}
+
+function buildTranscriptRangeKey(range) {
+  return `${range.startTime.toFixed(3)}-${range.endTime.toFixed(3)}`;
+}
+
+function buildWindowSelectionKey(window) {
+  return `coarse_window_rep:${window.startTime.toFixed(3)}:${window.endTime.toFixed(3)}`;
+}
+
+function buildSceneSelectionKey(scene) {
+  return `scene_rep:${scene.id}`;
+}
+
+function getJobResultValue(result, key) {
+  return result && typeof result === 'object' && result[key] && typeof result[key] === 'object'
+    ? result[key]
+    : {};
+}
+
+function getTranscriptCheckpoint(result) {
+  const transcript = getJobResultValue(result, 'transcript');
+  const completedChunkKeys = Array.isArray(transcript.completedChunkKeys)
+    ? transcript.completedChunkKeys.filter((value) => typeof value === 'string')
+    : [];
+  return {
+    totalChunks: Math.max(1, normalizeInteger(transcript.totalChunks, completedChunkKeys.length || 1, 1, 10_000)),
+    completedChunkKeys,
+  };
+}
+
+function createPauseError() {
+  const error = new Error('Analysis paused.');
+  error.name = 'PauseRequestedError';
+  return error;
+}
+
+const progressEtaState = new Map();
+
+function clearProgressState(jobId) {
+  progressEtaState.delete(jobId);
+}
+
+function estimateStageEta(jobId, stage, completed, total, plannedUnitSeconds = null) {
+  const jobState = progressEtaState.get(jobId) ?? new Map();
+  const stageState = jobState.get(stage) ?? {
+    startedAtMs: Date.now(),
+    lastEtaSeconds: null,
+  };
+  jobState.set(stage, stageState);
+  progressEtaState.set(jobId, jobState);
+
+  const remaining = Math.max(total - completed, 0);
+  if (remaining <= 0) {
+    stageState.lastEtaSeconds = 0;
+    return 0;
+  }
+
+  const plannedEta = plannedUnitSeconds && Number.isFinite(plannedUnitSeconds) && plannedUnitSeconds > 0
+    ? remaining * plannedUnitSeconds
+    : null;
+  const observedEta = completed > 0
+    ? (remaining / Math.max(completed / Math.max((Date.now() - stageState.startedAtMs) / 1000, 0.001), 0.001))
+    : null;
+
+  let nextEta = plannedEta ?? observedEta ?? null;
+  if (plannedEta !== null && observedEta !== null) {
+    const blend = clamp01(completed / Math.max(total * 0.45, 1));
+    nextEta = plannedEta * (1 - blend) + observedEta * blend;
+  }
+
+  if (stageState.lastEtaSeconds !== null && nextEta !== null && nextEta > stageState.lastEtaSeconds) {
+    nextEta = Math.min(nextEta, stageState.lastEtaSeconds + Math.max(12, stageState.lastEtaSeconds * 0.18));
+  }
+
+  stageState.lastEtaSeconds = nextEta === null ? null : Math.max(0, Math.round(nextEta));
+  return stageState.lastEtaSeconds;
+}
+
+async function readPauseIntent(jobId) {
+  const { data, error } = await supabase
+    .from('analysis_jobs')
+    .select('pause_requested')
+    .eq('id', jobId)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.pause_requested === true;
+}
+
+async function checkpointPause(jobId) {
+  const pauseRequested = await readPauseIntent(jobId);
+  if (pauseRequested) {
+    throw createPauseError();
+  }
 }
 
 function nearestDistanceToSceneBoundary(sourceTime, sceneChangeTimes) {
@@ -289,7 +393,14 @@ async function updateJob(jobId, patch) {
   if (error) throw error;
 }
 
-async function updateProgress(jobId, stage, completed, total, label, etaSeconds = null) {
+async function updateProgress(jobId, stage, completed, total, label, options = {}) {
+  const etaSeconds = options.etaSeconds ?? estimateStageEta(
+    jobId,
+    stage,
+    completed,
+    Math.max(1, total),
+    options.plannedUnitSeconds ?? null,
+  );
   await updateJob(jobId, {
     progress: {
       stage,
@@ -309,10 +420,24 @@ async function setAssetStatus(assetId, patch) {
   if (error) throw error;
 }
 
+async function updateJobResult(jobId, updater) {
+  const { data, error } = await supabase
+    .from('analysis_jobs')
+    .select('result')
+    .eq('id', jobId)
+    .maybeSingle();
+  if (error) throw error;
+
+  const currentResult = data?.result && typeof data.result === 'object' ? data.result : {};
+  const nextResult = updater(currentResult);
+  await updateJob(jobId, { result: nextResult });
+  return nextResult;
+}
+
 async function claimNextJob(lockerId) {
   const { data: queuedJobs, error } = await supabase
     .from('analysis_jobs')
-    .select('id, project_id, asset_id, payload, attempt_count')
+    .select('id, project_id, asset_id, payload, result, attempt_count')
     .eq('job_type', 'index_asset')
     .eq('status', 'queued')
     .order('priority', { ascending: true })
@@ -330,6 +455,7 @@ async function claimNextJob(lockerId) {
         locked_at: new Date().toISOString(),
         locked_by: lockerId,
         error: null,
+        pause_requested: false,
         progress: {
           stage: 'preparing_media',
           completed: 0,
@@ -340,7 +466,7 @@ async function claimNextJob(lockerId) {
       })
       .eq('id', job.id)
       .eq('status', 'queued')
-      .select('id, project_id, asset_id, payload')
+      .select('id, project_id, asset_id, payload, result')
       .maybeSingle();
 
     if (claimError) throw claimError;
@@ -577,21 +703,74 @@ async function chooseBestCandidateForWindow(inputPath, candidateTimes, sceneChan
   return best;
 }
 
-async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDir, jobId) {
+async function persistRepresentativeSelection(assetId, selection, existingRowsByKey) {
+  const existing = existingRowsByKey.get(selection.selectionKey);
+  if (existing) {
+    return {
+      ...selection,
+      rowId: existing.id,
+      metadata: existing.metadata ?? {},
+      imageBase64: selection.imageBase64 ?? null,
+    };
+  }
+
+  const { data, error } = await supabase
+    .from('asset_visual_index')
+    .insert({
+      asset_id: assetId,
+      source_time: selection.sourceTime,
+      window_duration: Math.max(selection.windowDuration, 0.25),
+      sample_kind: selection.sampleKind,
+      thumbnail_path: null,
+      brightness: selection.metrics.brightness,
+      contrast: selection.metrics.contrast,
+      edge_density: selection.metrics.edgeDensity,
+      darkness_score: selection.metrics.darknessScore,
+      metadata: {
+        score: selection.score,
+        sceneId: selection.sceneId,
+        windowStart: selection.windowStart,
+        windowEnd: selection.windowEnd,
+        sampleKind: selection.sampleKind,
+      },
+    })
+    .select('id, metadata')
+    .single();
+  if (error) throw error;
+
+  existingRowsByKey.set(selection.selectionKey, {
+    id: data.id,
+    metadata: data.metadata ?? {},
+    sourceTime: selection.sourceTime,
+    sampleKind: selection.sampleKind,
+    sceneId: selection.sceneId,
+    score: selection.score,
+    selectionKey: selection.selectionKey,
+  });
+  return {
+    ...selection,
+    rowId: data.id,
+    metadata: data.metadata ?? {},
+  };
+}
+
+async function chooseRepresentativeFrames(inputPath, assetId, duration, scenes, scratchDir, jobId, existingRowsByKey) {
   const sceneChangeTimes = scenes.slice(1).map((scene) => scene.sourceStart);
   const windows = buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES);
   const totalWork = windows.length + scenes.length;
-  let completed = 0;
+  let completed = existingRowsByKey.size;
   const tasks = [
     ...windows.map((window, index) => ({
       kind: 'window',
       index,
       window,
+      selectionKey: buildWindowSelectionKey(window),
     })),
     ...scenes.map((scene, sceneIndex) => ({
       kind: 'scene',
       index: sceneIndex,
       scene,
+      selectionKey: buildSceneSelectionKey(scene),
       window: {
         index: sceneIndex,
         startTime: scene.sourceStart,
@@ -599,9 +778,19 @@ async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDi
         duration: Math.max(0, scene.sourceEnd - scene.sourceStart),
       },
     })),
-  ];
+  ].filter((task) => !existingRowsByKey.has(task.selectionKey));
+
+  await updateProgress(
+    jobId,
+    'choosing_representative_frames',
+    completed,
+    Math.max(1, totalWork),
+    `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
+    { plannedUnitSeconds: 1.8 },
+  );
 
   const resolved = await runWithConcurrency(tasks, INDEX_SELECTION_CONCURRENCY, async (task) => {
+    await checkpointPause(jobId);
     const candidates = task.kind === 'window'
       ? buildRepresentativeCandidateTimes(task.window, sceneChangeTimes)
       : buildRepresentativeCandidateTimes(task.window, [task.scene.sourceStart]);
@@ -614,43 +803,49 @@ async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDi
       completed,
       Math.max(1, totalWork),
       `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
+      { plannedUnitSeconds: 1.8 },
     );
+    await checkpointPause(jobId);
 
     if (!best) return null;
     if (task.kind === 'window') {
       const scene = findSceneForTime(best.sourceTime, scenes);
-      return {
-        kind: 'window',
-        index: task.index,
-        selection: {
-          sampleKind: 'coarse_window_rep',
-          sourceTime: best.sourceTime,
-          windowStart: task.window.startTime,
-          windowEnd: task.window.endTime,
-          windowDuration: task.window.duration,
-          sceneId: scene?.id ?? null,
-          imageBase64: best.imageBase64,
-          score: best.score,
-          metrics: best.metrics,
-        },
-      };
-    }
-
-    return {
-      kind: 'scene',
-      index: task.index,
-      selection: {
-        sampleKind: 'scene_rep',
+      const selection = await persistRepresentativeSelection(assetId, {
+        sampleKind: 'coarse_window_rep',
         sourceTime: best.sourceTime,
-        windowStart: task.scene.sourceStart,
-        windowEnd: task.scene.sourceEnd,
-        windowDuration: Math.max(0, task.scene.sourceEnd - task.scene.sourceStart),
-        sceneId: task.scene.id,
+        windowStart: task.window.startTime,
+        windowEnd: task.window.endTime,
+        windowDuration: task.window.duration,
+        sceneId: scene?.id ?? null,
         imageBase64: best.imageBase64,
         score: best.score,
         metrics: best.metrics,
-        sceneIndex: task.index,
-      },
+        selectionKey: task.selectionKey,
+      }, existingRowsByKey);
+      return {
+        kind: 'window',
+        index: task.index,
+        selection,
+      };
+    }
+
+    const selection = await persistRepresentativeSelection(assetId, {
+      sampleKind: 'scene_rep',
+      sourceTime: best.sourceTime,
+      windowStart: task.scene.sourceStart,
+      windowEnd: task.scene.sourceEnd,
+      windowDuration: Math.max(0, task.scene.sourceEnd - task.scene.sourceStart),
+      sceneId: task.scene.id,
+      imageBase64: best.imageBase64,
+      score: best.score,
+      metrics: best.metrics,
+      sceneIndex: task.index,
+      selectionKey: task.selectionKey,
+    }, existingRowsByKey);
+    return {
+      kind: 'scene',
+      index: task.index,
+      selection,
     };
   });
 
@@ -665,46 +860,14 @@ async function chooseRepresentativeFrames(inputPath, duration, scenes, scratchDi
   return {
     windowSelections: windowSelections.filter(Boolean),
     sceneSelections: sceneSelections.filter(Boolean),
+    plannedWindowCount: windows.length,
+    plannedSceneCount: scenes.length,
   };
 }
 
-async function insertRepresentativeFrames(assetId, selections) {
-  const inserted = [];
-  for (const selection of selections) {
-    const { data, error } = await supabase
-      .from('asset_visual_index')
-      .insert({
-        asset_id: assetId,
-        source_time: selection.sourceTime,
-        window_duration: Math.max(selection.windowDuration, 0.25),
-        sample_kind: selection.sampleKind,
-        thumbnail_path: null,
-        brightness: selection.metrics.brightness,
-        contrast: selection.metrics.contrast,
-        edge_density: selection.metrics.edgeDensity,
-        darkness_score: selection.metrics.darknessScore,
-        metadata: {
-          score: selection.score,
-          sceneId: selection.sceneId,
-          windowStart: selection.windowStart,
-          windowEnd: selection.windowEnd,
-          sampleKind: selection.sampleKind,
-        },
-      })
-      .select('id, metadata')
-      .single();
-    if (error) throw error;
-    inserted.push({
-      ...selection,
-      rowId: data.id,
-      metadata: data.metadata ?? {},
-    });
-  }
-  return inserted;
-}
-
-async function insertScenes(assetId, scenes, sceneSelections) {
+async function insertScenes(assetId, scenes, sceneSelections, existingSceneIndexes = new Set()) {
   for (const [sceneIndex, scene] of scenes.entries()) {
+    if (existingSceneIndexes.has(sceneIndex)) continue;
     const rep = sceneSelections.find((candidate) => candidate.sceneId === scene.id);
     const { error } = await supabase
       .from('asset_scenes')
@@ -724,19 +887,48 @@ async function insertScenes(assetId, scenes, sceneSelections) {
   }
 }
 
-async function writeRepresentativeDescriptions(insertedSelections, jobId) {
-  let completed = 0;
-  const total = insertedSelections.length;
-  await updateProgress(jobId, 'describing_representative_frames', 0, Math.max(1, total), 'Describing representative frames 0/' + Math.max(1, total));
+async function writeRepresentativeDescriptions(inputPath, scratchDir, selections, jobId, initialCompleted = 0) {
+  let completed = initialCompleted;
+  const pendingSelections = selections.filter((selection) => {
+    const description = typeof selection.metadata?.description === 'string'
+      ? selection.metadata.description.trim()
+      : '';
+    return description.length === 0;
+  });
+  const total = Math.max(1, completed + pendingSelections.length);
+  await updateProgress(
+    jobId,
+    'describing_representative_frames',
+    completed,
+    total,
+    `Describing representative frames ${completed}/${total}`,
+    { plannedUnitSeconds: 2.6 },
+  );
+
   const batches = [];
-  for (let start = 0; start < insertedSelections.length; start += FRAME_BATCH_SIZE) {
-    batches.push(insertedSelections.slice(start, start + FRAME_BATCH_SIZE));
+  for (let start = 0; start < pendingSelections.length; start += FRAME_BATCH_SIZE) {
+    batches.push(pendingSelections.slice(start, start + FRAME_BATCH_SIZE));
   }
 
   await runWithConcurrency(batches, DESCRIPTION_BATCH_CONCURRENCY, async (batch) => {
-    const descriptions = await describeRepresentativeFramesWithFallback(batch);
+    await checkpointPause(jobId);
+    const hydratedBatch = await Promise.all(batch.map(async (selection) => {
+      if (selection.imageBase64) return selection;
+      const outputPath = path.join(
+        scratchDir,
+        `describe-${selection.rowId}-${randomUUID().slice(0, 8)}.jpg`,
+      );
+      const jpegBuffer = await extractFrameBuffer(inputPath, selection.sourceTime, outputPath);
+      await fs.rm(outputPath, { force: true });
+      return {
+        ...selection,
+        imageBase64: jpegBuffer.toString('base64'),
+      };
+    }));
+
+    const descriptions = await describeRepresentativeFramesWithFallback(hydratedBatch);
     for (const item of descriptions) {
-      const target = batch[item.index];
+      const target = hydratedBatch[item.index];
       if (!target) continue;
       const nextMetadata = {
         ...(target.metadata ?? {}),
@@ -750,15 +942,28 @@ async function writeRepresentativeDescriptions(insertedSelections, jobId) {
         .update({ metadata: nextMetadata })
         .eq('id', target.rowId);
       if (error) throw error;
+
       completed += 1;
+      await updateJobResult(jobId, (currentResult) => {
+        const visual = getJobResultValue(currentResult, 'visual');
+        return {
+          ...currentResult,
+          visual: {
+            ...visual,
+            describedCount: completed,
+          },
+        };
+      });
       await updateProgress(
         jobId,
         'describing_representative_frames',
         completed,
-        Math.max(1, total),
-        `Describing representative frames ${completed}/${Math.max(1, total)}`,
+        total,
+        `Describing representative frames ${completed}/${total}`,
+        { plannedUnitSeconds: 2.6 },
       );
     }
+    await checkpointPause(jobId);
   });
 }
 
@@ -769,7 +974,7 @@ async function processIndexAssetJob(job) {
 
   try {
     await setAssetStatus(asset.id, { status: 'indexing' });
-    await updateProgress(job.id, 'preparing_media', 0, 1, 'Preparing media');
+    await updateProgress(job.id, 'preparing_media', 0, 1, 'Preparing media', { etaSeconds: null });
 
     const probe = await ffprobeVideo(inputPath);
     const duration = probe.duration > 0 ? probe.duration : Number(asset.duration_seconds ?? 0);
@@ -781,20 +986,35 @@ async function processIndexAssetJob(job) {
       status: 'indexing',
     });
 
-    await supabase.from('asset_transcript_words').delete().eq('asset_id', asset.id);
-    await supabase.from('asset_scenes').delete().eq('asset_id', asset.id);
-    await supabase.from('asset_visual_index').delete().eq('asset_id', asset.id).in('sample_kind', ['coarse_window_rep', 'scene_rep']);
-
     const transcriptRanges = buildOverlappingRanges(0, duration);
+    const transcriptCheckpoint = getTranscriptCheckpoint(job.result ?? {});
+    const completedTranscriptKeys = new Set(transcriptCheckpoint.completedChunkKeys);
+    await updateJobResult(job.id, (currentResult) => {
+      const transcript = getJobResultValue(currentResult, 'transcript');
+      return {
+        ...currentResult,
+        transcript: {
+          ...transcript,
+          totalChunks: transcriptRanges.length,
+          completedChunkKeys: Array.from(completedTranscriptKeys),
+        },
+      };
+    });
+
     for (let index = 0; index < transcriptRanges.length; index += 1) {
       const range = transcriptRanges[index];
+      const rangeKey = buildTranscriptRangeKey(range);
+      if (completedTranscriptKeys.has(rangeKey)) continue;
+
       await updateProgress(
         job.id,
         'transcribing_audio',
-        index,
+        completedTranscriptKeys.size,
         Math.max(1, transcriptRanges.length),
-        `Transcribing audio ${index}/${Math.max(1, transcriptRanges.length)}`,
+        `Transcribing audio ${completedTranscriptKeys.size}/${Math.max(1, transcriptRanges.length)}`,
+        { plannedUnitSeconds: 12 },
       );
+
       const audioPath = path.join(tempDir, `audio-${index}.mp3`);
       await extractAudioChunk(inputPath, range, audioPath);
       const words = await transcribeAudioChunk(audioPath, range.startTime);
@@ -810,26 +1030,110 @@ async function processIndexAssetJob(job) {
         const { error } = await supabase.from('asset_transcript_words').insert(rows);
         if (error) throw error;
       }
+
+      completedTranscriptKeys.add(rangeKey);
+      await updateJobResult(job.id, (currentResult) => {
+        const transcript = getJobResultValue(currentResult, 'transcript');
+        return {
+          ...currentResult,
+          transcript: {
+            ...transcript,
+            totalChunks: transcriptRanges.length,
+            completedChunkKeys: Array.from(completedTranscriptKeys),
+          },
+        };
+      });
+      await checkpointPause(job.id);
     }
+
     await updateProgress(
       job.id,
       'transcribing_audio',
-      transcriptRanges.length,
+      completedTranscriptKeys.size,
       Math.max(1, transcriptRanges.length),
-      `Transcribing audio ${transcriptRanges.length}/${Math.max(1, transcriptRanges.length)}`,
-      0,
+      `Transcribing audio ${completedTranscriptKeys.size}/${Math.max(1, transcriptRanges.length)}`,
+      { etaSeconds: 0, plannedUnitSeconds: 12 },
     );
 
-    await updateProgress(job.id, 'detecting_scenes', 0, 1, 'Detecting scenes');
+    await updateProgress(job.id, 'detecting_scenes', 0, 1, 'Detecting scenes', { plannedUnitSeconds: 8 });
     const scenes = await detectScenes(inputPath, duration);
-    await updateProgress(job.id, 'detecting_scenes', 1, 1, 'Detecting scenes', 0);
+    await updateProgress(job.id, 'detecting_scenes', 1, 1, 'Detecting scenes', { etaSeconds: 0, plannedUnitSeconds: 8 });
 
-    const { windowSelections, sceneSelections } = await chooseRepresentativeFrames(inputPath, duration, scenes, scratchDir, job.id);
-    const insertedWindowSelections = await insertRepresentativeFrames(asset.id, windowSelections);
-    const insertedSceneSelections = await insertRepresentativeFrames(asset.id, sceneSelections);
-    await insertScenes(asset.id, scenes, sceneSelections);
+    const [{ data: existingVisualRows, error: existingVisualError }, { data: existingSceneRows, error: existingSceneError }] = await Promise.all([
+      supabase
+        .from('asset_visual_index')
+        .select('id, source_time, sample_kind, metadata')
+        .eq('asset_id', asset.id)
+        .in('sample_kind', ['coarse_window_rep', 'scene_rep']),
+      supabase
+        .from('asset_scenes')
+        .select('scene_index')
+        .eq('asset_id', asset.id),
+    ]);
+    if (existingVisualError) throw existingVisualError;
+    if (existingSceneError) throw existingSceneError;
 
-    await writeRepresentativeDescriptions([...insertedWindowSelections, ...insertedSceneSelections], job.id);
+    const existingRowsByKey = new Map();
+    let describedCount = 0;
+    for (const row of existingVisualRows ?? []) {
+      const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+      const key = row.sample_kind === 'scene_rep' && typeof metadata.sceneId === 'string'
+        ? `scene_rep:${metadata.sceneId}`
+        : `coarse_window_rep:${Number(metadata.windowStart ?? row.source_time).toFixed(3)}:${Number(metadata.windowEnd ?? row.source_time).toFixed(3)}`;
+      existingRowsByKey.set(key, {
+        id: row.id,
+        metadata,
+        sourceTime: row.source_time,
+        sampleKind: row.sample_kind,
+        sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
+        score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
+        selectionKey: key,
+      });
+      if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
+        describedCount += 1;
+      }
+    }
+
+    await updateJobResult(job.id, (currentResult) => {
+      const visual = getJobResultValue(currentResult, 'visual');
+      return {
+        ...currentResult,
+        visual: {
+          ...visual,
+          plannedWindowCount: buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES).length,
+          plannedSceneCount: scenes.length,
+          describedCount,
+        },
+      };
+    });
+
+    const { sceneSelections, plannedWindowCount, plannedSceneCount } = await chooseRepresentativeFrames(
+      inputPath,
+      asset.id,
+      duration,
+      scenes,
+      scratchDir,
+      job.id,
+      existingRowsByKey,
+    );
+    await insertScenes(
+      asset.id,
+      scenes,
+      sceneSelections,
+      new Set((existingSceneRows ?? []).map((row) => Number(row.scene_index))),
+    );
+
+    const allSelections = Array.from(existingRowsByKey.values()).map((row) => ({
+      rowId: row.id,
+      metadata: row.metadata ?? {},
+      sourceTime: row.sourceTime,
+      sampleKind: row.sampleKind,
+      sceneId: row.sceneId,
+      score: row.score,
+      selectionKey: row.selectionKey,
+      imageBase64: null,
+    }));
+    await writeRepresentativeDescriptions(inputPath, scratchDir, allSelections, job.id, describedCount);
 
     await setAssetStatus(asset.id, {
       status: 'ready',
@@ -844,26 +1148,49 @@ async function processIndexAssetJob(job) {
       status: 'completed',
       locked_at: null,
       locked_by: null,
+      pause_requested: false,
       result: {
-        transcriptChunks: transcriptRanges.length,
+        transcript: {
+          totalChunks: transcriptRanges.length,
+          completedChunkKeys: Array.from(completedTranscriptKeys),
+        },
+        visual: {
+          plannedWindowCount,
+          plannedSceneCount,
+          describedCount: plannedWindowCount + plannedSceneCount,
+        },
         sceneCount: scenes.length,
-        coarseRepresentativeCount: insertedWindowSelections.length,
-        sceneRepresentativeCount: insertedSceneSelections.length,
       },
       progress: {
         stage: 'describing_representative_frames',
-        completed: insertedWindowSelections.length + insertedSceneSelections.length,
-        total: Math.max(1, insertedWindowSelections.length + insertedSceneSelections.length),
+        completed: plannedWindowCount + plannedSceneCount,
+        total: Math.max(1, plannedWindowCount + plannedSceneCount),
         label: 'Completed',
         etaSeconds: 0,
       },
     });
   } finally {
+    clearProgressState(job.id);
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 }
 
 async function failJob(job, error) {
+  if (error?.name === 'PauseRequestedError') {
+    if (job?.id) {
+      try {
+        await updateJob(job.id, {
+          status: 'paused',
+          error: null,
+          locked_at: null,
+          locked_by: null,
+        });
+      } catch {}
+    }
+    console.log(`[analysis-worker] job ${job?.id ?? 'unknown'} paused`);
+    return;
+  }
+
   const message = error instanceof Error ? error.message : String(error);
   if (job?.asset_id) {
     try {
@@ -875,6 +1202,7 @@ async function failJob(job, error) {
       await updateJob(job.id, {
         status: 'failed',
         error: message,
+        pause_requested: false,
         locked_at: null,
         locked_by: null,
       });

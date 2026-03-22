@@ -1,9 +1,11 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { readStoredVideoDurationSeconds } from '@/lib/server/videoDuration';
 import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
+import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
 import type { ProjectSource } from '@/lib/types';
 
 function buildProjectSources(project: {
@@ -81,6 +83,13 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (rateLimitError) return rateLimitError;
 
   const body = await request.json().catch(() => ({}));
+  if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
+    const durationSeconds = await readStoredVideoDurationSeconds(supabase, body.video_path);
+    if (durationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+      return NextResponse.json({ error: getVideoDurationLimitErrorMessage() }, { status: 413 });
+    }
+  }
+
   const patch: Record<string, unknown> = {};
   if (body.edit_state !== undefined) patch.edit_state = body.edit_state;
   if (body.name !== undefined) patch.name = body.name;

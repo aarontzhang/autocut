@@ -16,6 +16,7 @@ import {
   SourceIndex,
   SourceIndexAnalysisState,
   SourceIndexAnalysisStateMap,
+  SourceIndexTaskState,
   SourceIndexState,
   SourceIndexedFrame,
   TextOverlayEntry,
@@ -303,17 +304,47 @@ function normalizeAnalysisProgress(entry: Partial<AnalysisProgress> | null | und
   };
 }
 
+function normalizeSourceIndexTaskState(
+  value: Partial<SourceIndexTaskState> | null | undefined,
+): SourceIndexTaskState | null {
+  if (!value || typeof value !== 'object') return null;
+  const status = value.status;
+  if (
+    status !== 'queued'
+    && status !== 'running'
+    && status !== 'paused'
+    && status !== 'completed'
+    && status !== 'failed'
+    && status !== 'unavailable'
+  ) {
+    return null;
+  }
+
+  const completed = Number.isFinite(value.completed) ? Number(value.completed) : 0;
+  const total = Number.isFinite(value.total) ? Math.max(1, Number(value.total)) : 1;
+  return {
+    status,
+    completed,
+    total,
+    etaSeconds: Number.isFinite(value.etaSeconds) ? Number(value.etaSeconds) : null,
+    reason: typeof value.reason === 'string' ? value.reason : null,
+  };
+}
+
 function normalizeSourceIndexAnalysisState(
   value: Partial<SourceIndexAnalysisState> | null | undefined,
 ): SourceIndexAnalysisState | null {
   if (!value || typeof value !== 'object') return null;
   return {
     jobId: typeof value.jobId === 'string' ? value.jobId : null,
-    status: value.status === 'queued' || value.status === 'running' || value.status === 'completed' || value.status === 'failed'
+    status: value.status === 'queued' || value.status === 'running' || value.status === 'paused' || value.status === 'completed' || value.status === 'failed'
       ? value.status
       : null,
     error: typeof value.error === 'string' ? value.error : null,
+    pauseRequested: value.pauseRequested === true,
     progress: normalizeAnalysisProgress(value.progress ?? null),
+    audio: normalizeSourceIndexTaskState(value.audio ?? null),
+    visual: normalizeSourceIndexTaskState(value.visual ?? null),
   };
 }
 
@@ -2149,7 +2180,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
     const analysisBySourceId = normalizeSourceIndexAnalysisStateMap(payload.analysisBySourceId);
-    const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running';
+    const audioStates = Object.values(analysisBySourceId).map((entry) => entry.audio).filter((entry): entry is NonNullable<typeof entry> => !!entry);
+    const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running'
+      || audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
     const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
       ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
@@ -2210,13 +2243,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         });
       }
     }
-    const transcriptStatus = sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0
-      ? (analysis?.status === 'running' ? 'loading' : 'done')
-      : analysis?.status === 'queued' || analysis?.status === 'running'
+    const hasTranscriptCaptions = Boolean(sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0);
+    const hasQueuedOrRunningAudio = audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
+    const hasTerminalAudioFailure = audioStates.some((entry) => entry.status === 'failed' || entry.status === 'unavailable');
+    const transcriptStatus = hasTranscriptCaptions
+      ? (hasQueuedOrRunningAudio ? 'loading' : 'done')
+      : hasQueuedOrRunningAudio
         ? 'loading'
-        : analysis?.status === 'completed'
-          ? 'done'
-        : state.transcriptStatus;
+        : hasTerminalAudioFailure
+          ? 'error'
+          : state.transcriptStatus;
+    const transcriptError = hasTerminalAudioFailure
+      ? audioStates.find((entry) => entry.status === 'failed' || entry.status === 'unavailable')?.reason ?? state.transcriptError
+      : state.transcriptError;
     return {
       sourceTranscriptCaptions,
       sourceOverviewFrames,
@@ -2231,6 +2270,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         sourceOverviewFrames,
       ),
       transcriptStatus,
+      transcriptError,
     };
   }),
 
