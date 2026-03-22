@@ -160,6 +160,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     primary: null,
     secondary: null,
   });
+  const layerClipIdRef = useRef<Record<LayerId, string | null>>({
+    primary: null,
+    secondary: null,
+  });
 
   const setSourceDuration = useEditorStore((s) => s.setSourceDuration);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
@@ -337,13 +341,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [getVideoElement]);
 
-  const maybePromotePreparedLayer = useCallback((sourceId: string) => {
+  const maybePromotePreparedLayer = useCallback((entry: RenderTimelineEntry, targetSourceTime: number) => {
     const currentLeadLayer = leadLayerRef.current;
-    if (layerSourceIdRef.current[currentLeadLayer] === sourceId) return false;
+    if (layerClipIdRef.current[currentLeadLayer] === entry.clipId) return false;
     const spareLayer = getOtherLayer(currentLeadLayer);
-    if (layerSourceIdRef.current[spareLayer] !== sourceId) return false;
     const spareVideo = getVideoElement(spareLayer);
-    if (!spareVideo || spareVideo.readyState < 2) return false;
+    if (
+      !spareVideo
+      || spareVideo.readyState < 2
+      || layerClipIdRef.current[spareLayer] !== entry.clipId
+      || layerSourceIdRef.current[spareLayer] !== entry.sourceId
+    ) {
+      return false;
+    }
+    if (Math.abs(spareVideo.currentTime - targetSourceTime) > DRIFT_EPSILON) {
+      spareVideo.currentTime = Math.max(0, targetSourceTime);
+    }
     setLeadLayerSafely(spareLayer);
     return true;
   }, [getVideoElement, setLeadLayerSafely]);
@@ -352,7 +365,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const activeEntries = findRenderEntriesAtTime(renderTimeline, timelineTime);
     const primaryEntry = activeEntries[0];
     if (!primaryEntry) return;
-    maybePromotePreparedLayer(primaryEntry.sourceId);
+    const primarySourceTime = getEntrySourceTime(primaryEntry, timelineTime);
+    maybePromotePreparedLayer(primaryEntry, primarySourceTime);
 
     const leadLayerId = leadLayerRef.current;
     const primaryVideo = getVideoElement(leadLayerId);
@@ -365,10 +379,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       ensureLayerSource(leadLayerId, primaryEntry.sourceId, primarySource.playerUrl);
     }
 
-    const primarySourceTime = getEntrySourceTime(primaryEntry, timelineTime);
     if (Math.abs(primaryVideo.currentTime - primarySourceTime) > SEEK_EPSILON) {
       primaryVideo.currentTime = Math.max(0, primarySourceTime);
     }
+    layerClipIdRef.current[leadLayerId] = primaryEntry.clipId;
 
     const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
     const upcomingEntry = activeEntries[1]
@@ -388,6 +402,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       if (Math.abs(secondaryVideo.currentTime - upcomingSourceTime) > DRIFT_EPSILON) {
         secondaryVideo.currentTime = Math.max(0, upcomingSourceTime);
       }
+      layerClipIdRef.current[spareLayerId] = upcomingEntry.clipId;
+    } else {
+      layerClipIdRef.current[spareLayerId] = null;
     }
 
     if (activeEntries.length < 2) {
@@ -531,6 +548,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       const spareVideo = getVideoElement(spareLayerId);
       const spareIsReady = Boolean(
         spareVideo
+        && layerClipIdRef.current[spareLayerId] === nextEntry.clipId
         && layerSourceIdRef.current[spareLayerId] === nextEntry.sourceId
         && spareVideo.readyState >= 2,
       );
