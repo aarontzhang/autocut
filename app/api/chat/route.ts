@@ -233,7 +233,8 @@ No action:
 - When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - Marker placement is an exception to "need a clearer target" when you have any plausible evidence. If transcript or frame context suggests a likely moment, place the best-effort marker instead of returning type:none.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
-- Use type:none only when you want to explicitly report that you checked something and there is no edit to make. Ordinary conversational replies can omit the action block entirely.
+- CRITICAL: If the latest user message is even remotely asking you to do, find, tag, cut, mark, place, caption, move, or inspect something, prefer emitting a concrete action over returning type:none or prose-only analysis.
+- Use type:none only when you truly have no actionable target and no plausible marker, range, or tool request to advance the user's goal. Ordinary conversational replies can omit the action block entirely.
 
 ## Visual and audio context
 You may be provided with representative frames from the user's video as text summaries and/or a full audio transcript.
@@ -1104,6 +1105,123 @@ function reconcileNarratedSingleRangeAction(
   return action;
 }
 
+function isLikelySingleRangeDeleteIntent(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  if (!/\b(remove|cut|trim|delete)\b/.test(normalized)) return false;
+  return /\b(section|part|range|portion|bit|segment|gap|between|from|in between)\b/.test(normalized)
+    || extractExplicitTimesFromText(normalized).length >= 2;
+}
+
+function inferDeleteRangeActionFromNarration(
+  message: string,
+  latestUserMessage: string,
+  videoDuration: number,
+): EditAction | null {
+  if (!isLikelySingleRangeDeleteIntent(latestUserMessage)) return null;
+
+  const narratedRanges = extractExplicitTimeRanges(message, videoDuration);
+  if (narratedRanges.length === 0) return null;
+  const narrated = narratedRanges[narratedRanges.length - 1];
+
+  return {
+    type: 'delete_range',
+    deleteStartTime: narrated.start,
+    deleteEndTime: narrated.end,
+    message: `Removed the section from ${formatActionTime(narrated.start)} to ${formatActionTime(narrated.end)}.`,
+  };
+}
+
+function isLikelyMarkerLikeIntent(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /\b(find|locate|where|when|mark|marker|bookmark|tag|place|point\s+out|show\s+me|identify)\b/.test(normalized);
+}
+
+function isLikelyActionableRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /\b(remove|cut|trim|delete|find|locate|where|when|mark|marker|bookmark|tag|place|caption|add|transcribe|split|move|set|speed|mute|fade|inspect|check)\b/.test(normalized);
+}
+
+function inferMarkerActionFromEvidence(
+  latestUserMessage: string,
+  message: string,
+  evidence: LatestAssistantEvidence | null,
+  videoDuration: number,
+): EditAction | null {
+  if (!isLikelyActionableRequest(latestUserMessage)) return null;
+
+  const narratedRanges = extractExplicitTimeRanges(message, videoDuration);
+  const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
+  const explicitTimes = extractExplicitTimesFromText(message);
+  const narratedPoint = explicitTimes.length > 0 ? explicitTimes[explicitTimes.length - 1] : null;
+
+  const range = narratedRange ?? evidence?.range ?? null;
+  const pointTime = narratedPoint ?? evidence?.pointTime ?? null;
+
+  if (!range && (pointTime === null || !Number.isFinite(pointTime))) return null;
+
+  const timelineTime = range
+    ? range.start + Math.max(0, (range.end - range.start) / 2)
+    : pointTime!;
+  const linkedRange = range
+    ? {
+        startTime: range.start,
+        endTime: range.end,
+      }
+    : undefined;
+
+  const label = isLikelyMarkerLikeIntent(latestUserMessage)
+    ? 'Requested moment'
+    : 'Suggested section';
+  const messageText = isLikelyMarkerLikeIntent(latestUserMessage)
+    ? 'Placed a marker on the most likely moment.'
+    : 'Tagged the most likely section for review.';
+
+  return {
+    type: 'add_marker',
+    marker: {
+      timelineTime,
+      label,
+      createdBy: 'ai',
+      status: 'open',
+      linkedRange,
+    },
+    message: messageText,
+  };
+}
+
+function shouldHideInternalReasoning(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.length > 220
+    || /frame\s+\d+/.test(normalized)
+    || /looking at the transcript/.test(normalized)
+    || /transcript and frames/.test(normalized)
+    || /representative frame/.test(normalized)
+    || /dense frame/.test(normalized)
+    || /speaker says/.test(normalized)
+    || /appears to run from/.test(normalized);
+}
+
+function buildUserFacingAssistantMessage(message: string, action: EditAction | null): string {
+  if (action && action.type !== 'none') {
+    return action.message.trim();
+  }
+
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return 'I checked that section.';
+  }
+
+  if (shouldHideInternalReasoning(trimmed)) {
+    return 'I checked that section.';
+  }
+
+  return trimmed;
+}
+
 function extractMentionedMarkers(
   message: string,
   markers: Array<{
@@ -1327,6 +1445,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       clipSummaries.length,
     );
     const latestPendingAssistantAction = getLatestPendingAssistantAction(richMessages, validationContext);
+    const latestAssistantEvidence = extractLatestAssistantEvidence(normalizedMessages, Number(context?.videoDuration ?? 0));
 
     if (clipSummaries.length > 0) {
       let cursor = 0;
@@ -1382,7 +1501,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     contextLines.push(...formatPendingActionContext(latestPendingAssistantAction));
     contextLines.push(
       ...formatLatestAssistantEvidenceContext(
-        extractLatestAssistantEvidence(normalizedMessages, Number(context?.videoDuration ?? 0)),
+        latestAssistantEvidence,
         fmtSec,
       ),
     );
@@ -1613,9 +1732,22 @@ Honor these defaults unless the user explicitly asks for something different in 
       validatedAction,
       validationContext.videoDuration,
     );
-    const action = validateEditAction(reconciledAction, validationContext);
+    const inferredAction = reconciledAction && reconciledAction.type !== 'none'
+      ? reconciledAction
+      : inferDeleteRangeActionFromNarration(
+          message,
+          effectiveLatestUserMessage,
+          validationContext.videoDuration,
+        ) ?? inferMarkerActionFromEvidence(
+          effectiveLatestUserMessage,
+          message,
+          latestAssistantEvidence,
+          validationContext.videoDuration,
+        ) ?? reconciledAction;
+    const action = validateEditAction(inferredAction, validationContext);
+    const userFacingMessage = buildUserFacingAssistantMessage(message, action);
     return NextResponse.json({
-      message,
+      message: userFacingMessage,
       action,
     });
   } catch (err) {

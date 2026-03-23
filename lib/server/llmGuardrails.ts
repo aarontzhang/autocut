@@ -32,7 +32,7 @@ const MAX_DELETE_RANGES_PER_ACTION = 400;
 const MAX_TRANSCRIBE_SEGMENTS = 12;
 const MAX_TEXT_OVERLAYS_PER_ACTION = 24;
 const TRANSCRIPT_LINE_REGEX = /^\[([0-9]+:[0-5]\d\.\d{3})-([0-9]+:[0-5]\d\.\d{3})\]\s+(.+)$/;
-const SPEECH_SEGMENT_MERGE_EPSILON = 0.001;
+const SPEECH_SEGMENT_MERGE_EPSILON = 0.45;
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
