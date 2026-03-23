@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import type { CaptionEntry } from '@/lib/types';
+import type { CaptionEntry, SourceIndexAnalysisStateMap } from '@/lib/types';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
@@ -381,14 +381,30 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       inFlight = true;
       try {
         const sourceIndexData = await refreshSourceIndex(projectId);
-        const analysisBySourceId = sourceIndexData?.analysisBySourceId && typeof sourceIndexData.analysisBySourceId === 'object'
-          ? Object.values(sourceIndexData.analysisBySourceId as Record<string, { status?: unknown }>)
+        const sourceIndexSources = Array.isArray(sourceIndexData?.sources)
+          ? sourceIndexData.sources as Array<{ id?: string; storagePath?: string | null; assetId?: string | null; status?: unknown }>
           : [];
-        const hasActiveAnalysis = analysisBySourceId.some((analysis) => (
+        const analysisBySourceId = sourceIndexData?.analysisBySourceId && typeof sourceIndexData.analysisBySourceId === 'object'
+          ? sourceIndexData.analysisBySourceId as SourceIndexAnalysisStateMap
+          : {};
+        const sourceIndexFreshBySourceId = sourceIndexData?.sourceIndexFreshBySourceId && typeof sourceIndexData.sourceIndexFreshBySourceId === 'object'
+          ? sourceIndexData.sourceIndexFreshBySourceId as Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>
+          : {};
+        const initialServerIndexingReady = getInitialIndexingReady(
+          sourceIndexSources
+            .filter((source): source is { id: string; storagePath?: string | null; assetId?: string | null } => typeof source?.id === 'string')
+            .map((source) => ({
+              id: source.id,
+              storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
+              assetId: typeof source.assetId === 'string' ? source.assetId : null,
+            })),
+          analysisBySourceId,
+          sourceIndexFreshBySourceId,
+        );
+        const hasActiveAnalysis = !initialServerIndexingReady && Object.values(analysisBySourceId).some((analysis) => (
           analysis?.status === 'queued' || analysis?.status === 'running'
         ));
-        const hasPendingIndexedSources = Array.isArray(sourceIndexData?.sources)
-          && sourceIndexData.sources.some((source: { status?: unknown }) => (
+        const hasPendingIndexedSources = !initialServerIndexingReady && sourceIndexSources.some((source) => (
             source?.status === 'pending' || source?.status === 'indexing'
           ));
         if (!cancelled && (hasActiveAnalysis || hasPendingIndexedSources)) {

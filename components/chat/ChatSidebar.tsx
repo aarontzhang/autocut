@@ -31,7 +31,7 @@ import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { getInitialIndexingReady, isInitialIndexingReadyForSource } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
 import {
   actionsMatch,
   buildRequestChainContinuationMessage,
@@ -957,26 +957,61 @@ function buildServerSourceAnalysisCards(params: {
     || task.status === 'failed'
   );
 
+  const buildFallbackTask = (
+    kind: 'audio' | 'visual',
+    source: { status: string },
+    freshness: { transcript?: boolean; overview?: boolean } | null,
+  ): SourceIndexTaskState => {
+    if (source.status === 'error') {
+      return {
+        status: 'failed',
+        completed: 0,
+        total: 1,
+        etaSeconds: null,
+        reason: 'Upload failed.',
+      };
+    }
+    const isReady = kind === 'audio' ? freshness?.transcript === true : freshness?.overview === true;
+    return {
+      status: isReady ? 'completed' : 'queued',
+      completed: isReady ? 1 : 0,
+      total: 1,
+      etaSeconds: null,
+      reason: null,
+    };
+  };
+
+  const getDisplayTask = (
+    kind: 'audio' | 'visual',
+    source: { status: string },
+    task: SourceIndexTaskState | null | undefined,
+    freshness: { transcript?: boolean; overview?: boolean } | null,
+  ): SourceIndexTaskState => {
+    const isReady = kind === 'audio' ? freshness?.transcript === true : freshness?.overview === true;
+    if (isReady) {
+      const total = Math.max(task?.total ?? 1, 1);
+      return {
+        status: 'completed',
+        completed: total,
+        total,
+        etaSeconds: null,
+        reason: null,
+      };
+    }
+    return task ?? buildFallbackTask(kind, source, freshness);
+  };
+
   return params.sources.flatMap((source, index) => {
     const analysis = params.analysisBySourceId[source.sourceId] ?? null;
     const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
-    if (isInitialIndexingReadyForSource({ analysis, freshness })) {
+    if (
+      (freshness?.transcript === true || analysis?.audio?.status === 'completed' || analysis?.audio?.status === 'unavailable')
+      && (freshness?.overview === true || analysis?.visual?.status === 'completed')
+    ) {
       return [];
     }
-    const audioTask = analysis?.audio ?? {
-      status: source.status === 'error' ? 'failed' : 'queued',
-      completed: 0,
-      total: 1,
-      etaSeconds: null,
-      reason: source.status === 'error' ? 'Upload failed.' : null,
-    };
-    const visualTask = analysis?.visual ?? {
-      status: source.status === 'error' ? 'failed' : 'queued',
-      completed: 0,
-      total: 1,
-      etaSeconds: null,
-      reason: source.status === 'error' ? 'Upload failed.' : null,
-    };
+    const audioTask = getDisplayTask('audio', source, analysis?.audio, freshness);
+    const visualTask = getDisplayTask('visual', source, analysis?.visual, freshness);
 
     const buildCard = (kind: 'audio' | 'visual', task: SourceIndexTaskState): ServerSourceAnalysisCard => {
       const actionType = task.status === 'failed'
@@ -1340,15 +1375,22 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
       };
     case 'add_captions':
       {
-        const captionCount = action.captions?.length ?? (action.transcriptRange ? 1 : 0);
         const summary = action.transcriptRange
           ? `${formatChatTime(action.transcriptRange.startTime)} → ${formatChatTime(action.transcriptRange.endTime)}`
           : 'Subtitle track';
-      return {
-        label: `Add ${captionCount} caption${captionCount !== 1 ? 's' : ''}`,
-        color: '#f59e0b',
-        summary,
-      };
+        if (action.transcriptRange && !action.captions?.length) {
+          return {
+            label: 'Add captions',
+            color: '#f59e0b',
+            summary,
+          };
+        }
+        const captionCount = action.captions?.length ?? 0;
+        return {
+          label: `Add ${captionCount} caption${captionCount !== 1 ? 's' : ''}`,
+          color: '#f59e0b',
+          summary,
+        };
       }
     case 'reorder_clip':
       return {
@@ -2037,13 +2079,15 @@ function AssistantMessage({
       markers: state.markers,
       textOverlays: state.textOverlays,
     };
-    const nextReviewGroup = createReviewGroup(msg.id, action, baseSnapshot);
+    const nextReviewGroup = createReviewGroup(msg.id, action, baseSnapshot, {
+      sourceTranscriptCaptions: existingSourceTranscriptCaptions,
+    });
     if (!nextReviewGroup) return;
     setReviewResult(null);
     setActiveReviewSession(nextReviewGroup);
     const reviewSeekTime = getReviewSeekTime(baseSnapshot, action);
     if (reviewSeekTime !== null) requestSeek(reviewSeekTime);
-  }, [action, anotherReviewActive, msg.id, requestSeek, reviewableAction, setActiveReviewSession]);
+  }, [action, anotherReviewActive, existingSourceTranscriptCaptions, msg.id, requestSeek, reviewableAction, setActiveReviewSession]);
 
   const cancelReview = useCallback(() => {
     setActiveReviewSession(null);

@@ -75,15 +75,26 @@ export default function ClipBlock({
         bottom: 0,
         display: 'flex',
         alignItems: 'center',
-        gap: 4,
+        justifyContent: 'center',
         pointerEvents: 'none',
         overflow: 'hidden',
       }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          minWidth: 0,
+          maxWidth: '100%',
+        }}>
         <span style={{
           fontSize: 10,
           fontWeight: 500,
           color: 'rgba(255,255,255,0.85)',
           fontFamily: 'var(--font-serif)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          lineHeight: 1,
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -99,6 +110,9 @@ export default function ClipBlock({
             fontWeight: 700,
             color: 'rgba(255,220,50,1)',
             fontFamily: 'var(--font-serif)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            lineHeight: 1,
             background: 'rgba(0,0,0,0.35)',
             padding: '1px 4px',
             borderRadius: 2,
@@ -114,6 +128,9 @@ export default function ClipBlock({
             fontSize: 9,
             color: 'rgba(167,139,250,0.9)',
             fontFamily: 'var(--font-serif)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            lineHeight: 1,
             background: 'rgba(139,92,246,0.2)',
             padding: '1px 4px',
             borderRadius: 2,
@@ -128,12 +145,16 @@ export default function ClipBlock({
             fontSize: 9,
             color: 'rgba(255,255,255,0.55)',
             fontFamily: 'var(--font-serif)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            lineHeight: 1,
             whiteSpace: 'nowrap',
             flexShrink: 0,
           }}>
             {formatTime(timelineDuration)}
           </span>
         )}
+        </div>
       </div>
     </div>
   );

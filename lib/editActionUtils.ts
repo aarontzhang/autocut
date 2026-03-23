@@ -45,6 +45,7 @@ export interface EditReviewGroup {
   ownerId: string;
   originalAction: EditAction;
   baseSnapshot: EditSnapshot;
+  sourceTranscriptCaptions?: CaptionEntry[] | null;
   items: EditReviewItem[];
 }
 
@@ -673,7 +674,7 @@ function getReviewItemLabel(action: EditAction, index: number): { label: string;
   if (action.type === 'add_captions') {
     const caption = action.captions?.[0];
     return {
-      label: `Caption ${index + 1}`,
+      label: action.transcriptRange && !caption ? 'Captions' : `Caption ${index + 1}`,
       summary: caption
         ? caption.text
         : action.transcriptRange
@@ -715,6 +716,9 @@ export function createReviewGroup(
   ownerId: string,
   action: EditAction,
   baseSnapshot: EditSnapshot,
+  options?: {
+    sourceTranscriptCaptions?: CaptionEntry[] | null;
+  },
 ): EditReviewGroup | null {
   const reviewActions = expandActionForReview(action);
   if (reviewActions.length === 0) return null;
@@ -723,6 +727,7 @@ export function createReviewGroup(
     ownerId,
     originalAction: action,
     baseSnapshot,
+    sourceTranscriptCaptions: options?.sourceTranscriptCaptions ?? null,
     items: reviewActions.map((reviewAction, index) => {
       const id = `${ownerId}:${reviewAction.type}:${index}`;
       const itemCopy = JSON.parse(JSON.stringify(reviewAction)) as EditAction;
@@ -748,7 +753,9 @@ export function getCheckedReviewItems(group: EditReviewGroup): EditReviewItem[] 
 
 export function buildReviewPreviewSnapshot(group: EditReviewGroup): EditSnapshot {
   return getCheckedReviewItems(group).reduce(
-    (snapshot, item) => applyActionToSnapshot(snapshot, item.action),
+    (snapshot, item) => applyActionToSnapshot(snapshot, item.action, {
+      sourceTranscriptCaptions: group.sourceTranscriptCaptions,
+    }),
     group.baseSnapshot,
   );
 }
