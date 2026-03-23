@@ -1090,6 +1090,40 @@ function isMarkerMutationAction(action?: EditAction | null): action is EditActio
     || action?.type === 'remove_marker';
 }
 
+function messageRequestsMarkerPlacement(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+
+  return (
+    /\bmarkers?|bookmarks?|tags?\b/.test(normalized)
+    && /\b(add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/.test(normalized)
+  ) || /\bmark\b/.test(normalized);
+}
+
+function messageIncludesSecondaryEditRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+
+  return /\b(cut|trim|delete|remove|caption|subtitle|transcribe|split|move|reorder|transition|fade|overlay|title|text|mute|volume|speed|slow|fast|silence|silent)\b/.test(normalized);
+}
+
+function isEvidenceGatheringAction(action?: EditAction | null): boolean {
+  return action?.type === 'transcribe_request' || action?.type === 'request_frames';
+}
+
+function shouldPrioritizeMarkerStepFirst(
+  requestText: string,
+  action?: EditAction | null,
+): boolean {
+  if (!action || action.type === 'none') return false;
+  if (!messageRequestsMarkerPlacement(requestText)) return false;
+  if (!messageIncludesSecondaryEditRequest(requestText)) return false;
+  if (isMarkerMutationAction(action)) return false;
+  if (isEvidenceGatheringAction(action)) return false;
+  if (action.type === 'update_ai_settings') return false;
+  return true;
+}
+
 function getMarkerActionResult(action: EditAction): string {
   if (action.type === 'add_marker') return 'Marker added.';
   if (action.type === 'add_markers') {
@@ -3399,6 +3433,9 @@ export default function ChatSidebar() {
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
       const chainState = requestChainId ? requestChainStateRef.current[requestChainId] ?? null : null;
+      const activeObjective = chainState?.remainingObjective?.trim()
+        || chainState?.originalRequest?.trim()
+        || latestUserInput;
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
@@ -3525,6 +3562,64 @@ export default function ChatSidebar() {
               rerunState,
               'duplicate_action_retry',
               'Step already complete; continue remaining work only.',
+            ),
+            requestChainId,
+          );
+          continue;
+        }
+      }
+
+      if (
+        requestChainId
+        && chainState
+        && round < 2
+        && chainState.completedActions.length === 0
+        && chainState.duplicateRerunCount < 1
+        && shouldPrioritizeMarkerStepFirst(activeObjective, action)
+      ) {
+        const rerunState = updateRequestChainState(requestChainId, (current) => ({
+          ...current,
+          duplicateActionBlacklist: action && action.type !== 'none'
+            ? [...new Set([...current.duplicateActionBlacklist, action.type])]
+            : current.duplicateActionBlacklist,
+          duplicateRerunCount: current.duplicateRerunCount + 1,
+        }));
+        if (rerunState) {
+          nextHistory = buildChatRequestHistory(
+            useEditorStore.getState().messages,
+            useEditorStore.getState().appliedActions,
+            buildContinuationPayload(
+              rerunState,
+              'duplicate_action_retry',
+              'The original request includes a marker step plus another edit. If you already have enough evidence for the marker, emit the best add_marker/add_markers action first, then continue the remaining edit in the chain.',
+            ),
+            requestChainId,
+          );
+          continue;
+        }
+      }
+
+      if (
+        requestChainId
+        && chainState
+        && round < 2
+        && chainState.duplicateRerunCount < 1
+        && messageRequestsMarkerPlacement(activeObjective)
+        && (!action || action.type === 'none')
+        && (Boolean(currentTranscript?.trim()) || currentFrames.length > 0)
+      ) {
+        const rerunState = updateRequestChainState(requestChainId, (current) => ({
+          ...current,
+          duplicateRerunCount: current.duplicateRerunCount + 1,
+        }));
+        if (rerunState) {
+          nextHistory = buildChatRequestHistory(
+            useEditorStore.getState().messages,
+            useEditorStore.getState().appliedActions,
+            buildContinuationPayload(
+              rerunState,
+              'duplicate_action_retry',
+              'The user asked for marker placement. Use the available transcript and frame evidence to emit a best-effort add_marker/add_markers action now. Do not answer with type:none unless there is truly no plausible target.',
             ),
             requestChainId,
           );
