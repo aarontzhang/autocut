@@ -122,14 +122,19 @@ export default function Timeline({
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
+  const reviewPlaybackUsesBase = Boolean(
+    activeReviewSession?.items.some((item) => item.action.type === 'delete_range'),
+  );
   const timelineSnapshot = activeReviewSession?.baseSnapshot ?? previewSnapshot;
-  const playbackSnapshot = previewSnapshot ?? {
-    clips: liveClips,
-    captions: liveCaptions,
-    transitions: liveTransitions,
-    markers: liveMarkers,
-    textOverlays: liveTextOverlays,
-  };
+  const playbackSnapshot = reviewPlaybackUsesBase && activeReviewSession
+    ? activeReviewSession.baseSnapshot
+    : (previewSnapshot ?? {
+      clips: liveClips,
+      captions: liveCaptions,
+      transitions: liveTransitions,
+      markers: liveMarkers,
+      textOverlays: liveTextOverlays,
+    });
   const clips = timelineSnapshot?.clips ?? liveClips;
   const captions = timelineSnapshot?.captions ?? liveCaptions;
   const transitions = timelineSnapshot?.transitions ?? liveTransitions;
@@ -179,7 +184,7 @@ export default function Timeline({
     [RIGHT_PAD, contentDuration],
   );
   const displayedCurrentTime = useMemo(() => {
-    if (!activeReviewSession) {
+    if (!activeReviewSession || reviewPlaybackUsesBase) {
       return Math.max(0, Math.min(currentTime, contentDuration));
     }
 
@@ -199,6 +204,7 @@ export default function Timeline({
     clips,
     contentDuration,
     currentTime,
+    reviewPlaybackUsesBase,
     playbackSnapshot.clips,
     playbackSnapshot.transitions,
     transitions,
@@ -292,8 +298,8 @@ export default function Timeline({
   }, [contentDuration, totalTimelineDuration, totalW]);
 
   const mapDisplayTimeToPlaybackTime = useCallback((displayTime: number) => {
-    if (!activeReviewSession) {
-      return Math.max(0, Math.min(contentDuration, displayTime));
+    if (!activeReviewSession || reviewPlaybackUsesBase) {
+      return Math.max(0, Math.min(displayTime, playbackDuration || contentDuration));
     }
 
     const mappedTime = mapTimelineTimeAcrossSnapshots(
@@ -314,6 +320,7 @@ export default function Timeline({
     playbackDuration,
     playbackSnapshot.clips,
     playbackSnapshot.transitions,
+    reviewPlaybackUsesBase,
     transitions,
   ]);
   const requestDisplaySeek = useCallback((displayTime: number) => {

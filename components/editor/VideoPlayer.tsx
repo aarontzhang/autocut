@@ -178,10 +178,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoData = useEditorStore((s) => s.videoData);
   const currentTime = useEditorStore((s) => s.currentTime);
   const videoDuration = useEditorStore((s) => s.videoDuration);
-  const clips = useEditorStore((s) => s.previewSnapshot?.clips ?? s.clips);
-  const manualCaptions = useEditorStore((s) => s.previewSnapshot?.captions ?? s.captions);
-  const transitions = useEditorStore((s) => s.previewSnapshot?.transitions ?? s.transitions);
-  const textOverlays = useEditorStore((s) => s.previewSnapshot?.textOverlays ?? s.textOverlays);
+  const previewSnapshot = useEditorStore((s) => s.previewSnapshot);
+  const activeReviewSession = useEditorStore((s) => s.activeReviewSession);
+  const liveClips = useEditorStore((s) => s.clips);
+  const liveCaptions = useEditorStore((s) => s.captions);
+  const liveTransitions = useEditorStore((s) => s.transitions);
+  const liveTextOverlays = useEditorStore((s) => s.textOverlays);
+
+  const reviewPlaybackUsesBase = Boolean(
+    activeReviewSession?.items.some((item) => item.action.type === 'delete_range'),
+  );
+  const playbackSnapshot = reviewPlaybackUsesBase && activeReviewSession
+    ? activeReviewSession.baseSnapshot
+    : (previewSnapshot ?? {
+        clips: liveClips,
+        captions: liveCaptions,
+        transitions: liveTransitions,
+        markers: [],
+        textOverlays: liveTextOverlays,
+      });
+  const clips = playbackSnapshot.clips;
+  const manualCaptions = playbackSnapshot.captions;
+  const transitions = playbackSnapshot.transitions;
+  const textOverlays = playbackSnapshot.textOverlays;
 
   const clipById = useMemo(() => new Map(clips.map((clip) => [clip.id, clip])), [clips]);
   const resolvedSources = useMemo(() => resolveProjectSources({
