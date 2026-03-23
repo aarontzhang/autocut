@@ -277,20 +277,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     videoRef.current = getVideoElement(layer);
   }, [getVideoElement, videoRef]);
 
-  const setLeadLayerSafely = useCallback((nextLayer: LayerId) => {
-    leadLayerRef.current = nextLayer;
-    setLeadLayer(nextLayer);
-    syncExternalVideoRef(nextLayer);
-    const nextVideo = getVideoElement(nextLayer);
-    if (nextVideo) {
-      setIsVideoReady(nextVideo.readyState >= 2);
-      if (nextVideo.videoWidth > 0 && nextVideo.videoHeight > 0) {
-        setVideoDimensions({ width: nextVideo.videoWidth, height: nextVideo.videoHeight });
-      }
-    }
-    refreshLeadVideoState();
-  }, [getVideoElement, refreshLeadVideoState, syncExternalVideoRef]);
-
   const setPrimaryVideoElement = useCallback((node: HTMLVideoElement | null) => {
     primaryVideoElementRef.current = node;
     if (leadLayerRef.current === 'primary') {
@@ -319,6 +305,20 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setVideoLoadError(null);
     }
   }, [getLeadVideo]);
+
+  const setLeadLayerSafely = useCallback((nextLayer: LayerId) => {
+    leadLayerRef.current = nextLayer;
+    setLeadLayer(nextLayer);
+    syncExternalVideoRef(nextLayer);
+    const nextVideo = getVideoElement(nextLayer);
+    if (nextVideo) {
+      setIsVideoReady(nextVideo.readyState >= 2);
+      if (nextVideo.videoWidth > 0 && nextVideo.videoHeight > 0) {
+        setVideoDimensions({ width: nextVideo.videoWidth, height: nextVideo.videoHeight });
+      }
+    }
+    refreshLeadVideoState();
+  }, [getVideoElement, refreshLeadVideoState, syncExternalVideoRef]);
 
   useEffect(() => {
     syncExternalVideoRef(leadLayer);
