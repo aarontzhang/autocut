@@ -9,7 +9,8 @@ async function readErrorMessage(response: Response) {
 export async function uploadProjectMedia(
   file: File,
   projectId: string,
-  folder: 'main' | 'sources' | 'tracks' = 'sources'
+  folder: 'main' | 'sources' | 'tracks' = 'sources',
+  durationSeconds?: number,
 ) {
   if (file.size > STORAGE_FILE_LIMIT_BYTES) {
     throw new Error(getFileSizeErrorMessage());
@@ -47,6 +48,7 @@ export async function uploadProjectMedia(
       storagePath,
       fileName: file.name,
       fileSize: file.size,
+      durationSeconds,
     }),
   });
   if (!finalizeRes.ok) throw new Error(await readErrorMessage(finalizeRes));

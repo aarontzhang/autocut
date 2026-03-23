@@ -18,7 +18,8 @@ async function readErrorMessage(response: Response) {
 
 export async function uploadVideoToSupabase(
   file: File,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number) => void,
+  durationSeconds?: number,
 ): Promise<UploadResult> {
   let projectId: string | null = null;
 
@@ -84,6 +85,7 @@ export async function uploadVideoToSupabase(
       storagePath,
       fileName: file.name,
       fileSize: file.size,
+      durationSeconds,
     }),
   });
   if (!finalizeRes.ok) {

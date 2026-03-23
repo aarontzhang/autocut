@@ -99,9 +99,20 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
 
   const body = await request.json().catch(() => ({}));
   if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
-    const durationSeconds = await readStoredVideoDurationSeconds(supabase, body.video_path);
-    if (durationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
-      return NextResponse.json({ error: getVideoDurationLimitErrorMessage() }, { status: 413 });
+    const clientDurationSeconds = typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
+      ? Math.max(0, body.durationSeconds)
+      : null;
+    try {
+      const durationSeconds = await readStoredVideoDurationSeconds(supabase, body.video_path);
+      const effectiveDurationSeconds = durationSeconds > 0 ? durationSeconds : (clientDurationSeconds ?? 0);
+      if (effectiveDurationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+        return NextResponse.json({ error: getVideoDurationLimitErrorMessage() }, { status: 413 });
+      }
+    } catch (durationError) {
+      console.warn('[projects.patch] failed to validate uploaded video duration; continuing with client-side duration fallback', durationError);
+      if ((clientDurationSeconds ?? 0) > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+        return NextResponse.json({ error: getVideoDurationLimitErrorMessage() }, { status: 413 });
+      }
     }
   }
 

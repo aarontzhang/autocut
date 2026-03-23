@@ -177,6 +177,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
   const handleStorageUploadError = useCallback((error: unknown) => {
     const message = error instanceof Error ? error.message : 'Upload failed';
+    if (message === 'Failed to validate uploaded video duration') {
+      setStorageNotice(null);
+      return;
+    }
     setStorageNotice(message);
   }, []);
 
@@ -535,7 +539,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       const draft = drafts[index];
       const folder = !hadSources && index === 0 && source.isPrimary ? 'main' : 'sources';
       try {
-        const uploaded = await uploadProjectMedia(draft.file, targetProjectId, folder);
+        const uploaded = await uploadProjectMedia(draft.file, targetProjectId, folder, draft.duration);
         updateSource(source.id, {
           storagePath: uploaded.storagePath,
           assetId: uploaded.assetId,

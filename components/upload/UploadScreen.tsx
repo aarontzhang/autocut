@@ -81,7 +81,8 @@ export default function UploadScreen() {
     try {
       const { projectId, storagePath } = await uploadVideoToSupabase(
         file,
-        (pct) => setUploadProgress(pct)
+        (pct) => setUploadProgress(pct),
+        duration,
       );
       await refreshQuota();
       console.log('Upload success:', { projectId, storagePath });

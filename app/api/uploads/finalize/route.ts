@@ -52,6 +52,9 @@ export async function POST(request: NextRequest) {
   const storagePath = typeof body.storagePath === 'string' ? body.storagePath : '';
   const fileName = typeof body.fileName === 'string' ? body.fileName : null;
   const fileSize = typeof body.fileSize === 'number' && Number.isFinite(body.fileSize) ? Math.max(0, body.fileSize) : null;
+  const clientDurationSeconds = typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
+    ? Math.max(0, body.durationSeconds)
+    : null;
 
   if (!isUploadKind(kind) || !projectId || !storagePath || !isExpectedStoragePath(user.id, projectId, kind, storagePath)) {
     return NextResponse.json({ error: 'Invalid finalize request' }, { status: 400 });
@@ -99,23 +102,32 @@ export async function POST(request: NextRequest) {
     }, { status: 413 });
   }
 
+  const rejectOverlongUpload = async () => {
+    await removeStorageObjects([storagePath]);
+    await removeTrackedStorageUploads([storagePath]);
+
+    if (kind === 'project-main') {
+      await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
+    }
+
+    return NextResponse.json({
+      error: getVideoDurationLimitErrorMessage(),
+    }, { status: 413 });
+  };
+
   try {
-    const durationSeconds = await readStoredVideoDurationSeconds(supabase, storagePath);
-    if (durationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
-      await removeStorageObjects([storagePath]);
-      await removeTrackedStorageUploads([storagePath]);
-
-      if (kind === 'project-main') {
-        await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
-      }
-
-      return NextResponse.json({
-        error: getVideoDurationLimitErrorMessage(),
-      }, { status: 413 });
+    const probedDurationSeconds = await readStoredVideoDurationSeconds(supabase, storagePath);
+    const effectiveDurationSeconds = probedDurationSeconds > 0
+      ? probedDurationSeconds
+      : (clientDurationSeconds ?? 0);
+    if (effectiveDurationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+      return rejectOverlongUpload();
     }
   } catch (durationError) {
-    console.error('[uploads.finalize] failed to validate uploaded video duration', durationError);
-    return NextResponse.json({ error: 'Failed to validate uploaded video duration' }, { status: 500 });
+    console.warn('[uploads.finalize] failed to validate uploaded video duration; continuing with client-side duration fallback', durationError);
+    if ((clientDurationSeconds ?? 0) > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
+      return rejectOverlongUpload();
+    }
   }
 
   let assetId: string | null = null;
