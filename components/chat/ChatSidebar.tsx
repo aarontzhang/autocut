@@ -3775,11 +3775,6 @@ export default function ChatSidebar() {
     : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
       ? `${sourceIndexAnalysis.error} Retry the failed source analysis to finish initial indexing.`
       : null;
-  const isAnalyzingSampledFrames = hasVideoSource
-    && (transcriptStatus === 'done' || transcriptFailed)
-    && analysisOverviewFrames !== null
-    && frameAnalysisError === null
-    && !frameDescriptionsReady;
   const mediaPreparationBlockingSend = hasVideoSource && !initialIndexingReady;
   const secondaryIndexingProgress: IndexingProgress | null = (!usingServerSourceIndex && transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
     ? frameIndexingProgress
@@ -3843,9 +3838,15 @@ export default function ChatSidebar() {
       });
     }
   }
+  const visualAnalysisBlockingSend = analysisStatusCards.some((card) => (
+    card.title === 'Visual analysis' && card.tone !== 'completed'
+  ));
   const composerInputDisabled = isChatLoading || reviewLocked;
-  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
-  const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
+  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend || visualAnalysisBlockingSend;
+  const canSubmitMessage = input.trim().length > 0
+    && !composerInputDisabled
+    && !mediaPreparationBlockingSend
+    && !visualAnalysisBlockingSend;
   const activeLoadingPhaseId = loadingPhaseId ?? (mediaPreparationBlockingSend ? 'initial_indexing_required' : null);
 
   const resizeComposer = useCallback(() => {
@@ -4200,7 +4201,7 @@ export default function ChatSidebar() {
                   ? 'Finish the active review…'
                   : isChatLoading
                     ? 'Autocut is working…'
-                    : isAnalyzingSampledFrames
+                    : visualAnalysisBlockingSend
                       ? 'Visuals are loading. You can type…'
                     : mediaPreparationBlockingSend
                       ? 'Media is loading. You can type…'
