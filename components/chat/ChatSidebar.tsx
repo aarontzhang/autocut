@@ -31,7 +31,7 @@ import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady, isInitialIndexingReadyForSource } from '@/lib/sourceIndexGate';
 import {
   actionsMatch,
   buildRequestChainContinuationMessage,
@@ -946,6 +946,7 @@ function formatServerTaskStatusLine(kind: 'audio' | 'visual', task: SourceIndexT
 function buildServerSourceAnalysisCards(params: {
   sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
   analysisBySourceId: SourceIndexAnalysisStateMap;
+  freshnessBySourceId: Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>;
   actionLoadingKey: string | null;
   onAction: (sourceId: string, action: 'pause' | 'resume' | 'retry') => void;
 }): ServerSourceAnalysisCard[] {
@@ -958,6 +959,10 @@ function buildServerSourceAnalysisCards(params: {
 
   return params.sources.flatMap((source, index) => {
     const analysis = params.analysisBySourceId[source.sourceId] ?? null;
+    const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
+    if (isInitialIndexingReadyForSource({ analysis, freshness })) {
+      return [];
+    }
     const audioTask = analysis?.audio ?? {
       status: source.status === 'error' ? 'failed' : 'queued',
       completed: 0,
@@ -2911,8 +2916,8 @@ export default function ChatSidebar() {
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
   const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
   const initialIndexingReady = useMemo(
-    () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId),
-    [sourceIndexAnalysisBySourceId, sources],
+    () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId),
+    [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sources],
   );
   const overviewReadySourceIds = useMemo(() => new Set(
     (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
@@ -3984,6 +3989,7 @@ export default function ChatSidebar() {
     ? buildServerSourceAnalysisCards({
         sources: availableSources,
         analysisBySourceId: sourceIndexAnalysisBySourceId,
+        freshnessBySourceId: sourceIndexFreshBySourceId,
         actionLoadingKey: analysisActionKey,
         onAction: handleServerAnalysisAction,
       })

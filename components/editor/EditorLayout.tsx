@@ -117,7 +117,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
-  const initialIndexingReady = getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId);
+  const initialIndexingReady = getInitialIndexingReady(
+    sources,
+    sourceIndexAnalysisBySourceId,
+    sourceIndexFreshBySourceId,
+  );
 
   const refreshSourceIndex = useCallback(async (targetProjectId: string) => {
     const sourceIndexRes = await fetch(`/api/projects/${targetProjectId}/source-index`, { cache: 'no-store' });

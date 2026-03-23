@@ -1,4 +1,9 @@
-import type { ProjectSource, SourceIndexAnalysisStateMap } from './types';
+import type {
+  ProjectSource,
+  SourceIndexAnalysisState,
+  SourceIndexAnalysisStateMap,
+  SourceIndexState,
+} from './types';
 
 function requiresInitialIndexing(source: Pick<ProjectSource, 'storagePath' | 'assetId'>) {
   return Boolean(source.storagePath || source.assetId);
@@ -13,15 +18,30 @@ export function getInitialIndexingTrackedSourceIds(
     .map((source) => source.id);
 }
 
+export function isInitialIndexingReadyForSource(input: {
+  analysis?: SourceIndexAnalysisState | null;
+  freshness?: Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null;
+}): boolean {
+  const audioReady = input.freshness?.transcript === true
+    || input.analysis?.audio?.status === 'completed'
+    || input.analysis?.audio?.status === 'unavailable';
+  const visualReady = input.freshness?.overview === true
+    || input.analysis?.visual?.status === 'completed';
+  return audioReady && visualReady;
+}
+
 export function getInitialIndexingReady(
   sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId'>>,
   analysisBySourceId: SourceIndexAnalysisStateMap,
+  freshnessBySourceId?: Record<string, Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null | undefined>,
 ): boolean {
   const trackedSourceIds = getInitialIndexingTrackedSourceIds(sources, analysisBySourceId);
   if (trackedSourceIds.length === 0) return true;
 
   return trackedSourceIds.every((sourceId) => {
-    const analysis = analysisBySourceId[sourceId];
-    return analysis?.audio?.status === 'completed' && analysis.visual?.status === 'completed';
+    return isInitialIndexingReadyForSource({
+      analysis: analysisBySourceId[sourceId],
+      freshness: freshnessBySourceId?.[sourceId],
+    });
   });
 }
