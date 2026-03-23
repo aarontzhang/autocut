@@ -225,6 +225,7 @@ No action:
 - If a previous assistant reply already identified a likely moment or time window and the user asks you to tag, mark, cut, caption, or otherwise act on that same moment, emit the concrete action directly instead of restating the evidence.
 - Prefer reasoning from the structured conversation state in context over keyword matching. Use earlier user goals, the latest unresolved proposal, markers, and the latest assistant evidence together to infer intent.
 - If context includes a structured request-chain continuation block, treat that as the highest-priority instruction for what remains to do next. Continue only the remaining objective, respect the completed-action list and duplicate blacklist, and do not repeat already completed steps.
+- When a continuation block is present, compare the original request against the completed actions before proposing anything new. If the request is already satisfied, do not invent another edit.
 - If the latest user message contains a clear edit request, always attempt it — use the transcript and frame summaries to gather evidence. Never ask the user to clarify when you can investigate yourself.
 - When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
@@ -590,14 +591,6 @@ function extractExplicitTimesFromText(text: string): number[] {
   return matches;
 }
 
-function assistantRequestedRefinement(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return normalized.includes('approximate timestamp')
-    || normalized.includes('narrower range')
-    || normalized.includes('closer look')
-    || normalized.includes('find the exact frame');
-}
-
 function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
   const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
   if (latestUserIndex === -1) return null;
@@ -605,10 +598,23 @@ function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
   const latestUserMessage = messages[latestUserIndex]?.content ?? '';
   if (extractExplicitTimesFromText(latestUserMessage).length === 0) return null;
 
+  const normalizedLatestUserMessage = latestUserMessage
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\s@:'".-]/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (
+    !normalizedLatestUserMessage
+    || normalizedLatestUserMessage.split(/\s+/).length > 10
+    || /^(remove|cut|trim|delete|caption|add|transcribe|mark|move|set|speed|mute|fade|find|place|put|tag)\b/.test(normalizedLatestUserMessage)
+  ) {
+    return null;
+  }
+
   const previousAssistant = [...messages.slice(0, latestUserIndex)]
     .reverse()
     .find((message) => message.role === 'assistant');
-  if (!previousAssistant || !assistantRequestedRefinement(previousAssistant.content)) return null;
+  if (!previousAssistant) return null;
 
   const priorUserMessage = [...messages.slice(0, latestUserIndex)]
     .reverse()
@@ -688,16 +694,6 @@ function isActionResolved(turn: RichChatTurn): boolean {
   return turn.actionStatus === 'completed' || turn.actionStatus === 'rejected' || turn.autoApplied === true;
 }
 
-function isLikelySilenceRequest(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return /\b(remove|cut|trim|delete|auto[- ]?edit)\b[\w\s]{0,32}\b(silence|silent|dead air|pauses?)\b/.test(normalized)
-    || /\bnot speaking\b/.test(normalized)
-    || /\bwhere i(?:'| a)?m not speaking\b/.test(normalized)
-    || /\bwhere i am not speaking\b/.test(normalized)
-    || /\bcut out silence\b/.test(normalized)
-    || /\bremove the parts where\b/.test(normalized);
-}
-
 function isLikelyContextDependentFollowUp(message: string, previousUserMessage?: string | null): boolean {
   const normalized = message
     .trim()
@@ -736,9 +732,9 @@ function isLikelyContextDependentFollowUp(message: string, previousUserMessage?:
 
   if (
     previousUserMessage
-    && isLikelySilenceRequest(previousUserMessage)
     && /\b(before|after|between|from|until|up to)\b/.test(normalized)
-    && !isLikelySilenceRequest(normalized)
+    && normalized.split(/\s+/).length <= 8
+    && !/^(remove|cut|trim|delete|caption|add|transcribe|mark|move|set|speed|mute|fade|find|place|put|tag)\b/.test(normalized)
   ) {
     return true;
   }
@@ -844,15 +840,21 @@ function formatRequestChainContinuationContext(
 ): string[] {
   if (!continuation) return [];
 
+  const completedActionSummaries = continuation.completedActions
+    .map((action) => {
+      const safeSummary = sanitizeInlineUntrustedText(action.summary, 160);
+      return safeSummary ? `${action.type}: ${safeSummary}` : action.type;
+    });
+
   const lines = [
     `Structured continuation for request chain ${continuation.requestChainId}: continue only the unfinished objective from "${sanitizeInlineUntrustedText(continuation.originalRequest, 220)}".`,
   ];
   if (continuation.remainingObjective) {
     lines.push(`Remaining objective: "${sanitizeInlineUntrustedText(continuation.remainingObjective, 220)}".`);
   }
-  if (continuation.completedActions.length > 0) {
+  if (completedActionSummaries.length > 0) {
     lines.push(
-      `Completed actions in this chain: ${continuation.completedActions.map((action) => action.type).join(' | ')}.`,
+      `Completed actions in this chain: ${completedActionSummaries.join(' | ')}.`,
     );
   }
   if (continuation.duplicateActionBlacklist.length > 0) {
@@ -863,6 +865,7 @@ function formatRequestChainContinuationContext(
   lines.push(
     `Transcript availability for this chain: canonical=${continuation.transcript.canonicalAvailable ? 'yes' : 'no'}, requested_during_chain=${continuation.transcript.requestedDuringChain ? 'yes' : 'no'}, missing=${continuation.transcript.missing ? 'yes' : 'no'}.`,
   );
+  lines.push('Before proposing another edit, decide whether the original request is already satisfied by the completed actions above. If it is, finish without inventing more work.');
   if (continuation.explicitInstruction) {
     lines.push(`Continuation instruction: ${sanitizeInlineUntrustedText(continuation.explicitInstruction, 220)}`);
   }

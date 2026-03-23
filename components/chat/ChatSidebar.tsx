@@ -720,17 +720,6 @@ function normalizeRequestObjective(value: string | null | undefined): string | n
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-function isSilenceAndCaptionRequest(text: string): boolean {
-  const normalized = text.toLowerCase();
-  const wantsCaptions = /\b(caption|captions|subtitle|subtitles)\b/.test(normalized);
-  const wantsSilenceRemoval = /\b(remove|cut|trim|delete|auto[- ]?edit)\b[\w\s]{0,32}\b(silence|silent|dead air|pauses?)\b/.test(normalized)
-    || /\bremove silence\b/.test(normalized)
-    || /\bcut out silence\b/.test(normalized)
-    || /\b(remove|cut|trim|delete)\b[\w\s]{0,48}\b(?:i am|i'm|im|we are|we're|were)?[\w\s]{0,24}\bnot (?:speaking|talking)\b/.test(normalized)
-    || /\b(non[- ]speaking|no speech|speaker absence|without speech)\b/.test(normalized);
-  return wantsCaptions && wantsSilenceRemoval;
-}
-
 function buildContinuationPayload(
   chainState: RequestChainState,
   trigger: RequestChainContinuationPayload['trigger'],
@@ -743,6 +732,7 @@ function buildContinuationPayload(
     completedActions: chainState.completedActions.map((action) => ({
       type: action.type,
       signature: serializeActionForComparison(action),
+      summary: action.message,
     })),
     duplicateActionBlacklist: chainState.duplicateActionBlacklist,
     transcript: chainState.transcript,
@@ -3583,10 +3573,7 @@ export default function ChatSidebar() {
       completedActions: [...current.completedActions, action],
       duplicateRerunCount: 0,
       remainingObjective: current.remainingObjective,
-      duplicateActionBlacklist: isSilenceAndCaptionRequest(current.originalRequest)
-        && (action.type === 'delete_range' || action.type === 'delete_ranges')
-        ? ['delete_range', 'delete_ranges']
-        : current.duplicateActionBlacklist,
+      duplicateActionBlacklist: [],
       transcript: {
         ...current.transcript,
         missing: !current.transcript.canonicalAvailable && !current.transcript.requestedDuringChain,
@@ -3726,6 +3713,9 @@ export default function ChatSidebar() {
       if ((duplicateAction || blacklistedAction) && requestChainId && chainState && chainState.duplicateRerunCount < 1) {
         const rerunState = updateRequestChainState(requestChainId, (current) => ({
           ...current,
+          duplicateActionBlacklist: action && action.type !== 'none'
+            ? [action.type]
+            : current.duplicateActionBlacklist,
           duplicateRerunCount: current.duplicateRerunCount + 1,
         }));
         if (rerunState) {
@@ -3764,7 +3754,6 @@ export default function ChatSidebar() {
       if (requestChainId && action?.type === 'transcribe_request') {
         updateRequestChainState(requestChainId, (current) => ({
           ...current,
-          remainingObjective: current.remainingObjective ?? current.originalRequest,
           transcript: {
             ...current.transcript,
             requestedDuringChain: true,
@@ -3788,6 +3777,24 @@ export default function ChatSidebar() {
           : undefined,
       });
       producedVisibleResponse = true;
+      if (requestChainId && markerAction && action && !markerActionPreviouslyApplied && round < 2) {
+        const nextChainState = requestChainStateRef.current[requestChainId] ?? null;
+        if (nextChainState) {
+          setLoadingStatus('Continuing with remaining steps…');
+          setLoadingPhaseId('continuing_remaining_step');
+          nextHistory = buildChatRequestHistory(
+            useEditorStore.getState().messages,
+            useEditorStore.getState().appliedActions,
+            buildContinuationPayload(
+              nextChainState,
+              'action_resolved',
+              'The previous action is already applied. Decide what distinct work, if any, still remains from the original request. Do not repeat that same edit.',
+            ),
+            requestChainId,
+          );
+          continue;
+        }
+      }
       return;
     }
 
@@ -3860,7 +3867,7 @@ export default function ChatSidebar() {
     const requestChainId = assistantMessage?.requestChainId;
     if (!requestChainId) return;
     const chainState = requestChainStateRef.current[requestChainId];
-    if (!chainState || chainState.transcript.canonicalAvailable || !chainState.transcript.requestedDuringChain || !chainState.remainingObjective) {
+    if (!chainState || chainState.transcript.canonicalAvailable || !chainState.transcript.requestedDuringChain) {
       return;
     }
     const nextChainState = updateRequestChainState(requestChainId, (current) => ({
@@ -3884,7 +3891,11 @@ export default function ChatSidebar() {
       const history = buildChatRequestHistory(
         currentMessages,
         useEditorStore.getState().appliedActions,
-        buildContinuationPayload(nextChainState, 'transcript_ready'),
+        buildContinuationPayload(
+          nextChainState,
+          'transcript_ready',
+          'The transcript is now ready. Continue the original request, using the completed-action history to skip anything already done.',
+        ),
         requestChainId,
       );
       await runSingleTurn(history, ctrl, requestChainId);
@@ -3909,31 +3920,15 @@ export default function ChatSidebar() {
     const assistantMessage = currentMessages.find((message) => message.id === messageId && message.role === 'assistant');
     const requestChainId = assistantMessage?.requestChainId;
     if (!requestChainId) return;
-    let nextChainState = recordCompletedChainAction(requestChainId, action);
+    const nextChainState = recordCompletedChainAction(requestChainId, action);
     if (!nextChainState) return;
-    nextChainState = updateRequestChainState(requestChainId, (current) => ({
-      ...current,
-      remainingObjective: isSilenceAndCaptionRequest(current.originalRequest)
-        && (action.type === 'delete_range' || action.type === 'delete_ranges')
-        ? 'Add captions on the current timeline.'
-        : null,
-      duplicateActionBlacklist: isSilenceAndCaptionRequest(current.originalRequest)
-        && (action.type === 'delete_range' || action.type === 'delete_ranges')
-        ? ['delete_range', 'delete_ranges']
-        : current.duplicateActionBlacklist,
-    })) ?? nextChainState;
-    if (!nextChainState.remainingObjective) return;
 
     const storeState = useEditorStore.getState();
     if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
 
     setIsChatLoading(true);
     setLoadingStatus('Continuing with remaining steps…');
-    setLoadingPhaseId(
-      nextChainState.remainingObjective?.toLowerCase().includes('caption')
-        ? 'generating_captions'
-        : 'continuing_remaining_step',
-    );
+    setLoadingPhaseId('continuing_remaining_step');
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     stopRequestedRef.current = false;
@@ -3942,7 +3937,11 @@ export default function ChatSidebar() {
       const history = buildChatRequestHistory(
         currentMessages,
         useEditorStore.getState().appliedActions,
-        buildContinuationPayload(nextChainState, 'action_resolved', 'Continue only with the remaining work.'),
+        buildContinuationPayload(
+          nextChainState,
+          'action_resolved',
+          'The previous action is already applied. Decide what distinct work, if any, still remains from the original request. If the request is complete, finish without proposing another edit.',
+        ),
         requestChainId,
       );
       await runSingleTurn(history, ctrl, requestChainId);
@@ -3955,7 +3954,7 @@ export default function ChatSidebar() {
       setLoadingStatus('');
       setLoadingPhaseId(null);
     }
-  }, [addMessage, initialIndexingReady, recordCompletedChainAction, runSingleTurn, setIsChatLoading, updateRequestChainState]);
+  }, [addMessage, initialIndexingReady, recordCompletedChainAction, runSingleTurn, setIsChatLoading]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;

@@ -16,6 +16,7 @@ export type RequestChainContinuationPayload = {
   completedActions: Array<{
     type: EditAction['type'];
     signature: string;
+    summary?: string;
   }>;
   duplicateActionBlacklist: EditAction['type'][];
   transcript: RequestChainTranscriptAvailability;
@@ -80,7 +81,24 @@ export function parseRequestChainContinuationMessage(
       remainingObjective: typeof parsed.remainingObjective === 'string' && parsed.remainingObjective.trim()
         ? parsed.remainingObjective.trim()
         : null,
-      completedActions: Array.isArray(parsed.completedActions) ? parsed.completedActions : [],
+      completedActions: Array.isArray(parsed.completedActions)
+        ? parsed.completedActions.flatMap((action) => {
+            if (!action || typeof action !== 'object') return [];
+            const candidate = action as {
+              type?: unknown;
+              signature?: unknown;
+              summary?: unknown;
+            };
+            if (typeof candidate.type !== 'string' || typeof candidate.signature !== 'string') return [];
+            return [{
+              type: candidate.type as EditAction['type'],
+              signature: candidate.signature,
+              summary: typeof candidate.summary === 'string' && candidate.summary.trim()
+                ? candidate.summary.trim()
+                : undefined,
+            }];
+          })
+        : [],
       duplicateActionBlacklist: Array.isArray(parsed.duplicateActionBlacklist)
         ? parsed.duplicateActionBlacklist
         : [],
