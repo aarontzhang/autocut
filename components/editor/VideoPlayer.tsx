@@ -178,15 +178,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const videoData = useEditorStore((s) => s.videoData);
   const currentTime = useEditorStore((s) => s.currentTime);
   const videoDuration = useEditorStore((s) => s.videoDuration);
-  const activeSnapshot = useEditorStore((s) => s.reviewInspection?.snapshot ?? s.previewSnapshot);
-  const liveClips = useEditorStore((s) => s.clips);
-  const liveCaptions = useEditorStore((s) => s.captions);
-  const liveTransitions = useEditorStore((s) => s.transitions);
-  const liveTextOverlays = useEditorStore((s) => s.textOverlays);
-  const clips = activeSnapshot?.clips ?? liveClips;
-  const manualCaptions = activeSnapshot?.captions ?? liveCaptions;
-  const transitions = activeSnapshot?.transitions ?? liveTransitions;
-  const textOverlays = activeSnapshot?.textOverlays ?? liveTextOverlays;
+  const clips = useEditorStore((s) => s.previewSnapshot?.clips ?? s.clips);
+  const manualCaptions = useEditorStore((s) => s.previewSnapshot?.captions ?? s.captions);
+  const transitions = useEditorStore((s) => s.previewSnapshot?.transitions ?? s.transitions);
+  const textOverlays = useEditorStore((s) => s.previewSnapshot?.textOverlays ?? s.textOverlays);
 
   const clipById = useMemo(() => new Map(clips.map((clip) => [clip.id, clip])), [clips]);
   const resolvedSources = useMemo(() => resolveProjectSources({
