@@ -632,6 +632,9 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
   for (const source of normalizedSources) {
     const assetId = source.assetId;
     if (!assetId) {
+      if (!source.storagePath) {
+        continue;
+      }
       analysisBySourceId[source.id] = {
         jobId: null,
         status: 'queued',

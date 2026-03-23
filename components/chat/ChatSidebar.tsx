@@ -11,7 +11,6 @@ import {
   IndexedVideoFrame,
   MarkerEntry,
   SilenceCandidate,
-  SourceIndexAnalysisState,
   SourceIndexAnalysisStateMap,
   SourceIndexTaskState,
   SourceIndexedFrame,
@@ -105,21 +104,6 @@ type AnalysisStatusCard = {
   detail?: string | null;
   secondaryLabel?: string | null;
   tone?: ProgressCardTone;
-};
-
-type ServerSourceAnalysisCard = {
-  key: string;
-  title: string;
-  clipLabel: string;
-  statusLine: string;
-  helperText?: string | null;
-  etaSeconds?: number | null;
-  tone: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'unavailable';
-  action?: {
-    label: 'Pause' | 'Resume' | 'Retry';
-    onClick: () => void;
-    disabled?: boolean;
-  } | null;
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
@@ -898,57 +882,18 @@ function formatSourceScopedProgressLabel(params: {
   return `Clip ${sourceIndex}/${totalSources} • ${fileName} • ${actionLabel} ${completed}/${Math.max(total, 1)}`;
 }
 
-function getServerTaskStatusTone(status: SourceIndexTaskState['status']): ServerSourceAnalysisCard['tone'] {
-  switch (status) {
-    case 'running':
-      return 'running';
-    case 'paused':
-      return 'paused';
-    case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'failed';
-    case 'unavailable':
-      return 'unavailable';
-    case 'queued':
-    default:
-      return 'queued';
-  }
-}
-
-function formatServerTaskStatusLine(kind: 'audio' | 'visual', task: SourceIndexTaskState): string {
-  const actionLabel = kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals';
-  switch (task.status) {
-    case 'running':
-      return `${actionLabel} ${Math.min(task.completed, task.total)}/${task.total}`;
-    case 'paused':
-      return `${kind === 'audio' ? 'Audio paused' : 'Visuals paused'} ${Math.min(task.completed, task.total)}/${task.total}`;
-    case 'completed':
-      return `${actionLabel} ${task.total}/${task.total}`;
-    case 'failed':
-      return 'Failed';
-    case 'unavailable':
-      return 'Unavailable';
-    case 'queued':
-    default:
-      return 'Queued';
-  }
-}
-
-function buildServerSourceAnalysisCards(params: {
-  sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
+function buildServerAnalysisStatusCards(params: {
+  sources: Array<{
+    sourceId: string;
+    fileName: string;
+    status: string;
+    duration: number;
+    storagePath: string | null;
+    assetId: string | null;
+  }>;
   analysisBySourceId: SourceIndexAnalysisStateMap;
   freshnessBySourceId: Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>;
-  actionLoadingKey: string | null;
-  onAction: (sourceId: string, action: 'pause' | 'resume' | 'retry') => void;
-}): ServerSourceAnalysisCard[] {
-  const shouldRenderTask = (task: SourceIndexTaskState) => (
-    task.status === 'queued'
-    || task.status === 'running'
-    || task.status === 'paused'
-    || task.status === 'failed'
-  );
-
+}): AnalysisStatusCard[] {
   const buildFallbackTask = (
     kind: 'audio' | 'visual',
     source: { status: string },
@@ -993,52 +938,75 @@ function buildServerSourceAnalysisCards(params: {
     return task ?? buildFallbackTask(kind, source, freshness);
   };
 
-  return params.sources.flatMap((source, index) => {
-    const analysis = params.analysisBySourceId[source.sourceId] ?? null;
-    const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
-    if (
-      (freshness?.transcript === true || analysis?.audio?.status === 'completed' || analysis?.audio?.status === 'unavailable')
-      && (freshness?.overview === true || analysis?.visual?.status === 'completed')
-    ) {
-      return [];
-    }
-    const audioTask = getDisplayTask('audio', source, analysis?.audio, freshness);
-    const visualTask = getDisplayTask('visual', source, analysis?.visual, freshness);
+  const trackedSources = params.sources.filter((source) => (
+    Boolean(source.storagePath || source.assetId || params.analysisBySourceId[source.sourceId])
+  ));
+  if (trackedSources.length === 0) return [];
 
-    const buildCard = (kind: 'audio' | 'visual', task: SourceIndexTaskState): ServerSourceAnalysisCard => {
-      const actionType = task.status === 'failed'
-        ? 'retry'
-        : task.status === 'running' || task.status === 'queued'
-        ? 'pause'
-        : task.status === 'paused'
-          ? 'resume'
-          : null;
-      const actionKey = actionType ? `${source.sourceId}:${actionType}` : null;
+  const buildAggregateCard = (kind: 'audio' | 'visual'): AnalysisStatusCard => {
+    const tasks = trackedSources.map((source) => {
+      const analysis = params.analysisBySourceId[source.sourceId] ?? null;
+      const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
+      return getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
+    });
+    const total = tasks.length;
+    const completed = tasks.filter((task) => (
+      task.status === 'completed' || (kind === 'audio' && task.status === 'unavailable')
+    )).length;
+    const title = kind === 'audio' ? 'Audio analysis' : 'Visual analysis';
+    const completedStage = kind === 'audio' ? 'transcribing' : 'describing_frames';
+    const activeStage = kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames';
+    const firstReason = tasks.find((task) => task.reason)?.reason ?? null;
+    const aggregateStatus = tasks.some((task) => task.status === 'running')
+      ? 'running'
+      : tasks.some((task) => task.status === 'paused')
+        ? 'paused'
+        : tasks.some((task) => task.status === 'failed')
+          ? 'failed'
+          : 'queued';
+
+    if (completed >= total) {
       return {
-        key: `${source.sourceId}:${kind}`,
-        title: kind === 'audio' ? 'Audio analysis' : 'Visual analysis',
-        clipLabel: `Clip ${index + 1}/${params.sources.length}`,
-        statusLine: formatServerTaskStatusLine(kind, task),
-        helperText: task.reason ?? null,
-        etaSeconds: task.status === 'running' ? task.etaSeconds ?? null : null,
-        tone: getServerTaskStatusTone(task.status),
-        action: actionType ? {
-          label: actionType === 'pause' ? 'Pause' : actionType === 'resume' ? 'Resume' : 'Retry',
-          onClick: () => params.onAction(source.sourceId, actionType),
-          disabled: params.actionLoadingKey === actionKey,
-        } : null,
+        key: `${kind}-analysis`,
+        title,
+        progress: buildCompletedProgress(completedStage),
+        tone: 'completed',
       };
-    };
+    }
 
-    const cards: ServerSourceAnalysisCard[] = [];
-    if (shouldRenderTask(audioTask)) {
-      cards.push(buildCard('audio', audioTask));
-    }
-    if (shouldRenderTask(visualTask)) {
-      cards.push(buildCard('visual', visualTask));
-    }
-    return cards;
-  });
+    return {
+      key: `${kind}-analysis`,
+      title,
+      progress: {
+        stage: activeStage,
+        completed,
+        total,
+        label: aggregateStatus === 'running'
+          ? `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${completed}/${total}`
+          : aggregateStatus === 'paused'
+            ? `${kind === 'audio' ? 'Audio analysis paused' : 'Visual analysis paused'} ${completed}/${total}`
+            : aggregateStatus === 'failed'
+              ? `${kind === 'audio' ? 'Audio analysis needs attention' : 'Visual analysis needs attention'} ${completed}/${total}`
+              : `${kind === 'audio' ? 'Preparing audio analysis' : 'Preparing visual analysis'} ${completed}/${total}`,
+        etaSeconds: aggregateStatus === 'running'
+          ? Math.max(...tasks.map((task) => Math.max(task.etaSeconds ?? 0, 0)), 0) || null
+          : null,
+      },
+      secondaryLabel: aggregateStatus === 'running'
+        ? `${completed}/${total} clips ready`
+        : aggregateStatus === 'paused'
+          ? 'Paused'
+          : aggregateStatus === 'failed'
+            ? firstReason ?? 'Analysis needs attention.'
+            : 'Waiting to start',
+      detail: aggregateStatus === 'failed' && firstReason ? firstReason : null,
+    };
+  };
+
+  return [
+    buildAggregateCard('audio'),
+    buildAggregateCard('visual'),
+  ];
 }
 
 function packFramesForChat(
@@ -2779,99 +2747,6 @@ function EmptyState({
   );
 }
 
-function SourceAnalysisStatusCard(props: ServerSourceAnalysisCard) {
-  const toneStyles = props.tone === 'failed'
-    ? {
-        border: '1px solid rgba(248,113,113,0.28)',
-        background: 'linear-gradient(180deg, rgba(127,29,29,0.22), rgba(69,10,10,0.14))',
-        titleColor: '#fca5a5',
-        textColor: 'rgba(254,202,202,0.9)',
-      }
-    : props.tone === 'completed'
-      ? {
-          border: '1px solid rgba(34,197,94,0.18)',
-          background: 'linear-gradient(180deg, rgba(17,94,89,0.22), rgba(6,78,59,0.12))',
-          titleColor: 'rgba(167,243,208,0.95)',
-          textColor: 'rgba(209,250,229,0.9)',
-        }
-      : props.tone === 'paused'
-        ? {
-            border: '1px solid rgba(251,191,36,0.18)',
-            background: 'linear-gradient(180deg, rgba(120,53,15,0.22), rgba(69,26,3,0.12))',
-            titleColor: 'rgba(253,224,71,0.95)',
-            textColor: 'rgba(254,240,138,0.88)',
-          }
-        : {
-            border: '1px solid rgba(255,255,255,0.08)',
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
-            titleColor: 'var(--fg-secondary)',
-            textColor: 'var(--fg-muted)',
-          };
-
-  return (
-    <div style={{
-      marginLeft: 22,
-      padding: '12px 13px',
-      borderRadius: 10,
-      border: toneStyles.border,
-      background: toneStyles.background,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <span style={{ fontSize: 11, color: toneStyles.titleColor, fontFamily: 'var(--font-serif)' }}>
-          {props.title}
-        </span>
-        {props.action && (
-          <button
-            type="button"
-            onClick={props.action.onClick}
-            disabled={props.action.disabled}
-            style={{
-              height: 24,
-              padding: '0 9px',
-              borderRadius: 999,
-              border: '1px solid rgba(255,255,255,0.12)',
-              background: props.action.disabled ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.06)',
-              color: props.action.disabled ? 'rgba(255,255,255,0.3)' : 'var(--fg-secondary)',
-              fontSize: 10,
-              fontFamily: 'var(--font-serif)',
-              cursor: props.action.disabled ? 'default' : 'pointer',
-            }}
-          >
-            {props.action.label}
-          </button>
-        )}
-      </div>
-      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
-        {props.clipLabel}
-      </span>
-      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
-        {props.statusLine}
-      </span>
-      <span style={{ fontSize: 10, color: toneStyles.textColor, fontFamily: 'var(--font-serif)' }}>
-        {props.tone === 'completed'
-          ? 'Completed'
-          : props.etaSeconds && Number.isFinite(props.etaSeconds) && props.etaSeconds > 0
-            ? formatCountdownLabel(props.etaSeconds)
-            : props.tone === 'paused'
-              ? 'Paused'
-              : props.tone === 'failed'
-                ? 'Failed'
-                : props.tone === 'unavailable'
-                  ? 'Unavailable'
-                  : 'Waiting to start'}
-      </span>
-      {props.helperText && (
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
-          {props.helperText}
-        </span>
-      )}
-    </div>
-  );
-}
-
 // ─── Main sidebar ──────────────────────────────────────────────────────────────
 export default function ChatSidebar() {
   const [input, setInput] = useState('');
@@ -2907,7 +2782,6 @@ export default function ChatSidebar() {
   const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
-  const [analysisActionKey, setAnalysisActionKey] = useState<string | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoData = useEditorStore(s => s.videoData);
@@ -2924,8 +2798,6 @@ export default function ChatSidebar() {
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
-  const hydrateSourceIndex = useEditorStore(s => s.hydrateSourceIndex);
-  const updateSource = useEditorStore(s => s.updateSource);
   const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
   const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
@@ -2966,81 +2838,8 @@ export default function ChatSidebar() {
   ), [availableSources, overviewReadySourceIds, sourceIndexFreshBySourceId]);
   useEffect(() => {
     setFrameAnalysisError(null);
-    setAnalysisActionKey(null);
     requestChainStateRef.current = {};
   }, [currentProjectId]);
-
-  const applyServerSourceIndexPayload = useCallback((payload: {
-    sourceTranscriptCaptions?: CaptionEntry[] | null;
-    sourceOverviewFrames?: SourceIndexedFrame[] | null;
-    sourceIndexFreshBySourceId?: Record<string, unknown>;
-    analysis?: SourceIndexAnalysisState | null;
-    analysisBySourceId?: SourceIndexAnalysisStateMap;
-    sources?: Array<{
-      id?: string;
-      storagePath?: string | null;
-      assetId?: string | null;
-      duration?: number;
-      status?: string;
-    }>;
-  }) => {
-    if (Array.isArray(payload.sources)) {
-      payload.sources.forEach((source) => {
-        if (typeof source?.id !== 'string') return;
-        updateSource(source.id, {
-          storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
-          assetId: typeof source.assetId === 'string' ? source.assetId : null,
-          duration: typeof source.duration === 'number' ? source.duration : undefined,
-          status: source.status as typeof sources[number]['status'],
-        });
-      });
-    }
-    hydrateSourceIndex({
-      sourceTranscriptCaptions: Array.isArray(payload.sourceTranscriptCaptions) ? payload.sourceTranscriptCaptions : null,
-      sourceOverviewFrames: Array.isArray(payload.sourceOverviewFrames) ? payload.sourceOverviewFrames : null,
-      sourceIndexFreshBySourceId: payload.sourceIndexFreshBySourceId as typeof sourceIndexFreshBySourceId,
-      analysis: payload.analysis ?? null,
-      analysisBySourceId: payload.analysisBySourceId ?? {},
-    });
-  }, [hydrateSourceIndex, updateSource]);
-
-  const handleServerAnalysisAction = useCallback(async (sourceId: string, action: 'pause' | 'resume' | 'retry') => {
-    if (!currentProjectId) return;
-    const actionKey = `${sourceId}:${action}`;
-    setAnalysisActionKey(actionKey);
-    try {
-      const res = await fetch(`/api/projects/${currentProjectId}/source-index`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId, action }),
-      });
-      const data = await parseJsonResponse<{
-        error?: string;
-        sourceTranscriptCaptions?: CaptionEntry[] | null;
-        sourceOverviewFrames?: SourceIndexedFrame[] | null;
-        sourceIndexFreshBySourceId?: Record<string, unknown>;
-        analysis?: SourceIndexAnalysisState | null;
-        analysisBySourceId?: SourceIndexAnalysisStateMap;
-        sources?: Array<{
-          id?: string;
-          storagePath?: string | null;
-          assetId?: string | null;
-          duration?: number;
-          status?: string;
-        }>;
-      }>(res);
-      if (!res.ok) {
-        throw new Error(data?.error ?? 'Failed to update source analysis.');
-      }
-      if (data) {
-        applyServerSourceIndexPayload(data);
-      }
-    } catch (error) {
-      console.warn('Failed to update source analysis state.', error);
-    } finally {
-      setAnalysisActionKey((current) => (current === actionKey ? null : current));
-    }
-  }, [applyServerSourceIndexPayload, currentProjectId]);
 
   useEffect(() => {
     if (transcriptStatus === 'loading' && (transcriptProgress === null || transcriptProgress.completed === 0)) {
@@ -4030,17 +3829,14 @@ export default function ChatSidebar() {
     ? 'Coarse indexing can take a while on longer videos.'
     : null;
   const analysisStatusCards: AnalysisStatusCard[] = [];
-  const serverAnalysisCards = usingServerSourceIndex
-    ? buildServerSourceAnalysisCards({
+  if (hasVideoSource) {
+    if (usingServerSourceIndex) {
+      analysisStatusCards.push(...buildServerAnalysisStatusCards({
         sources: availableSources,
         analysisBySourceId: sourceIndexAnalysisBySourceId,
         freshnessBySourceId: sourceIndexFreshBySourceId,
-        actionLoadingKey: analysisActionKey,
-        onAction: handleServerAnalysisAction,
-      })
-    : [];
-  if (hasVideoSource) {
-    if (!usingServerSourceIndex && transcriptStatus === 'loading') {
+      }));
+    } else if (transcriptStatus === 'loading') {
       analysisStatusCards.push({
         key: 'audio-analysis',
         title: 'Audio analysis',
@@ -4254,31 +4050,18 @@ export default function ChatSidebar() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
-        {((usingServerSourceIndex && serverAnalysisCards.length > 0) || analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
+        {(analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: messages.length === 0 ? 18 : 12 }}>
-            {usingServerSourceIndex
-              ? serverAnalysisCards.map((card) => (
-                  <SourceAnalysisStatusCard
-                    key={card.key}
-                    title={card.title}
-                    clipLabel={card.clipLabel}
-                    statusLine={card.statusLine}
-                    helperText={card.helperText}
-                    etaSeconds={card.etaSeconds}
-                    tone={card.tone}
-                    action={card.action}
-                  />
-                ))
-              : analysisStatusCards.map((card) => (
-                  <ProgressStatusCard
-                    key={card.key}
-                    title={card.title}
-                    progress={card.progress}
-                    detail={card.detail}
-                    secondaryLabel={card.secondaryLabel}
-                    tone={card.tone}
-                  />
-                ))}
+            {analysisStatusCards.map((card) => (
+              <ProgressStatusCard
+                key={card.key}
+                title={card.title}
+                progress={card.progress}
+                detail={card.detail}
+                secondaryLabel={card.secondaryLabel}
+                tone={card.tone}
+              />
+            ))}
             {transcriptUnavailableNotice && (
               <StatusNoticeCard
                 title="Transcript unavailable"
