@@ -17,7 +17,22 @@ function buildProjectSources(project: {
     ? project.edit_state!.sources as ProjectSource[]
     : [];
   if (persistedSources.length > 0) {
-    return persistedSources;
+    const hasPrimary = persistedSources.some((source) => (
+      source.id === MAIN_SOURCE_ID || source.isPrimary === true
+    ));
+    return persistedSources.map((source, index) => {
+      const isPrimary = source.id === MAIN_SOURCE_ID || source.isPrimary === true || (!hasPrimary && index === 0);
+      return {
+        ...source,
+        id: isPrimary ? MAIN_SOURCE_ID : (source.id || `source-${index + 1}`),
+        fileName: source.fileName || `Source ${index + 1}`,
+        storagePath: source.storagePath ?? null,
+        assetId: source.assetId ?? null,
+        duration: Number.isFinite(source.duration) ? Number(source.duration) : 0,
+        status: source.status ?? 'pending',
+        isPrimary,
+      };
+    });
   }
   if (!project.video_path && !project.video_filename) {
     return [];
