@@ -200,9 +200,27 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const totalTimelineDuration = renderTimeline.length > 0
     ? renderTimeline[renderTimeline.length - 1].timelineEnd
     : videoDuration;
+  const videoDisplaySize = useMemo(
+    () => fitVideoFrame(containerSize, videoDimensions),
+    [containerSize, videoDimensions],
+  );
+  const captionFontSize = useMemo(
+    () => Math.max(12, Math.min(22, videoDisplaySize.width * 0.028)),
+    [videoDisplaySize.width],
+  );
+  const captionStrokeWidth = useMemo(
+    () => Math.max(1.75, Math.min(2.75, captionFontSize * 0.16)),
+    [captionFontSize],
+  );
+  const captionMaxCharsPerLine = useMemo(() => {
+    if (videoDisplaySize.width <= 0) return 28;
+    const usableWidth = Math.max(180, videoDisplaySize.width * 0.8);
+    const estimatedCharacterWidth = Math.max(8, captionFontSize * 0.9);
+    return Math.max(12, Math.floor(usableWidth / estimatedCharacterWidth));
+  }, [captionFontSize, videoDisplaySize.width]);
   const captionWindows = useMemo(
-    () => buildCaptionRenderWindows(manualCaptions),
-    [manualCaptions],
+    () => buildCaptionRenderWindows(manualCaptions, { maxCharsPerLine: captionMaxCharsPerLine }),
+    [captionMaxCharsPerLine, manualCaptions],
   );
 
   const currentTransition = useMemo(() => {
@@ -227,10 +245,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     [captionWindows, currentTime],
   );
   const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
-  const videoDisplaySize = useMemo(
-    () => fitVideoFrame(containerSize, videoDimensions),
-    [containerSize, videoDimensions],
-  );
 
   useEffect(() => {
     currentTimeRef.current = currentTime;
@@ -901,27 +915,24 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                     left: '50%',
                     transform: 'translateX(-50%)',
                     width: '100%',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '0 6%',
+                    padding: `0 ${Math.max(16, videoDisplaySize.width * 0.06)}px`,
                     boxSizing: 'border-box',
                   }}
                 >
                   <div
                     style={{
-                      maxWidth: '88%',
+                      width: '100%',
                       color: '#fff',
-                      fontSize: Math.max(14, Math.min(24, videoDisplaySize.width * 0.031)),
+                      fontSize: captionFontSize,
                       fontWeight: 900,
                       lineHeight: 1.12,
                       textAlign: 'center',
                       textShadow: '0 2px 8px rgba(0,0,0,0.45)',
-                      WebkitTextStroke: '2.5px #000',
+                      WebkitTextStroke: `${captionStrokeWidth}px #000`,
                       paintOrder: 'stroke fill',
                       whiteSpace: 'pre',
                       overflowWrap: 'normal',
+                      boxSizing: 'border-box',
                     }}
                   >
                     {activeCaption.text}
