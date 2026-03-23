@@ -145,6 +145,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
+  const [hasDisplayedFrame, setHasDisplayedFrame] = useState(false);
   const [leadLayer, setLeadLayer] = useState<LayerId>('primary');
 
   const primaryVideoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -302,6 +303,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const ready = leadVideo.readyState >= 2;
     setIsVideoReady(ready);
     if (ready) {
+      setHasDisplayedFrame(true);
       setVideoLoadError(null);
     }
   }, [getLeadVideo]);
@@ -376,6 +378,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       pauseVideo(primaryVideoElementRef.current);
       pauseVideo(secondaryVideoRef.current);
       setIsVideoReady(false);
+      setHasDisplayedFrame(false);
       setVideoLoadError(null);
     }
   }, [pauseVideo, renderTimeline]);
@@ -711,6 +714,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       return;
     }
     setIsVideoReady(false);
+    setHasDisplayedFrame(false);
     setVideoLoadError('Could not load this video source.');
   }, [refreshLeadVideoState]);
 
@@ -813,6 +817,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               if (leadLayerRef.current === 'primary') {
                 setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
                 setIsVideoReady(el.readyState >= 2);
+                if (el.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
                 seekToTimelineTime(currentTimeRef.current);
               }
               syncAfterSourceLoad('primary', el);
@@ -821,6 +828,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
@@ -828,6 +838,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
@@ -871,6 +884,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                   height: event.currentTarget.videoHeight,
                 });
                 setIsVideoReady(event.currentTarget.readyState >= 2);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
                 seekToTimelineTime(currentTimeRef.current);
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
@@ -879,6 +895,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
@@ -886,6 +905,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
@@ -912,7 +934,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             />
           )}
 
-          {!isVideoReady && (
+          {(videoLoadError || (!isVideoReady && !hasDisplayedFrame)) && (
             <div
               style={{
                 position: 'absolute',
