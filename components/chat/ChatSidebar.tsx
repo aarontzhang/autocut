@@ -31,6 +31,7 @@ import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRe
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
+import { FRAME_DESCRIPTION_BATCH_SIZE, getFrameDescriptionParallelRequestLimit } from '@/lib/frameDescriptionConfig';
 import {
   actionsMatch,
   buildRequestChainContinuationMessage,
@@ -40,8 +41,6 @@ import {
 } from '@/lib/requestChain';
 import AutocutMark from '@/components/branding/AutocutMark';
 
-const FRAME_DESCRIPTION_BATCH_SIZE = 8;
-const MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS = 3;
 const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
 const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
@@ -481,8 +480,9 @@ function estimateFrameExtractionSeconds(frameCount: number): number {
 }
 
 function estimateFrameDescriptionSeconds(frameCount: number): number {
+  const parallelRequests = getFrameDescriptionParallelRequestLimit(frameCount);
   const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
-  const waves = Math.ceil(batches / MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS);
+  const waves = Math.ceil(batches / Math.max(parallelRequests, 1));
   return Math.max(6, waves * 5);
 }
 
@@ -798,7 +798,11 @@ async function runFrameDescriptionBatches(
   if (batches.length === 0) return [];
 
   let nextBatchIndex = 0;
-  const workerCount = Math.min(MAX_PARALLEL_FRAME_DESCRIPTION_REQUESTS, batches.length);
+  const totalFrames = batches.reduce((sum, batch) => sum + batch.batchFrames.length, 0);
+  const workerCount = Math.min(
+    getFrameDescriptionParallelRequestLimit(totalFrames),
+    batches.length,
+  );
   const errors: Error[] = [];
 
   const runWorker = async () => {

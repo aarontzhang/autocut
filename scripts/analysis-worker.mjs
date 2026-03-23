@@ -35,7 +35,7 @@ const HOST_PARALLELISM = typeof os.availableParallelism === 'function'
   : Math.max(os.cpus().length, 1);
 const DEFAULT_WORKER_CONCURRENCY = Math.min(8, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
 const DEFAULT_INDEX_CONCURRENCY = Math.min(6, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
-const DEFAULT_DESCRIPTION_CONCURRENCY = 2;
+const DEFAULT_DESCRIPTION_CONCURRENCY = 1;
 
 const WORKER_ID = process.env.ANALYSIS_WORKER_ID?.trim() || `analysis-worker:${process.pid}`;
 const POLL_INTERVAL_MS = normalizeInteger(process.env.ANALYSIS_WORKER_POLL_MS, 3000, 500, 60_000);
@@ -45,6 +45,7 @@ const DESCRIPTION_BATCH_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_INDE
 const FRAME_DESCRIPTION_TIMEOUT_MS = 45_000;
 const FRAME_DESCRIPTION_MAX_RETRIES = 2;
 const FRAME_DESCRIPTION_UNAVAILABLE = 'Visual summary unavailable.';
+const FRAME_DESCRIPTION_IMAGE_DETAIL = 'low';
 const TRANSCRIPT_CHUNK_SECONDS = 45;
 const TRANSCRIPT_OVERLAP_SECONDS = 0.75;
 const FRAME_BATCH_SIZE = 8;
@@ -59,6 +60,17 @@ function normalizeInteger(value, fallback, min, max) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryAfterDelayMs(error, attempt) {
+  const retryAfterHeader = error?.headers?.['retry-after']
+    ?? error?.headers?.get?.('retry-after')
+    ?? null;
+  const retryAfterSeconds = Number(retryAfterHeader);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return retryAfterSeconds * 1000;
+  }
+  return 750 * (attempt + 1);
 }
 
 function getSlotWorkerId(slotIndex) {
@@ -638,7 +650,7 @@ async function describeRepresentativeFrameBatch(batch) {
         {
           type: 'input_image',
           image_url: `data:image/jpeg;base64,${frame.imageBase64}`,
-          detail: 'auto',
+          detail: FRAME_DESCRIPTION_IMAGE_DETAIL,
         },
       ])),
     ],
@@ -663,7 +675,7 @@ async function describeRepresentativeFrameBatch(batch) {
     } catch (error) {
       lastError = error;
       if (attempt + 1 >= FRAME_DESCRIPTION_MAX_RETRIES) break;
-      await sleep(750 * (attempt + 1));
+      await sleep(getRetryAfterDelayMs(error, attempt));
     }
   }
 
