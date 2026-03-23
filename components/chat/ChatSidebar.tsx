@@ -725,7 +725,9 @@ function isSilenceAndCaptionRequest(text: string): boolean {
   const wantsCaptions = /\b(caption|captions|subtitle|subtitles)\b/.test(normalized);
   const wantsSilenceRemoval = /\b(remove|cut|trim|delete|auto[- ]?edit)\b[\w\s]{0,32}\b(silence|silent|dead air|pauses?)\b/.test(normalized)
     || /\bremove silence\b/.test(normalized)
-    || /\bcut out silence\b/.test(normalized);
+    || /\bcut out silence\b/.test(normalized)
+    || /\b(remove|cut|trim|delete)\b[\w\s]{0,48}\b(?:i am|i'm|im|we are|we're|were)?[\w\s]{0,24}\bnot (?:speaking|talking)\b/.test(normalized)
+    || /\b(non[- ]speaking|no speech|speaker absence|without speech)\b/.test(normalized);
   return wantsCaptions && wantsSilenceRemoval;
 }
 

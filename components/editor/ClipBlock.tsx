@@ -75,17 +75,17 @@ export default function ClipBlock({
         bottom: 0,
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'center',
         pointerEvents: 'none',
         overflow: 'hidden',
       }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'center',
+          justifyContent: 'flex-start',
           gap: 6,
           minWidth: 0,
           maxWidth: '100%',
+          width: '100%',
         }}>
         <span style={{
           fontSize: 10,
