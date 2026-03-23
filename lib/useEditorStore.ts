@@ -78,6 +78,12 @@ export type ImportedSourceDraft = {
   runtime?: Partial<NonNullable<SourceRuntimeMediaMap[string]>>;
 };
 
+export type ReviewInspectionState = {
+  itemId: string;
+  snapshot: EditSnapshot;
+  returnTime: number;
+};
+
 function makeClip(sourceId: string, sourceStart: number, sourceDuration: number): VideoClip {
   return {
     id: uuidv4(),
@@ -599,6 +605,7 @@ function clearReviewStatePatch() {
   return {
     activeReviewSession: null as EditReviewGroup | null,
     activeReviewFocusItemId: null as string | null,
+    reviewInspection: null as ReviewInspectionState | null,
     previewSnapshot: null as EditSnapshot | null,
     previewOwnerId: null as string | null,
   };
@@ -639,6 +646,7 @@ function buildBaseEditorState(input?: {
   | 'taggedClipIds'
   | 'activeReviewSession'
   | 'activeReviewFocusItemId'
+  | 'reviewInspection'
   | 'history'
   | 'future'
   | 'isChatLoading'
@@ -691,6 +699,7 @@ function buildBaseEditorState(input?: {
     taggedClipIds: [],
     activeReviewSession: null,
     activeReviewFocusItemId: null,
+    reviewInspection: null,
     history: [],
     future: [],
     isChatLoading: false,
@@ -745,6 +754,7 @@ interface EditorState {
   taggedClipIds: string[];
   activeReviewSession: EditReviewGroup | null;
   activeReviewFocusItemId: string | null;
+  reviewInspection: ReviewInspectionState | null;
   history: EditSnapshot[];
   future: EditSnapshot[];
   messages: ChatMessage[];
@@ -897,6 +907,8 @@ interface EditorState {
   clearTaggedClips: () => void;
   setActiveReviewSession: (session: EditReviewGroup | null) => void;
   setActiveReviewFocusItemId: (itemId: string | null) => void;
+  setReviewInspection: (inspection: ReviewInspectionState | null) => void;
+  clearReviewInspection: (restoreReturnTime?: boolean) => void;
   deleteSelectedItem: () => void;
   updateCaption: (id: string, patch: { startTime?: number; endTime?: number }) => void;
   updateTextOverlay: (id: string, patch: { startTime?: number; endTime?: number }) => void;
@@ -1259,6 +1271,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return {
       previewSnapshot: null,
       previewOwnerId: null,
+      reviewInspection: null,
       activeReviewSession: ownerId && state.activeReviewSession?.ownerId !== ownerId
         ? state.activeReviewSession
         : null,
@@ -2000,13 +2013,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       : [...state.taggedClipIds, id],
   })),
   clearTaggedClips: () => set({ taggedClipIds: [] }),
-  setActiveReviewSession: (session) => set(() => ({
+  setActiveReviewSession: (session) => set((state) => ({
     activeReviewSession: session,
     activeReviewFocusItemId: null,
+    reviewInspection: null,
     previewSnapshot: session ? buildReviewPreviewSnapshot(session) : null,
     previewOwnerId: session?.ownerId ?? null,
+    ...(state.reviewInspection
+      ? { requestedSeekTime: Math.max(0, state.reviewInspection.returnTime) }
+      : {}),
   })),
   setActiveReviewFocusItemId: (itemId) => set({ activeReviewFocusItemId: itemId }),
+  setReviewInspection: (inspection) => set({ reviewInspection: inspection }),
+  clearReviewInspection: (restoreReturnTime = false) => set((state) => ({
+    reviewInspection: null,
+    ...(restoreReturnTime && state.reviewInspection
+      ? { requestedSeekTime: Math.max(0, state.reviewInspection.returnTime) }
+      : {}),
+  })),
 
   deleteSelectedItem: () => {
     const state = get();

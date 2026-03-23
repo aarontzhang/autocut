@@ -307,6 +307,53 @@ export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endT
   return sanitizeTimelineClips(nextClips);
 }
 
+export function buildDeleteRangeInspectionSnapshot(
+  snapshot: EditSnapshot,
+  action: EditAction,
+): EditSnapshot | null {
+  if (action.type !== 'delete_range') return null;
+  if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return null;
+
+  const normalizedClips = sanitizeTimelineClips(snapshot.clips);
+  if (action.deleteEndTime <= action.deleteStartTime || normalizedClips.length === 0) {
+    return null;
+  }
+
+  const schedule = buildClipSchedule(normalizedClips);
+  const inspectionClips: VideoClip[] = [];
+
+  for (const entry of schedule) {
+    const clip = normalizedClips.find((item) => item.id === entry.clipId);
+    if (!clip) continue;
+
+    const overlapStart = Math.max(action.deleteStartTime, entry.timelineStart);
+    const overlapEnd = Math.min(action.deleteEndTime, entry.timelineEnd);
+    if (overlapEnd <= overlapStart) continue;
+
+    const sourceOffset = (overlapStart - entry.timelineStart) * entry.speed;
+    const sourceDuration = (overlapEnd - overlapStart) * entry.speed;
+    if (sourceDuration < MIN_CLIP_DURATION_SECONDS) continue;
+
+    inspectionClips.push({
+      ...clip,
+      id: uuidv4(),
+      sourceStart: clip.sourceStart + sourceOffset,
+      sourceDuration,
+    });
+  }
+
+  const clips = sanitizeTimelineClips(inspectionClips);
+  if (clips.length === 0) return null;
+
+  return {
+    clips,
+    captions: [],
+    transitions: [],
+    markers: [],
+    textOverlays: [],
+  };
+}
+
 export function actionChangesTimelineStructure(action: EditAction) {
   return ['split_clip', 'delete_range', 'delete_ranges', 'delete_clip', 'reorder_clip', 'set_clip_speed', 'add_transition'].includes(action.type);
 }

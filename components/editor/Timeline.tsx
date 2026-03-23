@@ -6,12 +6,13 @@ import { useEditorStore } from '@/lib/useEditorStore';
 import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
 import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { getReviewOverlayDescriptors } from '@/lib/editActionUtils';
+import { buildDeleteRangeInspectionSnapshot, getReviewOverlayDescriptors } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 
 const BASE_TRACK_HEIGHT = 50;
 const EFFECT_TRACK_H = 26;
+const CUT_REVIEW_RAIL_H = 30;
 const HEADER_W = 76;
 const RULER_H = 24;
 
@@ -28,6 +29,15 @@ type ClipVisualLayout = {
   displayLeft: number;
   displayWidth: number;
   lane: number;
+};
+
+type ReviewDeleteChip = {
+  id: string;
+  itemId: string;
+  label: string;
+  summary: string;
+  boundaryTime: number;
+  duration: number;
 };
 
 const CLIP_MIN_DISPLAY_WIDTH = 22;
@@ -75,6 +85,42 @@ function buildClipVisualLayouts(
   };
 }
 
+function buildReviewDeleteChips(
+  activeReviewSession: ReturnType<typeof useEditorStore.getState>['activeReviewSession'],
+): ReviewDeleteChip[] {
+  if (!activeReviewSession) return [];
+
+  const checkedDeleteItems = activeReviewSession.items
+    .filter((item) => (
+      item.checked
+      && item.action.type === 'delete_range'
+      && item.action.deleteStartTime !== undefined
+      && item.action.deleteEndTime !== undefined
+      && item.action.deleteEndTime > item.action.deleteStartTime
+    ))
+    .sort((left, right) => (
+      (left.action.deleteStartTime ?? 0) - (right.action.deleteStartTime ?? 0)
+    ));
+
+  let removedBefore = 0;
+
+  return checkedDeleteItems.map((item) => {
+    const startTime = item.action.deleteStartTime ?? 0;
+    const endTime = item.action.deleteEndTime ?? startTime;
+    const duration = Math.max(0, endTime - startTime);
+    const chip = {
+      id: `${item.id}:chip`,
+      itemId: item.id,
+      label: item.label,
+      summary: item.summary,
+      boundaryTime: Math.max(0, startTime - removedBefore),
+      duration,
+    };
+    removedBefore += duration;
+    return chip;
+  });
+}
+
 interface TimelineProps {
   videoRef: RefObject<HTMLVideoElement | null>;
   playerRef?: RefObject<VideoPlayerHandle | null>;
@@ -100,6 +146,7 @@ export default function Timeline({
   const previewSnapshot = useEditorStore(s => s.previewSnapshot);
   const activeReviewSession = useEditorStore(s => s.activeReviewSession);
   const activeReviewFocusItemId = useEditorStore(s => s.activeReviewFocusItemId);
+  const reviewInspection = useEditorStore(s => s.reviewInspection);
   const liveClips = useEditorStore(s => s.clips);
   const liveCaptions = useEditorStore(s => s.captions);
   const liveTransitions = useEditorStore(s => s.transitions);
@@ -115,7 +162,10 @@ export default function Timeline({
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
-  const timelineSnapshot = activeReviewSession?.baseSnapshot ?? previewSnapshot;
+  const setActiveReviewFocusItemId = useEditorStore(s => s.setActiveReviewFocusItemId);
+  const setReviewInspection = useEditorStore(s => s.setReviewInspection);
+  const clearReviewInspection = useEditorStore(s => s.clearReviewInspection);
+  const timelineSnapshot = reviewInspection?.snapshot ?? previewSnapshot;
   const clips = timelineSnapshot?.clips ?? liveClips;
   const captions = timelineSnapshot?.captions ?? liveCaptions;
   const transitions = timelineSnapshot?.transitions ?? liveTransitions;
@@ -178,10 +228,14 @@ export default function Timeline({
     () => (activeReviewSession ? getReviewOverlayDescriptors(activeReviewSession) : []),
     [activeReviewSession],
   );
+  const deleteReviewChips = useMemo(
+    () => buildReviewDeleteChips(activeReviewSession),
+    [activeReviewSession],
+  );
   const hasCaptions = captions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'caption');
   const hasTextOverlays = textOverlays.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'text');
   const hasTransitions = transitions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'transition');
-  const cutReviewOverlays = reviewOverlays.filter((overlay) => overlay.kind === 'cut');
+  const showDeleteReviewRail = deleteReviewChips.length > 0 && !reviewInspection;
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -254,9 +308,7 @@ export default function Timeline({
 
     if (!playerRef?.current) {
       setCurrentTime(nextTime);
-      const currentState = useEditorStore.getState();
-      const currentSchedule = buildClipSchedule(currentState.clips, currentState.transitions);
-      const targetEntry = findTimelineEntryAtTime(currentSchedule, nextTime);
+      const targetEntry = findTimelineEntryAtTime(schedule, nextTime);
       if (targetEntry && videoRef.current) {
         const offsetInTimeline = nextTime - targetEntry.timelineStart;
         const sourceTime = targetEntry.sourceStart + offsetInTimeline * targetEntry.speed;
@@ -265,7 +317,7 @@ export default function Timeline({
     }
 
     setSelectedItem(null);
-  }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, videoRef]);
+  }, [contentDuration, playerRef, schedule, setCurrentTime, setSelectedItem, videoRef]);
 
   const seek = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     if (panRef.current?.moved) return;
@@ -375,7 +427,30 @@ export default function Timeline({
     () => new Map(clipVisualLayout.layouts.map((layout) => [layout.clipId, layout])),
     [clipVisualLayout.layouts],
   );
-  const hasCutReviewOverlays = cutReviewOverlays.length > 0;
+  const playheadTopOffset = RULER_H + (showDeleteReviewRail ? CUT_REVIEW_RAIL_H : 0);
+
+  const openDeleteInspection = useCallback((itemId: string) => {
+    if (!activeReviewSession) return;
+    const target = activeReviewSession.items.find((item) => item.id === itemId);
+    if (!target || !target.checked || target.action.type !== 'delete_range') return;
+
+    const snapshot = buildDeleteRangeInspectionSnapshot(activeReviewSession.baseSnapshot, target.action);
+    if (!snapshot) return;
+
+    setSelectedItem(null);
+    setActiveReviewFocusItemId(itemId);
+    setReviewInspection({
+      itemId,
+      snapshot,
+      returnTime: currentTime,
+    });
+    requestSeek(0);
+  }, [activeReviewSession, currentTime, requestSeek, setActiveReviewFocusItemId, setReviewInspection, setSelectedItem]);
+
+  const activeInspectionLabel = useMemo(
+    () => activeReviewSession?.items.find((item) => item.id === reviewInspection?.itemId)?.label ?? 'Deleted segment',
+    [activeReviewSession, reviewInspection?.itemId],
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -417,6 +492,30 @@ export default function Timeline({
               icon={<MarkerToolIcon />}
             />
           </div>
+          {reviewInspection && (
+            <>
+              <button
+                type="button"
+                onClick={() => clearReviewInspection(true)}
+                style={{
+                  height: 28,
+                  padding: '0 10px',
+                  borderRadius: 999,
+                  border: '1px solid rgba(248,113,113,0.32)',
+                  background: 'rgba(248,113,113,0.1)',
+                  color: 'rgba(254,226,226,0.96)',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontFamily: 'var(--font-serif)',
+                }}
+              >
+                Back to preview
+              </button>
+              <span style={{ fontSize: 11, color: 'rgba(248,113,113,0.82)', fontFamily: 'var(--font-serif)' }}>
+                Inspecting {activeInspectionLabel}
+              </span>
+            </>
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginLeft: 'auto' }}>
@@ -470,6 +569,22 @@ export default function Timeline({
           }}
         >
           <div style={{ height: RULER_H, borderBottom: '1px solid var(--border)' }} />
+          {showDeleteReviewRail && (
+            <div
+              style={{
+                height: CUT_REVIEW_RAIL_H,
+                display: 'flex',
+                alignItems: 'center',
+                padding: '0 12px',
+                borderBottom: '1px solid var(--border)',
+                color: 'rgba(248,113,113,0.82)',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+            >
+              Cuts
+            </div>
+          )}
           <TrackHeader icon={<VideoIcon />} label="V1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           {hasCaptions && <EffectHeader label="CC" color="var(--caption-clip)" />}
@@ -602,9 +717,63 @@ export default function Timeline({
                       zIndex: 1,
                     }}
                   />
+              );
+            })}
+          </div>
+
+          {showDeleteReviewRail && (
+            <div
+              style={{
+                height: CUT_REVIEW_RAIL_H,
+                position: 'relative',
+                background: 'rgba(248,113,113,0.04)',
+                borderBottom: '1px solid var(--border)',
+                overflow: 'hidden',
+              }}
+            >
+              {deleteReviewChips.map((chip) => {
+                const isFocused = activeReviewFocusItemId === chip.itemId;
+                const width = Math.max(44, Math.min(96, Math.max(18, px(chip.duration) * 0.45)));
+                const centerX = px(chip.boundaryTime);
+                const left = Math.max(0, Math.min(totalW - width, centerX - width / 2));
+                return (
+                  <button
+                    key={chip.id}
+                    type="button"
+                    title={`${chip.label} • ${chip.summary}`}
+                    onClick={() => openDeleteInspection(chip.itemId)}
+                    style={{
+                      position: 'absolute',
+                      left,
+                      top: 4,
+                      height: CUT_REVIEW_RAIL_H - 8,
+                      width,
+                      borderRadius: 999,
+                      border: isFocused ? '1px solid rgba(248,113,113,0.95)' : '1px solid rgba(248,113,113,0.5)',
+                      background: isFocused
+                        ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.52), rgba(248,113,113,0.52) 6px, rgba(248,113,113,0.22) 6px, rgba(248,113,113,0.22) 12px)'
+                        : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.28), rgba(248,113,113,0.28) 6px, rgba(248,113,113,0.12) 6px, rgba(248,113,113,0.12) 12px)',
+                      boxShadow: isFocused ? '0 0 0 1px rgba(248,113,113,0.18)' : 'none',
+                      color: 'rgba(254,226,226,0.95)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      padding: '0 10px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      fontFamily: 'var(--font-serif)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {chip.label}
+                  </button>
                 );
               })}
-          </div>
+            </div>
+          )}
 
           <TrackRow
             height={TRACK_HEIGHT}
@@ -612,39 +781,6 @@ export default function Timeline({
             onDrop={handleTrackDrop}
             onDragOver={handleTimelineDragOver}
           >
-            {hasCutReviewOverlays && (
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  background: 'rgba(0,0,0,0.16)',
-                  pointerEvents: 'none',
-                }}
-              />
-            )}
-            {cutReviewOverlays.map((overlay) => {
-              if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
-              const isFocused = activeReviewFocusItemId === overlay.itemId;
-              return (
-                <div
-                  key={overlay.id}
-                  style={{
-                    position: 'absolute',
-                    left: px(overlay.startTime),
-                    width: Math.max(3, px(overlay.endTime) - px(overlay.startTime)),
-                    top: 4,
-                    bottom: 4,
-                    borderRadius: 4,
-                    border: isFocused ? '1px solid rgba(248,113,113,0.95)' : '1px solid rgba(248,113,113,0.45)',
-                    background: isFocused
-                      ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.45), rgba(248,113,113,0.45) 6px, rgba(248,113,113,0.18) 6px, rgba(248,113,113,0.18) 12px)'
-                      : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.24), rgba(248,113,113,0.24) 6px, rgba(248,113,113,0.1) 6px, rgba(248,113,113,0.1) 12px)',
-                    pointerEvents: 'none',
-                    zIndex: 1,
-                  }}
-                />
-              );
-            })}
             {videoDuration > 0 && schedule.map((entry, index) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;
@@ -679,39 +815,6 @@ export default function Timeline({
             onDrop={handleTrackDrop}
             onDragOver={handleTimelineDragOver}
           >
-            {hasCutReviewOverlays && (
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  background: 'rgba(0,0,0,0.16)',
-                  pointerEvents: 'none',
-                }}
-              />
-            )}
-            {cutReviewOverlays.map((overlay) => {
-              if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
-              const isFocused = activeReviewFocusItemId === overlay.itemId;
-              return (
-                <div
-                  key={`${overlay.id}:audio`}
-                  style={{
-                    position: 'absolute',
-                    left: px(overlay.startTime),
-                    width: Math.max(3, px(overlay.endTime) - px(overlay.startTime)),
-                    top: 4,
-                    bottom: 4,
-                    borderRadius: 4,
-                    border: isFocused ? '1px solid rgba(248,113,113,0.9)' : '1px solid rgba(248,113,113,0.38)',
-                    background: isFocused
-                      ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.42), rgba(248,113,113,0.42) 6px, rgba(248,113,113,0.16) 6px, rgba(248,113,113,0.16) 12px)'
-                      : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.22), rgba(248,113,113,0.22) 6px, rgba(248,113,113,0.08) 6px, rgba(248,113,113,0.08) 12px)',
-                    pointerEvents: 'none',
-                    zIndex: 1,
-                  }}
-                />
-              );
-            })}
             {videoDuration > 0 && schedule.map((entry) => {
               const clip = clips.find(item => item.id === entry.clipId);
               if (!clip) return null;
@@ -994,7 +1097,7 @@ export default function Timeline({
             totalTimelineDuration={totalTimelineDuration}
             totalW={totalW}
             headerWidth={HEADER_W}
-            rulerHeight={RULER_H}
+            lineTop={playheadTopOffset}
             playheadDragRef={playheadDragRef}
             onBeginDrag={beginPlayheadDrag}
           />
@@ -1067,7 +1170,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   totalTimelineDuration,
   totalW,
   headerWidth,
-  rulerHeight,
+  lineTop,
   playheadDragRef,
   onBeginDrag,
 }: {
@@ -1076,7 +1179,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   totalTimelineDuration: number;
   totalW: number;
   headerWidth: number;
-  rulerHeight: number;
+  lineTop: number;
   playheadDragRef: MutableRefObject<PlayheadDragInfo | null>;
   onBeginDrag: (clientX: number, pointerId: number) => void;
 }) {
@@ -1121,7 +1224,7 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
         style={{
           position: 'absolute',
           left: playheadX - 1,
-          top: rulerHeight - 2,
+          top: Math.max(0, lineTop - 2),
           bottom: 0,
           width: 2,
           background: 'rgba(255,255,255,0.92)',

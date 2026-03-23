@@ -1994,6 +1994,7 @@ function AssistantMessage({
   const activeReviewFocusItemId = useEditorStore(s => s.activeReviewFocusItemId);
   const setActiveReviewSession = useEditorStore(s => s.setActiveReviewSession);
   const setActiveReviewFocusItemId = useEditorStore(s => s.setActiveReviewFocusItemId);
+  const clearReviewInspection = useEditorStore(s => s.clearReviewInspection);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
@@ -2124,6 +2125,7 @@ function AssistantMessage({
     if (!reviewSessionForMessage) return;
     const target = reviewSessionForMessage.items.find((item) => item.id === itemId);
     if (!target) return;
+    clearReviewInspection();
     setActiveReviewFocusItemId(itemId);
     const anchor = target.anchorTime;
     if (anchor !== null) {
@@ -2142,7 +2144,7 @@ function AssistantMessage({
         : (getReviewSeekTime(previewSnapshot, target.action) ?? Math.max(0, adjustedAnchor - REVIEW_PREROLL_SECONDS));
       requestSeek(reviewSeekTime);
     }
-  }, [requestSeek, reviewSessionForMessage, setActiveReviewFocusItemId]);
+  }, [clearReviewInspection, requestSeek, reviewSessionForMessage, setActiveReviewFocusItemId]);
 
   const handleApplyReviewedAction = useCallback(() => {
     if (!reviewSessionForMessage || !reviewedAction) return;
@@ -2283,6 +2285,7 @@ function AssistantMessage({
               onClick={() => {
                 if (!reviewableAction) return;
                 if (batchReviewActive) {
+                  clearReviewInspection();
                   setActiveReviewFocusItemId(null);
                   return;
                 }
