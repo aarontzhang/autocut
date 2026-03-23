@@ -288,7 +288,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         setVideoDimensions({ width: nextVideo.videoWidth, height: nextVideo.videoHeight });
       }
     }
-  }, [getVideoElement, syncExternalVideoRef]);
+    refreshLeadVideoState();
+  }, [getVideoElement, refreshLeadVideoState, syncExternalVideoRef]);
 
   const setPrimaryVideoElement = useCallback((node: HTMLVideoElement | null) => {
     primaryVideoElementRef.current = node;
@@ -306,6 +307,18 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const getLeadVideo = useCallback(() => getVideoElement(leadLayerRef.current), [getVideoElement]);
   const getSpareVideo = useCallback(() => getVideoElement(getOtherLayer(leadLayerRef.current)), [getVideoElement]);
+  const refreshLeadVideoState = useCallback(() => {
+    const leadVideo = getLeadVideo();
+    if (!leadVideo) {
+      setIsVideoReady(false);
+      return;
+    }
+    const ready = leadVideo.readyState >= 2;
+    setIsVideoReady(ready);
+    if (ready) {
+      setVideoLoadError(null);
+    }
+  }, [getLeadVideo]);
 
   useEffect(() => {
     syncExternalVideoRef(leadLayer);
@@ -461,6 +474,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (activeEntries.length < 2) {
       applyClipEffects(primaryVideo, primaryClip, 1);
       pauseInactiveVideo();
+      refreshLeadVideoState();
       return;
     }
 
@@ -471,6 +485,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (!boundary || !incomingEntry || !incomingClip || !secondaryVideo) {
       applyClipEffects(primaryVideo, primaryClip, 1);
       pauseInactiveVideo();
+      refreshLeadVideoState();
       return;
     }
 
@@ -494,7 +509,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     } else {
       pauseVideo(secondaryVideo);
     }
-  }, [applyClipEffects, clipById, ensureLayerSource, getVideoElement, maybePromotePreparedLayer, pauseInactiveVideo, pauseVideo, renderTimeline, sourceById]);
+    refreshLeadVideoState();
+  }, [applyClipEffects, clipById, ensureLayerSource, getVideoElement, maybePromotePreparedLayer, pauseInactiveVideo, pauseVideo, refreshLeadVideoState, renderTimeline, sourceById]);
 
   const syncAfterSourceLoad = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
     if (!video) return;
@@ -684,7 +700,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       syncLayers(clampedTimelineTime, { allowPlay: true });
       schedulePlaybackMonitor();
     }
-  }, [getLeadVideo, leadLayer, primaryLayerSourceId, renderTimeline, schedulePlaybackMonitor, seekToTimelineTime, syncLayers, totalTimelineDuration]);
+    refreshLeadVideoState();
+  }, [getLeadVideo, leadLayer, primaryLayerSourceId, refreshLeadVideoState, renderTimeline, schedulePlaybackMonitor, seekToTimelineTime, syncLayers, totalTimelineDuration]);
+
+  const handleLayerError = useCallback((layer: LayerId, video: HTMLVideoElement) => {
+    if (leadLayerRef.current !== layer) return;
+    const errorCode = video.error?.code ?? 0;
+    if (errorCode === 1 || video.readyState >= 2) {
+      refreshLeadVideoState();
+      return;
+    }
+    setIsVideoReady(false);
+    setVideoLoadError('Could not load this video source.');
+  }, [refreshLeadVideoState]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;
@@ -809,11 +837,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 setIsVideoReady(false);
               }
             }}
-            onError={() => {
-              if (leadLayerRef.current === 'primary') {
-                setIsVideoReady(false);
-                setVideoLoadError('Could not load this video source.');
-              }
+            onError={(event) => {
+              handleLayerError('primary', event.currentTarget);
             }}
             playsInline
             preload="auto"
@@ -870,11 +895,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 setIsVideoReady(false);
               }
             }}
-            onError={() => {
-              if (leadLayerRef.current === 'secondary') {
-                setIsVideoReady(false);
-                setVideoLoadError('Could not load this video source.');
-              }
+            onError={(event) => {
+              handleLayerError('secondary', event.currentTarget);
             }}
           />
 
