@@ -312,6 +312,28 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     video.volume = 0;
   }, []);
 
+  useEffect(() => {
+    const validClipIds = new Set(renderTimeline.map((entry) => entry.clipId));
+    const validSourceIds = new Set(renderTimeline.map((entry) => entry.sourceId));
+    (['primary', 'secondary'] as LayerId[]).forEach((layer) => {
+      const clipId = layerClipIdRef.current[layer];
+      const sourceId = layerSourceIdRef.current[layer];
+      if (clipId && !validClipIds.has(clipId)) {
+        layerClipIdRef.current[layer] = null;
+      }
+      if (sourceId && !validSourceIds.has(sourceId)) {
+        layerSourceIdRef.current[layer] = null;
+      }
+    });
+
+    if (renderTimeline.length === 0) {
+      pauseVideo(primaryVideoElementRef.current);
+      pauseVideo(secondaryVideoRef.current);
+      setIsVideoReady(false);
+      setVideoLoadError(null);
+    }
+  }, [pauseVideo, renderTimeline]);
+
   const pauseInactiveVideo = useCallback(() => {
     pauseVideo(getSpareVideo());
   }, [getSpareVideo, pauseVideo]);
@@ -889,18 +911,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 >
                   <div
                     style={{
-                      maxWidth: '82%',
-                      padding: '8px 14px',
-                      background: 'rgba(0,0,0,0.74)',
-                      borderRadius: 6,
+                      maxWidth: '88%',
                       color: '#fff',
                       fontSize: Math.max(14, Math.min(24, videoDisplaySize.width * 0.031)),
-                      fontWeight: 800,
-                      lineHeight: 1.18,
+                      fontWeight: 900,
+                      lineHeight: 1.12,
                       textAlign: 'center',
-                      textShadow: '0 2px 10px rgba(0,0,0,0.9)',
-                      whiteSpace: 'pre-wrap',
-                      overflowWrap: 'break-word',
+                      textShadow: '0 2px 8px rgba(0,0,0,0.45)',
+                      WebkitTextStroke: '2.5px #000',
+                      paintOrder: 'stroke fill',
+                      whiteSpace: 'pre',
+                      overflowWrap: 'normal',
                     }}
                   >
                     {activeCaption.text}

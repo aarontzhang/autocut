@@ -18,6 +18,7 @@ const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
 const DEFAULT_CAPTION_MAX_LINES = 2;
 const DEFAULT_CAPTION_PAUSE_BREAK_SECONDS = 0.65;
 const CAPTION_PUNCTUATION_BREAK = /[.!?]$|[,;:]$/;
+const CAPTION_SIMULTANEOUS_WORD_EPSILON = 0.0005;
 
 /**
  * Convert a current-timeline timestamp to the corresponding source video timestamp,
@@ -409,6 +410,18 @@ function trimCaptionWordsToWindow(
   return visibleWords;
 }
 
+function captionLinesExceedWindow(
+  words: CaptionCueWord[],
+  maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
+  maxLines = DEFAULT_CAPTION_MAX_LINES,
+): boolean {
+  if (words.length <= 1) return false;
+  const lines = buildBalancedCaptionLines(words, maxCharsPerLine);
+  if (lines.length > maxLines) return true;
+  if (lines.some((line) => line.length > maxCharsPerLine + 8)) return true;
+  return lines.join(' ').length > maxCharsPerLine * maxLines + 12;
+}
+
 export function projectCaptionWordsToTimeline(
   clips: VideoClip[],
   rawCaptions: CaptionEntry[],
@@ -471,35 +484,20 @@ function buildRollingCaptionLines(
   maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
   maxLines = DEFAULT_CAPTION_MAX_LINES,
 ): string[] {
-  const lines: string[] = [];
-
-  for (const word of words) {
-    const text = word.text.trim();
-    if (!text) continue;
-    const lastLine = lines[lines.length - 1];
-    if (!lastLine) {
-      lines.push(text);
-    } else if (`${lastLine} ${text}`.length <= maxCharsPerLine) {
-      lines[lines.length - 1] = `${lastLine} ${text}`;
-    } else {
-      lines.push(text);
-    }
-
-    while (lines.length > maxLines) {
-      lines.shift();
-    }
-  }
-
-  return lines;
+  return buildBalancedCaptionLines(words, maxCharsPerLine).slice(0, maxLines);
 }
 
 export function buildCaptionEntriesFromWords(
   words: CaptionCueWord[],
   options?: {
     pauseBreakSeconds?: number;
+    maxCharsPerLine?: number;
+    maxLines?: number;
   },
 ): CaptionEntry[] {
   const pauseBreakSeconds = options?.pauseBreakSeconds ?? DEFAULT_CAPTION_PAUSE_BREAK_SECONDS;
+  const maxCharsPerLine = options?.maxCharsPerLine ?? DEFAULT_MAX_CAPTION_CHARS_PER_LINE;
+  const maxLines = options?.maxLines ?? DEFAULT_CAPTION_MAX_LINES;
   const sortedWords = [...words]
     .map((word) => ({ ...word, text: word.text.trim() }))
     .filter((word) => word.text && word.endTime > word.startTime)
@@ -527,10 +525,13 @@ export function buildCaptionEntriesFromWords(
       : 0;
     const candidateWords = [...activeWords, word];
     const candidateDuration = candidateWords[candidateWords.length - 1].endTime - candidateWords[0].startTime;
+    const candidateWouldOverflow = activeWords.length > 0
+      && captionLinesExceedWindow(candidateWords, maxCharsPerLine, maxLines);
     const shouldFlush = activeWords.length > 0 && (
       pauseSinceLast > pauseBreakSeconds
       || candidateWords.length > 22
       || candidateDuration > 6.2
+      || candidateWouldOverflow
       || (
         CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
         && pauseSinceLast > 0.12
@@ -570,12 +571,26 @@ export function buildCaptionRenderWindows(
           .filter((word): word is CaptionCueWord => Boolean(word.text) && word.endTime > word.startTime)
           .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
         return words.flatMap((word, wordIndex) => {
-          const lines = buildRollingCaptionLines(words.slice(0, wordIndex + 1), maxCharsPerLine, maxLines);
-          if (lines.length === 0 || word.endTime <= word.startTime) return [];
+          const isNewChangePoint = wordIndex === 0
+            || Math.abs(word.startTime - words[wordIndex - 1].startTime) > CAPTION_SIMULTANEOUS_WORD_EPSILON;
+          if (!isNewChangePoint) return [];
+
+          let visibleWordEndIndex = wordIndex;
+          while (
+            visibleWordEndIndex + 1 < words.length
+            && Math.abs(words[visibleWordEndIndex + 1].startTime - word.startTime) <= CAPTION_SIMULTANEOUS_WORD_EPSILON
+          ) {
+            visibleWordEndIndex += 1;
+          }
+
+          const lines = buildRollingCaptionLines(words.slice(0, visibleWordEndIndex + 1), maxCharsPerLine, maxLines);
+          const nextWord = words[visibleWordEndIndex + 1];
+          const endTime = nextWord?.startTime ?? caption.endTime;
+          if (lines.length === 0 || endTime <= word.startTime) return [];
           return [{
             id: `${cueId}:word:${wordIndex}`,
             startTime: word.startTime,
-            endTime: word.endTime,
+            endTime,
             text: lines.join('\n'),
             lines,
           }];

@@ -41,7 +41,7 @@ import {
   projectSourceFramesToTimelineAll,
 } from './timelineUtils';
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
-import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
+import { buildClipSchedule, getTimelineDuration, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
 
 export type { EditSnapshot } from './editActionUtils';
@@ -935,6 +935,21 @@ function buildPrimaryMirrorState(
   };
 }
 
+function buildClampedTimelineControlState(
+  currentTime: number,
+  requestedSeekTime: number | null,
+  clips: VideoClip[],
+  transitions: TransitionEntry[],
+) {
+  const totalTimelineDuration = Math.max(0, getTimelineDuration(clips, transitions));
+  return {
+    currentTime: Math.max(0, Math.min(currentTime, totalTimelineDuration)),
+    requestedSeekTime: requestedSeekTime === null
+      ? null
+      : Math.max(0, Math.min(requestedSeekTime, totalTimelineDuration)),
+  };
+}
+
 function findInsertionIndex(
   clips: VideoClip[],
   transitions: TransitionEntry[],
@@ -1262,6 +1277,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: normalizeSelectedItem(state.selectedItem, snapshot.markers, snapshot.clips, snapshot.captions, snapshot.textOverlays, snapshot.transitions),
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, snapshot.clips),
+      ...buildClampedTimelineControlState(
+        state.currentTime,
+        state.requestedSeekTime,
+        snapshot.clips,
+        snapshot.transitions,
+      ),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         snapshot.clips,
@@ -1556,6 +1577,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ),
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, next.clips),
+      ...buildClampedTimelineControlState(
+        state.currentTime,
+        state.requestedSeekTime,
+        next.clips,
+        next.transitions,
+      ),
       ...clearReviewStatePatch(),
       ...(actionChangesTimelineStructure(action)
         ? buildDerivedIndexState(
@@ -1583,6 +1610,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       taggedMarkerIds: [],
       taggedClipIds: [],
+      ...buildClampedTimelineControlState(
+        get().currentTime,
+        get().requestedSeekTime,
+        prev.clips,
+        prev.transitions,
+      ),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         prev.clips,
@@ -1608,6 +1641,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedItem: null,
       taggedMarkerIds: [],
       taggedClipIds: [],
+      ...buildClampedTimelineControlState(
+        get().currentTime,
+        get().requestedSeekTime,
+        next.clips,
+        next.transitions,
+      ),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         next.clips,

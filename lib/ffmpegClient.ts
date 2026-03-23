@@ -405,8 +405,9 @@ async function writeCaptionTextFiles(
     await ffmpeg.writeFile(fileName, encoder.encode(window.lines.join('\n')));
     drawTextFilters.push(
       `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=h*0.036:line_spacing=10:` +
-      `box=1:boxcolor=black@0.74:boxborderw=12:x=(w-text_w)/2:y=h-(h*0.14)-text_h:` +
-      `enable='between(t,${window.startTime.toFixed(3)},${window.endTime.toFixed(3)})'`,
+      `borderw=3:bordercolor=black:shadowcolor=black@0.45:shadowx=0:shadowy=3:` +
+      `x=(w-text_w)/2:y=h-(h*0.14)-text_h:` +
+      `enable='gte(t,${window.startTime.toFixed(3)})*lt(t,${window.endTime.toFixed(3)})'`,
     );
   }
 

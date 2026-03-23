@@ -943,19 +943,41 @@ function buildServerAnalysisStatusCards(params: {
   ));
   if (trackedSources.length === 0) return [];
 
+  const getTaskProgressStage = (
+    kind: 'audio' | 'visual',
+    analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
+  ): IndexingProgress['stage'] => {
+    const stage = analysis?.progress?.stage;
+    if (kind === 'audio') {
+      return stage === 'transcribing_audio' || stage === 'transcribing'
+        ? stage
+        : 'transcribing_audio';
+    }
+    return stage === 'preparing_media'
+      || stage === 'detecting_scenes'
+      || stage === 'choosing_representative_frames'
+      || stage === 'describing_representative_frames'
+      ? stage
+      : 'describing_representative_frames';
+  };
+
   const buildAggregateCard = (kind: 'audio' | 'visual'): AnalysisStatusCard => {
-    const tasks = trackedSources.map((source) => {
+    const taskEntries = trackedSources.map((source) => {
       const analysis = params.analysisBySourceId[source.sourceId] ?? null;
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
-      return getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
+      const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
+      return {
+        task,
+        stage: getTaskProgressStage(kind, analysis),
+      };
     });
+    const tasks = taskEntries.map((entry) => entry.task);
     const total = tasks.length;
     const completed = tasks.filter((task) => (
       task.status === 'completed' || (kind === 'audio' && task.status === 'unavailable')
     )).length;
     const title = kind === 'audio' ? 'Audio analysis' : 'Visual analysis';
     const completedStage = kind === 'audio' ? 'transcribing' : 'describing_frames';
-    const activeStage = kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames';
     const firstReason = tasks.find((task) => task.reason)?.reason ?? null;
     const aggregateStatus = tasks.some((task) => task.status === 'running')
       ? 'running'
@@ -974,26 +996,46 @@ function buildServerAnalysisStatusCards(params: {
       };
     }
 
+    const progressFraction = taskEntries.reduce((sum, entry) => {
+      if (entry.task.status === 'completed' || (kind === 'audio' && entry.task.status === 'unavailable')) {
+        return sum + 1;
+      }
+      return sum + clampProgress(entry.task.completed / Math.max(entry.task.total, 1));
+    }, 0) / Math.max(total, 1);
+
+    const activeEntry = taskEntries.find((entry) => entry.task.status === 'running')
+      ?? taskEntries.find((entry) => entry.task.status === 'paused')
+      ?? taskEntries.find((entry) => entry.task.status === 'queued')
+      ?? taskEntries[0];
+    const activeStage = activeEntry?.stage ?? (kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames');
+    const averageEtaSeconds = aggregateStatus === 'running'
+      ? Math.max(...tasks.map((task) => Math.max(task.etaSeconds ?? 0, 0)), 0) || null
+      : null;
+
     return {
       key: `${kind}-analysis`,
       title,
       progress: {
         stage: activeStage,
-        completed,
-        total,
+        completed: Math.round(progressFraction * 1000),
+        total: 1000,
         label: aggregateStatus === 'running'
-          ? `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${completed}/${total}`
+          ? `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${Math.round(progressFraction * 100)}%`
           : aggregateStatus === 'paused'
-            ? `${kind === 'audio' ? 'Audio analysis paused' : 'Visual analysis paused'} ${completed}/${total}`
+            ? `${kind === 'audio' ? 'Audio analysis paused' : 'Visual analysis paused'} ${Math.round(progressFraction * 100)}%`
             : aggregateStatus === 'failed'
-              ? `${kind === 'audio' ? 'Audio analysis needs attention' : 'Visual analysis needs attention'} ${completed}/${total}`
-              : `${kind === 'audio' ? 'Preparing audio analysis' : 'Preparing visual analysis'} ${completed}/${total}`,
-        etaSeconds: aggregateStatus === 'running'
-          ? Math.max(...tasks.map((task) => Math.max(task.etaSeconds ?? 0, 0)), 0) || null
-          : null,
+              ? `${kind === 'audio' ? 'Audio analysis needs attention' : 'Visual analysis needs attention'}`
+              : `${kind === 'audio' ? 'Preparing audio analysis' : 'Preparing visual analysis'}`,
+        etaSeconds: averageEtaSeconds,
       },
       secondaryLabel: aggregateStatus === 'running'
-        ? `${completed}/${total} clips ready`
+        ? getIndexingStageTitle({
+            stage: activeStage,
+            completed: activeEntry?.task.completed ?? 0,
+            total: Math.max(activeEntry?.task.total ?? 1, 1),
+            label: null,
+            etaSeconds: activeEntry?.task.etaSeconds ?? null,
+          })
         : aggregateStatus === 'paused'
           ? 'Paused'
           : aggregateStatus === 'failed'
@@ -1088,40 +1130,6 @@ function isMarkerMutationAction(action?: EditAction | null): action is EditActio
     || action?.type === 'add_markers'
     || action?.type === 'update_marker'
     || action?.type === 'remove_marker';
-}
-
-function messageRequestsMarkerPlacement(message: string): boolean {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-
-  return (
-    /\bmarkers?|bookmarks?|tags?\b/.test(normalized)
-    && /\b(add|create|drop|find|help|locate|mark|place|point(?:\s+out)?|set|tag|put)\b/.test(normalized)
-  ) || /\bmark\b/.test(normalized);
-}
-
-function messageIncludesSecondaryEditRequest(message: string): boolean {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-
-  return /\b(cut|trim|delete|remove|caption|subtitle|transcribe|split|move|reorder|transition|fade|overlay|title|text|mute|volume|speed|slow|fast|silence|silent)\b/.test(normalized);
-}
-
-function isEvidenceGatheringAction(action?: EditAction | null): boolean {
-  return action?.type === 'transcribe_request' || action?.type === 'request_frames';
-}
-
-function shouldPrioritizeMarkerStepFirst(
-  requestText: string,
-  action?: EditAction | null,
-): boolean {
-  if (!action || action.type === 'none') return false;
-  if (!messageRequestsMarkerPlacement(requestText)) return false;
-  if (!messageIncludesSecondaryEditRequest(requestText)) return false;
-  if (isMarkerMutationAction(action)) return false;
-  if (isEvidenceGatheringAction(action)) return false;
-  if (action.type === 'update_ai_settings') return false;
-  return true;
 }
 
 function getMarkerActionResult(action: EditAction): string {
@@ -3428,14 +3436,11 @@ export default function ChatSidebar() {
     let nextHistory = [...history];
     let producedVisibleResponse = false;
 
-    for (let round = 0; round < 3; round++) {
+    for (let round = 0; round < 2; round++) {
       if (!initialIndexingReady) break;
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
       const chainState = requestChainId ? requestChainStateRef.current[requestChainId] ?? null : null;
-      const activeObjective = chainState?.remainingObjective?.trim()
-        || chainState?.originalRequest?.trim()
-        || latestUserInput;
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
@@ -3534,98 +3539,6 @@ export default function ChatSidebar() {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
-      const duplicateAction = Boolean(
-        requestChainId
-        && action
-        && action.type !== 'none'
-        && chainState?.completedActions.some((completedAction) => actionsMatch(completedAction, action)),
-      );
-      const blacklistedAction = Boolean(
-        requestChainId
-        && action
-        && action.type !== 'none'
-        && chainState?.duplicateActionBlacklist.includes(action.type),
-      );
-      if ((duplicateAction || blacklistedAction) && requestChainId && chainState && chainState.duplicateRerunCount < 1) {
-        const rerunState = updateRequestChainState(requestChainId, (current) => ({
-          ...current,
-          duplicateActionBlacklist: action && action.type !== 'none'
-            ? [action.type]
-            : current.duplicateActionBlacklist,
-          duplicateRerunCount: current.duplicateRerunCount + 1,
-        }));
-        if (rerunState) {
-          nextHistory = buildChatRequestHistory(
-            useEditorStore.getState().messages,
-            useEditorStore.getState().appliedActions,
-            buildContinuationPayload(
-              rerunState,
-              'duplicate_action_retry',
-              'Step already complete; continue remaining work only.',
-            ),
-            requestChainId,
-          );
-          continue;
-        }
-      }
-
-      if (
-        requestChainId
-        && chainState
-        && round < 2
-        && chainState.completedActions.length === 0
-        && chainState.duplicateRerunCount < 1
-        && shouldPrioritizeMarkerStepFirst(activeObjective, action)
-      ) {
-        const rerunState = updateRequestChainState(requestChainId, (current) => ({
-          ...current,
-          duplicateActionBlacklist: action && action.type !== 'none'
-            ? [...new Set([...current.duplicateActionBlacklist, action.type])]
-            : current.duplicateActionBlacklist,
-          duplicateRerunCount: current.duplicateRerunCount + 1,
-        }));
-        if (rerunState) {
-          nextHistory = buildChatRequestHistory(
-            useEditorStore.getState().messages,
-            useEditorStore.getState().appliedActions,
-            buildContinuationPayload(
-              rerunState,
-              'duplicate_action_retry',
-              'The original request includes a marker step plus another edit. If you already have enough evidence for the marker, emit the best add_marker/add_markers action first, then continue the remaining edit in the chain.',
-            ),
-            requestChainId,
-          );
-          continue;
-        }
-      }
-
-      if (
-        requestChainId
-        && chainState
-        && round < 2
-        && chainState.duplicateRerunCount < 1
-        && messageRequestsMarkerPlacement(activeObjective)
-        && (!action || action.type === 'none')
-        && (Boolean(currentTranscript?.trim()) || currentFrames.length > 0)
-      ) {
-        const rerunState = updateRequestChainState(requestChainId, (current) => ({
-          ...current,
-          duplicateRerunCount: current.duplicateRerunCount + 1,
-        }));
-        if (rerunState) {
-          nextHistory = buildChatRequestHistory(
-            useEditorStore.getState().messages,
-            useEditorStore.getState().appliedActions,
-            buildContinuationPayload(
-              rerunState,
-              'duplicate_action_retry',
-              'The user asked for marker placement. Use the available transcript and frame evidence to emit a best-effort add_marker/add_markers action now. Do not answer with type:none unless there is truly no plausible target.',
-            ),
-            requestChainId,
-          );
-          continue;
-        }
-      }
 
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
@@ -3671,24 +3584,6 @@ export default function ChatSidebar() {
           : undefined,
       });
       producedVisibleResponse = true;
-      if (requestChainId && markerAction && action && !markerActionPreviouslyApplied && round < 2) {
-        const nextChainState = requestChainStateRef.current[requestChainId] ?? null;
-        if (nextChainState) {
-          setLoadingStatus('Continuing with remaining steps…');
-          setLoadingPhaseId('continuing_remaining_step');
-          nextHistory = buildChatRequestHistory(
-            useEditorStore.getState().messages,
-            useEditorStore.getState().appliedActions,
-            buildContinuationPayload(
-              nextChainState,
-              'action_resolved',
-              'The previous action is already applied. Decide what distinct work, if any, still remains from the original request. Do not repeat that same edit.',
-            ),
-            requestChainId,
-          );
-          continue;
-        }
-      }
       return;
     }
 
@@ -3808,47 +3703,12 @@ export default function ChatSidebar() {
     messageId: string,
     action: EditAction,
   ) => {
-    if (action.type === 'transcribe_request' || !initialIndexingReady) return;
-
     const currentMessages = useEditorStore.getState().messages;
     const assistantMessage = currentMessages.find((message) => message.id === messageId && message.role === 'assistant');
     const requestChainId = assistantMessage?.requestChainId;
     if (!requestChainId) return;
-    const nextChainState = recordCompletedChainAction(requestChainId, action);
-    if (!nextChainState) return;
-
-    const storeState = useEditorStore.getState();
-    if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
-
-    setIsChatLoading(true);
-    setLoadingStatus('Continuing with remaining steps…');
-    setLoadingPhaseId('continuing_remaining_step');
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    stopRequestedRef.current = false;
-
-    try {
-      const history = buildChatRequestHistory(
-        currentMessages,
-        useEditorStore.getState().appliedActions,
-        buildContinuationPayload(
-          nextChainState,
-          'action_resolved',
-          'The previous action is already applied. Decide what distinct work, if any, still remains from the original request. If the request is complete, finish without proposing another edit.',
-        ),
-        requestChainId,
-      );
-      await runSingleTurn(history, ctrl, requestChainId);
-    } catch (err) {
-      if ((err as Error)?.name !== 'AbortError') {
-        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
-      }
-    } finally {
-      setIsChatLoading(false);
-      setLoadingStatus('');
-      setLoadingPhaseId(null);
-    }
-  }, [addMessage, initialIndexingReady, recordCompletedChainAction, runSingleTurn, setIsChatLoading]);
+    recordCompletedChainAction(requestChainId, action);
+  }, [recordCompletedChainAction]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;

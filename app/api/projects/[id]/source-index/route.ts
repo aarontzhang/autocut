@@ -436,7 +436,7 @@ function shouldEnsureIndexingJob(input: {
 }) {
   if (input.latestJob) return false;
   if (input.asset.indexed_at) return false;
-  return input.asset.status === 'pending';
+  return true;
 }
 
 async function loadProjectAndSources(projectId: string, userId: string) {

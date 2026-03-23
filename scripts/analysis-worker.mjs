@@ -237,9 +237,11 @@ function createPauseError() {
 }
 
 const progressEtaState = new Map();
+const jobResultMutationQueues = new Map();
 
 function clearProgressState(jobId) {
   progressEtaState.delete(jobId);
+  jobResultMutationQueues.delete(jobId);
 }
 
 function estimateStageEta(jobId, stage, completed, total, plannedUnitSeconds = null) {
@@ -421,17 +423,24 @@ async function setAssetStatus(assetId, patch) {
 }
 
 async function updateJobResult(jobId, updater) {
-  const { data, error } = await supabase
-    .from('analysis_jobs')
-    .select('result')
-    .eq('id', jobId)
-    .maybeSingle();
-  if (error) throw error;
+  const previous = jobResultMutationQueues.get(jobId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const { data, error } = await supabase
+        .from('analysis_jobs')
+        .select('result')
+        .eq('id', jobId)
+        .maybeSingle();
+      if (error) throw error;
 
-  const currentResult = data?.result && typeof data.result === 'object' ? data.result : {};
-  const nextResult = updater(currentResult);
-  await updateJob(jobId, { result: nextResult });
-  return nextResult;
+      const currentResult = data?.result && typeof data.result === 'object' ? data.result : {};
+      const nextResult = updater(currentResult);
+      await updateJob(jobId, { result: nextResult });
+      return nextResult;
+    });
+  jobResultMutationQueues.set(jobId, next.then(() => undefined, () => undefined));
+  return next;
 }
 
 async function claimNextJob(lockerId) {
@@ -991,6 +1000,7 @@ async function processIndexAssetJob(job) {
     const completedTranscriptKeys = new Set(transcriptCheckpoint.completedChunkKeys);
     await updateJobResult(job.id, (currentResult) => {
       const transcript = getJobResultValue(currentResult, 'transcript');
+      const visual = getJobResultValue(currentResult, 'visual');
       return {
         ...currentResult,
         transcript: {
@@ -998,13 +1008,76 @@ async function processIndexAssetJob(job) {
           totalChunks: transcriptRanges.length,
           completedChunkKeys: Array.from(completedTranscriptKeys),
         },
+        visual: {
+          ...visual,
+        },
       };
     });
 
-    for (let index = 0; index < transcriptRanges.length; index += 1) {
-      const range = transcriptRanges[index];
-      const rangeKey = buildTranscriptRangeKey(range);
-      if (completedTranscriptKeys.has(rangeKey)) continue;
+    const jobControl = {
+      cancelled: false,
+      error: null,
+    };
+    const throwIfCancelled = () => {
+      if (jobControl.cancelled && jobControl.error) {
+        throw jobControl.error;
+      }
+    };
+    const markCancelled = (error) => {
+      if (!jobControl.cancelled) {
+        jobControl.cancelled = true;
+        jobControl.error = error;
+      }
+      return error;
+    };
+
+    const transcriptTask = (async () => {
+      for (let index = 0; index < transcriptRanges.length; index += 1) {
+        throwIfCancelled();
+        const range = transcriptRanges[index];
+        const rangeKey = buildTranscriptRangeKey(range);
+        if (completedTranscriptKeys.has(rangeKey)) continue;
+
+        await updateProgress(
+          job.id,
+          'transcribing_audio',
+          completedTranscriptKeys.size,
+          Math.max(1, transcriptRanges.length),
+          `Transcribing audio ${completedTranscriptKeys.size}/${Math.max(1, transcriptRanges.length)}`,
+          { plannedUnitSeconds: 12 },
+        );
+
+        const audioPath = path.join(tempDir, `audio-${index}.mp3`);
+        await extractAudioChunk(inputPath, range, audioPath);
+        throwIfCancelled();
+        const words = await transcribeAudioChunk(audioPath, range.startTime);
+        await fs.rm(audioPath, { force: true });
+        if (words.length > 0) {
+          const rows = words.map((word) => ({
+            asset_id: asset.id,
+            start_time: word.start_time,
+            end_time: word.end_time,
+            text: word.text,
+            confidence: word.confidence,
+          }));
+          const { error } = await supabase.from('asset_transcript_words').insert(rows);
+          if (error) throw error;
+        }
+
+        completedTranscriptKeys.add(rangeKey);
+        await updateJobResult(job.id, (currentResult) => {
+          const transcript = getJobResultValue(currentResult, 'transcript');
+          return {
+            ...currentResult,
+            transcript: {
+              ...transcript,
+              totalChunks: transcriptRanges.length,
+              completedChunkKeys: Array.from(completedTranscriptKeys),
+            },
+          };
+        });
+        await checkpointPause(job.id);
+      }
 
       await updateProgress(
         job.id,
@@ -1012,128 +1085,117 @@ async function processIndexAssetJob(job) {
         completedTranscriptKeys.size,
         Math.max(1, transcriptRanges.length),
         `Transcribing audio ${completedTranscriptKeys.size}/${Math.max(1, transcriptRanges.length)}`,
-        { plannedUnitSeconds: 12 },
+        { etaSeconds: 0, plannedUnitSeconds: 12 },
       );
 
-      const audioPath = path.join(tempDir, `audio-${index}.mp3`);
-      await extractAudioChunk(inputPath, range, audioPath);
-      const words = await transcribeAudioChunk(audioPath, range.startTime);
-      await fs.rm(audioPath, { force: true });
-      if (words.length > 0) {
-        const rows = words.map((word) => ({
-          asset_id: asset.id,
-          start_time: word.start_time,
-          end_time: word.end_time,
-          text: word.text,
-          confidence: word.confidence,
-        }));
-        const { error } = await supabase.from('asset_transcript_words').insert(rows);
-        if (error) throw error;
+      return {
+        totalChunks: transcriptRanges.length,
+        completedChunkKeys: Array.from(completedTranscriptKeys),
+      };
+    })().catch((error) => {
+      throw markCancelled(error);
+    });
+
+    const visualTask = (async () => {
+      throwIfCancelled();
+      await updateProgress(job.id, 'detecting_scenes', 0, 1, 'Detecting scenes', { plannedUnitSeconds: 8 });
+      const scenes = await detectScenes(inputPath, duration);
+      await updateProgress(job.id, 'detecting_scenes', 1, 1, 'Detecting scenes', { etaSeconds: 0, plannedUnitSeconds: 8 });
+      throwIfCancelled();
+
+      const [{ data: existingVisualRows, error: existingVisualError }, { data: existingSceneRows, error: existingSceneError }] = await Promise.all([
+        supabase
+          .from('asset_visual_index')
+          .select('id, source_time, sample_kind, metadata')
+          .eq('asset_id', asset.id)
+          .in('sample_kind', ['coarse_window_rep', 'scene_rep']),
+        supabase
+          .from('asset_scenes')
+          .select('scene_index')
+          .eq('asset_id', asset.id),
+      ]);
+      if (existingVisualError) throw existingVisualError;
+      if (existingSceneError) throw existingSceneError;
+
+      const existingRowsByKey = new Map();
+      let describedCount = 0;
+      for (const row of existingVisualRows ?? []) {
+        const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+        const key = row.sample_kind === 'scene_rep' && typeof metadata.sceneId === 'string'
+          ? `scene_rep:${metadata.sceneId}`
+          : `coarse_window_rep:${Number(metadata.windowStart ?? row.source_time).toFixed(3)}:${Number(metadata.windowEnd ?? row.source_time).toFixed(3)}`;
+        existingRowsByKey.set(key, {
+          id: row.id,
+          metadata,
+          sourceTime: row.source_time,
+          sampleKind: row.sample_kind,
+          sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
+          score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
+          selectionKey: key,
+        });
+        if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
+          describedCount += 1;
+        }
       }
 
-      completedTranscriptKeys.add(rangeKey);
       await updateJobResult(job.id, (currentResult) => {
-        const transcript = getJobResultValue(currentResult, 'transcript');
+        const visual = getJobResultValue(currentResult, 'visual');
         return {
           ...currentResult,
-          transcript: {
-            ...transcript,
-            totalChunks: transcriptRanges.length,
-            completedChunkKeys: Array.from(completedTranscriptKeys),
+          visual: {
+            ...visual,
+            plannedWindowCount: buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES).length,
+            plannedSceneCount: scenes.length,
+            describedCount,
           },
         };
       });
-      await checkpointPause(job.id);
-    }
 
-    await updateProgress(
-      job.id,
-      'transcribing_audio',
-      completedTranscriptKeys.size,
-      Math.max(1, transcriptRanges.length),
-      `Transcribing audio ${completedTranscriptKeys.size}/${Math.max(1, transcriptRanges.length)}`,
-      { etaSeconds: 0, plannedUnitSeconds: 12 },
-    );
+      const { sceneSelections, plannedWindowCount, plannedSceneCount } = await chooseRepresentativeFrames(
+        inputPath,
+        asset.id,
+        duration,
+        scenes,
+        scratchDir,
+        job.id,
+        existingRowsByKey,
+      );
+      throwIfCancelled();
+      await insertScenes(
+        asset.id,
+        scenes,
+        sceneSelections,
+        new Set((existingSceneRows ?? []).map((row) => Number(row.scene_index))),
+      );
 
-    await updateProgress(job.id, 'detecting_scenes', 0, 1, 'Detecting scenes', { plannedUnitSeconds: 8 });
-    const scenes = await detectScenes(inputPath, duration);
-    await updateProgress(job.id, 'detecting_scenes', 1, 1, 'Detecting scenes', { etaSeconds: 0, plannedUnitSeconds: 8 });
+      const allSelections = Array.from(existingRowsByKey.values()).map((row) => ({
+        rowId: row.id,
+        metadata: row.metadata ?? {},
+        sourceTime: row.sourceTime,
+        sampleKind: row.sampleKind,
+        sceneId: row.sceneId,
+        score: row.score,
+        selectionKey: row.selectionKey,
+        imageBase64: null,
+      }));
+      await writeRepresentativeDescriptions(inputPath, scratchDir, allSelections, job.id, describedCount);
 
-    const [{ data: existingVisualRows, error: existingVisualError }, { data: existingSceneRows, error: existingSceneError }] = await Promise.all([
-      supabase
-        .from('asset_visual_index')
-        .select('id, source_time, sample_kind, metadata')
-        .eq('asset_id', asset.id)
-        .in('sample_kind', ['coarse_window_rep', 'scene_rep']),
-      supabase
-        .from('asset_scenes')
-        .select('scene_index')
-        .eq('asset_id', asset.id),
-    ]);
-    if (existingVisualError) throw existingVisualError;
-    if (existingSceneError) throw existingSceneError;
-
-    const existingRowsByKey = new Map();
-    let describedCount = 0;
-    for (const row of existingVisualRows ?? []) {
-      const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-      const key = row.sample_kind === 'scene_rep' && typeof metadata.sceneId === 'string'
-        ? `scene_rep:${metadata.sceneId}`
-        : `coarse_window_rep:${Number(metadata.windowStart ?? row.source_time).toFixed(3)}:${Number(metadata.windowEnd ?? row.source_time).toFixed(3)}`;
-      existingRowsByKey.set(key, {
-        id: row.id,
-        metadata,
-        sourceTime: row.source_time,
-        sampleKind: row.sample_kind,
-        sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
-        score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
-        selectionKey: key,
-      });
-      if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
-        describedCount += 1;
-      }
-    }
-
-    await updateJobResult(job.id, (currentResult) => {
-      const visual = getJobResultValue(currentResult, 'visual');
       return {
-        ...currentResult,
-        visual: {
-          ...visual,
-          plannedWindowCount: buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES).length,
-          plannedSceneCount: scenes.length,
-          describedCount,
-        },
+        scenes,
+        plannedWindowCount,
+        plannedSceneCount,
+        describedCount: plannedWindowCount + plannedSceneCount,
       };
+    })().catch((error) => {
+      throw markCancelled(error);
     });
 
-    const { sceneSelections, plannedWindowCount, plannedSceneCount } = await chooseRepresentativeFrames(
-      inputPath,
-      asset.id,
-      duration,
-      scenes,
-      scratchDir,
-      job.id,
-      existingRowsByKey,
-    );
-    await insertScenes(
-      asset.id,
-      scenes,
-      sceneSelections,
-      new Set((existingSceneRows ?? []).map((row) => Number(row.scene_index))),
-    );
+    const [transcriptOutcome, visualOutcome] = await Promise.allSettled([transcriptTask, visualTask]);
+    if (transcriptOutcome.status === 'rejected') throw transcriptOutcome.reason;
+    if (visualOutcome.status === 'rejected') throw visualOutcome.reason;
 
-    const allSelections = Array.from(existingRowsByKey.values()).map((row) => ({
-      rowId: row.id,
-      metadata: row.metadata ?? {},
-      sourceTime: row.sourceTime,
-      sampleKind: row.sampleKind,
-      sceneId: row.sceneId,
-      score: row.score,
-      selectionKey: row.selectionKey,
-      imageBase64: null,
-    }));
-    await writeRepresentativeDescriptions(inputPath, scratchDir, allSelections, job.id, describedCount);
+    const transcriptResult = transcriptOutcome.value;
+    const visualResult = visualOutcome.value;
 
     await setAssetStatus(asset.id, {
       status: 'ready',
@@ -1151,20 +1213,20 @@ async function processIndexAssetJob(job) {
       pause_requested: false,
       result: {
         transcript: {
-          totalChunks: transcriptRanges.length,
-          completedChunkKeys: Array.from(completedTranscriptKeys),
+          totalChunks: transcriptResult.totalChunks,
+          completedChunkKeys: transcriptResult.completedChunkKeys,
         },
         visual: {
-          plannedWindowCount,
-          plannedSceneCount,
-          describedCount: plannedWindowCount + plannedSceneCount,
+          plannedWindowCount: visualResult.plannedWindowCount,
+          plannedSceneCount: visualResult.plannedSceneCount,
+          describedCount: visualResult.describedCount,
         },
-        sceneCount: scenes.length,
+        sceneCount: visualResult.scenes.length,
       },
       progress: {
         stage: 'describing_representative_frames',
-        completed: plannedWindowCount + plannedSceneCount,
-        total: Math.max(1, plannedWindowCount + plannedSceneCount),
+        completed: visualResult.describedCount,
+        total: Math.max(1, visualResult.describedCount),
         label: 'Completed',
         etaSeconds: 0,
       },

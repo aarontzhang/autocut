@@ -159,7 +159,7 @@ export async function ensureAssetIndexingJob(
       .maybeSingle();
 
     if (assetError) throw assetError;
-    if (asset && (asset.indexed_at || asset.status === 'ready')) {
+    if (asset?.indexed_at) {
       return null;
     }
 
