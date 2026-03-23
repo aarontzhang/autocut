@@ -12,7 +12,11 @@ import {
   VideoClip,
 } from './types';
 import { getAdaptiveCoarseFrameBudget } from './indexer/representativeFrames';
-import { buildClipSchedule, getTimelineDuration as getRenderTimelineDuration } from './playbackEngine';
+import {
+  buildClipSchedule,
+  getTimelineDuration as getRenderTimelineDuration,
+  timelineTimeToSource,
+} from './playbackEngine';
 
 const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
 const DEFAULT_CAPTION_MAX_LINES = 2;
@@ -198,6 +202,73 @@ export function sourceTimeToTimelineOccurrences(
     }
   }
   return matches;
+}
+
+/**
+ * Map a timeline moment from one snapshot into another by following the
+ * underlying source media. When the exact source moment was removed in the
+ * target snapshot, snap to the nearest surviving boundary for that source span.
+ */
+export function mapTimelineTimeAcrossSnapshots(
+  fromClips: VideoClip[],
+  toClips: VideoClip[],
+  timelineTime: number,
+  fromTransitions: TransitionEntry[] = [],
+  toTransitions: TransitionEntry[] = [],
+): number | null {
+  const fromSchedule = buildClipSchedule(fromClips, fromTransitions);
+  const toSchedule = buildClipSchedule(toClips, toTransitions);
+  if (fromSchedule.length === 0 || toSchedule.length === 0) return null;
+
+  const sourceMoment = timelineTimeToSource(fromSchedule, timelineTime);
+  if (!sourceMoment) return null;
+
+  const { sourceTime, entry: fromEntry } = sourceMoment;
+  const fromSourceStart = fromEntry.sourceStart;
+  const fromSourceEnd = fromEntry.sourceStart + fromEntry.sourceDuration;
+  const EPSILON = 1e-6;
+
+  let bestMatch: {
+    timelineTime: number;
+    sourceDistance: number;
+    timelineDistance: number;
+    exact: boolean;
+  } | null = null;
+
+  for (const toEntry of toSchedule) {
+    if (toEntry.sourceId !== fromEntry.sourceId) continue;
+
+    const toSourceStart = toEntry.sourceStart;
+    const toSourceEnd = toEntry.sourceStart + toEntry.sourceDuration;
+    const overlapStart = Math.max(fromSourceStart, toSourceStart);
+    const overlapEnd = Math.min(fromSourceEnd, toSourceEnd);
+    if (overlapEnd < overlapStart + EPSILON) continue;
+
+    const projectedSourceTime = Math.max(overlapStart, Math.min(sourceTime, overlapEnd));
+    const candidateTimelineTime = toEntry.timelineStart + (projectedSourceTime - toSourceStart) / toEntry.speed;
+    const sourceDistance = Math.abs(sourceTime - projectedSourceTime);
+    const timelineDistance = Math.abs(candidateTimelineTime - timelineTime);
+    const exact = sourceDistance <= EPSILON;
+
+    if (
+      !bestMatch
+      || Number(exact) > Number(bestMatch.exact)
+      || sourceDistance < bestMatch.sourceDistance - EPSILON
+      || (
+        Math.abs(sourceDistance - bestMatch.sourceDistance) <= EPSILON
+        && timelineDistance < bestMatch.timelineDistance - EPSILON
+      )
+    ) {
+      bestMatch = {
+        timelineTime: candidateTimelineTime,
+        sourceDistance,
+        timelineDistance,
+        exact,
+      };
+    }
+  }
+
+  return bestMatch?.timelineTime ?? null;
 }
 
 /**

@@ -3,8 +3,15 @@
 import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import type { CSSProperties, ReactNode, RefObject, MutableRefObject } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
-import { getRulerTicks, formatTime, formatTimeDetailed, formatTimePrecise, generateWaveform } from '@/lib/timelineUtils';
-import { buildClipSchedule, findTimelineEntryAtTime } from '@/lib/playbackEngine';
+import {
+  getRulerTicks,
+  formatTime,
+  formatTimeDetailed,
+  formatTimePrecise,
+  generateWaveform,
+  mapTimelineTimeAcrossSnapshots,
+} from '@/lib/timelineUtils';
+import { buildClipSchedule, findTimelineEntryAtTime, getTimelineDuration } from '@/lib/playbackEngine';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getReviewOverlayDescriptors } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
@@ -116,6 +123,13 @@ export default function Timeline({
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
   const timelineSnapshot = activeReviewSession?.baseSnapshot ?? previewSnapshot;
+  const playbackSnapshot = previewSnapshot ?? {
+    clips: liveClips,
+    captions: liveCaptions,
+    transitions: liveTransitions,
+    markers: liveMarkers,
+    textOverlays: liveTextOverlays,
+  };
   const clips = timelineSnapshot?.clips ?? liveClips;
   const captions = timelineSnapshot?.captions ?? liveCaptions;
   const transitions = timelineSnapshot?.transitions ?? liveTransitions;
@@ -144,6 +158,10 @@ export default function Timeline({
   }, [createMarkerAtTime, splitClipAtTime]);
 
   const schedule = buildClipSchedule(clips, transitions);
+  const playbackDuration = useMemo(
+    () => Math.max(0, getTimelineDuration(playbackSnapshot.clips, playbackSnapshot.transitions)),
+    [playbackSnapshot.clips, playbackSnapshot.transitions],
+  );
   const mainTrackEnd = useMemo(
     () => (schedule.length > 0 ? schedule[schedule.length - 1].timelineEnd : videoDuration),
     [schedule, videoDuration],
@@ -160,6 +178,31 @@ export default function Timeline({
     () => contentDuration + RIGHT_PAD,
     [RIGHT_PAD, contentDuration],
   );
+  const displayedCurrentTime = useMemo(() => {
+    if (!activeReviewSession) {
+      return Math.max(0, Math.min(currentTime, contentDuration));
+    }
+
+    const mappedTime = mapTimelineTimeAcrossSnapshots(
+      playbackSnapshot.clips,
+      clips,
+      currentTime,
+      playbackSnapshot.transitions,
+      transitions,
+    );
+    if (mappedTime === null) {
+      return Math.max(0, Math.min(currentTime, contentDuration));
+    }
+    return Math.max(0, Math.min(mappedTime, contentDuration));
+  }, [
+    activeReviewSession,
+    clips,
+    contentDuration,
+    currentTime,
+    playbackSnapshot.clips,
+    playbackSnapshot.transitions,
+    transitions,
+  ]);
 
   const totalW = trackWidth * zoom;
   const ticks = getRulerTicks(totalTimelineDuration, totalW);
@@ -248,8 +291,37 @@ export default function Timeline({
     return Math.max(0, Math.min(contentDuration, (px / totalW) * totalTimelineDuration));
   }, [contentDuration, totalTimelineDuration, totalW]);
 
+  const mapDisplayTimeToPlaybackTime = useCallback((displayTime: number) => {
+    if (!activeReviewSession) {
+      return Math.max(0, Math.min(contentDuration, displayTime));
+    }
+
+    const mappedTime = mapTimelineTimeAcrossSnapshots(
+      clips,
+      playbackSnapshot.clips,
+      displayTime,
+      transitions,
+      playbackSnapshot.transitions,
+    );
+    if (mappedTime === null) {
+      return Math.max(0, Math.min(displayTime, playbackDuration));
+    }
+    return Math.max(0, Math.min(mappedTime, playbackDuration));
+  }, [
+    activeReviewSession,
+    clips,
+    contentDuration,
+    playbackDuration,
+    playbackSnapshot.clips,
+    playbackSnapshot.transitions,
+    transitions,
+  ]);
+  const requestDisplaySeek = useCallback((displayTime: number) => {
+    requestSeek(mapDisplayTimeToPlaybackTime(displayTime));
+  }, [mapDisplayTimeToPlaybackTime, requestSeek]);
+
   const seekToTimelineTime = useCallback((timelineTime: number) => {
-    const nextTime = Math.max(0, Math.min(contentDuration, timelineTime));
+    const nextTime = mapDisplayTimeToPlaybackTime(timelineTime);
     playerRef?.current?.seekTo(nextTime);
 
     if (!playerRef?.current) {
@@ -265,7 +337,7 @@ export default function Timeline({
     }
 
     setSelectedItem(null);
-  }, [contentDuration, playerRef, setCurrentTime, setSelectedItem, videoRef]);
+  }, [mapDisplayTimeToPlaybackTime, playerRef, setCurrentTime, setSelectedItem, videoRef]);
 
   const seek = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     if (panRef.current?.moved) return;
@@ -306,13 +378,14 @@ export default function Timeline({
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const rawPx = (clientX - rect.left - HEADER_W) + el.scrollLeft;
-    const nextTime = Math.max(0, Math.min(contentDuration, (rawPx / dragInfo.totalW) * dragInfo.totalDuration));
+    const displayTime = Math.max(0, Math.min(contentDuration, (rawPx / dragInfo.totalW) * dragInfo.totalDuration));
+    const nextTime = mapDisplayTimeToPlaybackTime(displayTime);
 
     playerRef?.current?.seekTo(nextTime);
     if (!playerRef?.current) {
       useEditorStore.getState().setCurrentTime(nextTime);
     }
-  }, [contentDuration, playerRef]);
+  }, [contentDuration, mapDisplayTimeToPlaybackTime, playerRef]);
 
   const beginPlayheadDrag = useCallback((clientX: number, pointerId: number) => {
     const dragInfo = { pointerId, totalW, totalDuration: totalTimelineDuration };
@@ -538,7 +611,7 @@ export default function Timeline({
                     event.stopPropagation();
                     toggleTaggedMarker(marker.id);
                     setSelectedItem({ type: 'marker', id: marker.id });
-                    requestSeek(marker.timelineTime);
+                    requestDisplaySeek(marker.timelineTime);
                   }}
                   style={{
                     position: 'absolute',
@@ -666,7 +739,7 @@ export default function Timeline({
                     e.stopPropagation();
                     toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
-                    requestSeek(entry.timelineStart);
+                    requestDisplaySeek(entry.timelineStart);
                   }}
                 />
               );
@@ -752,7 +825,7 @@ export default function Timeline({
                     e.stopPropagation();
                     toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
-                    requestSeek(entry.timelineStart);
+                    requestDisplaySeek(entry.timelineStart);
                   }}
                 >
                   <div
@@ -989,7 +1062,7 @@ export default function Timeline({
           )}
 
           <TimelinePlayheadOverlay
-            currentTime={currentTime}
+            currentTime={displayedCurrentTime}
             scrollRef={scrollRef}
             totalTimelineDuration={totalTimelineDuration}
             totalW={totalW}
