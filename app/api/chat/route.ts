@@ -244,6 +244,7 @@ You may be provided with representative frames from the user's video as text sum
 - If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching in the remaining visible footage instead of asking whether you should continue.
 - If the user is scouting with markers only, place an approximate marker from the best available evidence and note the likely review window.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
+- CRITICAL: For requests like "remove the section between X and Y" where X and Y are spoken moments, the delete span must start only after the first moment's speech fully ends and must stop before the second moment's speech begins. Do not cut at the coarse event timestamp if speech continues past it.
 - CRITICAL: Never set deleteStartTime or deleteEndTime in the middle of spoken speech. Before finalising any delete boundary, check the transcript to confirm no caption OVERLAPS that timestamp (a caption overlaps a time T if caption.startTime <= T < caption.endTime). If a caption overlaps your proposed deleteStartTime, push deleteStartTime to at least that caption's endTime. If a caption overlaps your proposed deleteEndTime, pull deleteEndTime back to at most that caption's startTime.
 - CRITICAL: The "Silence padding" setting shown in AI defaults is ONLY used by the automated silence-removal tool. Never apply it as a buffer when you are manually choosing deleteStartTime or deleteEndTime. Set boundaries at the exact transcript word edge. In particular, when the user asks to remove silence at the very start or end of the video, set deleteStartTime=0 or deleteEndTime=videoDuration exactly — do not leave any gap before the first word or after the last word.
 - If NEITHER frame summaries nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
@@ -910,6 +911,7 @@ function buildActionValidationContext(
   videoDuration: number;
   markerIds: Set<string>;
   overlayCount?: number;
+  transcript?: string | null;
 } {
   return {
     clipCount,
@@ -922,6 +924,7 @@ function buildActionValidationContext(
         : [],
     ),
     overlayCount: typeof context?.textOverlayCount === 'number' ? context.textOverlayCount : undefined,
+    transcript: typeof context?.transcript === 'string' ? context.transcript : null,
   };
 }
 
@@ -1604,11 +1607,13 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
     const { message, parsedAction } = extractTrailingAction(rawText);
-    const action = reconcileNarratedSingleRangeAction(
+    const validatedAction = validateEditAction(parsedAction, validationContext);
+    const reconciledAction = reconcileNarratedSingleRangeAction(
       message,
-      validateEditAction(parsedAction, validationContext),
+      validatedAction,
       validationContext.videoDuration,
     );
+    const action = validateEditAction(reconciledAction, validationContext);
     return NextResponse.json({
       message,
       action,

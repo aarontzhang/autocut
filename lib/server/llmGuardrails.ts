@@ -17,6 +17,7 @@ type ActionValidationContext = {
   videoDuration: number;
   markerIds?: Set<string>;
   overlayCount?: number;
+  transcript?: string | null;
 };
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
@@ -30,6 +31,8 @@ const MAX_TRANSITIONS_PER_ACTION = 12;
 const MAX_DELETE_RANGES_PER_ACTION = 400;
 const MAX_TRANSCRIBE_SEGMENTS = 12;
 const MAX_TEXT_OVERLAYS_PER_ACTION = 24;
+const TRANSCRIPT_LINE_REGEX = /^\[([0-9]+:[0-5]\d\.\d{3})-([0-9]+:[0-5]\d\.\d{3})\]\s+(.+)$/;
+const SPEECH_SEGMENT_MERGE_EPSILON = 0.001;
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -73,6 +76,83 @@ function sanitizeRange(start: unknown, end: unknown, videoDuration: number) {
   const safeEnd = sanitizeTime(end, videoDuration);
   if (safeStart === null || safeEnd === null || safeEnd <= safeStart) return null;
   return { start: safeStart, end: safeEnd };
+}
+
+function parsePreciseTimelineTimestamp(value: string): number | null {
+  const match = value.match(/^(\d+):([0-5]\d)\.(\d{3})$/);
+  if (!match) return null;
+  const minutes = Number(match[1]);
+  const seconds = Number(match[2]);
+  const milliseconds = Number(match[3]);
+  if (!Number.isFinite(minutes) || !Number.isFinite(seconds) || !Number.isFinite(milliseconds)) {
+    return null;
+  }
+  return minutes * 60 + seconds + milliseconds / 1000;
+}
+
+function parseTranscriptSpeechSegments(transcript: string | null | undefined): Array<{ start: number; end: number }> {
+  if (typeof transcript !== 'string' || transcript.trim().length === 0) return [];
+
+  const segments = transcript
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const match = line.match(TRANSCRIPT_LINE_REGEX);
+      if (!match) return [];
+      const start = parsePreciseTimelineTimestamp(match[1]);
+      const end = parsePreciseTimelineTimestamp(match[2]);
+      if (start === null || end === null || end <= start) return [];
+      return [{ start, end }];
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+
+  if (segments.length === 0) return [];
+
+  const merged = [{ ...segments[0] }];
+  for (const segment of segments.slice(1)) {
+    const current = merged[merged.length - 1];
+    if (segment.start <= current.end + SPEECH_SEGMENT_MERGE_EPSILON) {
+      current.end = Math.max(current.end, segment.end);
+    } else {
+      merged.push({ ...segment });
+    }
+  }
+
+  return merged;
+}
+
+function snapDeleteBoundaryOutOfSpeech(
+  time: number,
+  direction: 'forward' | 'backward',
+  speechSegments: Array<{ start: number; end: number }>,
+): number {
+  for (const segment of speechSegments) {
+    if (time >= segment.start && time < segment.end) {
+      return direction === 'forward' ? segment.end : segment.start;
+    }
+  }
+  return time;
+}
+
+function sanitizeDeleteRange(
+  start: unknown,
+  end: unknown,
+  videoDuration: number,
+  speechSegments: Array<{ start: number; end: number }>,
+) {
+  const range = sanitizeRange(start, end, videoDuration);
+  if (!range) return null;
+  if (speechSegments.length === 0) return range;
+
+  const snappedStart = snapDeleteBoundaryOutOfSpeech(range.start, 'forward', speechSegments);
+  const snappedEnd = snapDeleteBoundaryOutOfSpeech(range.end, 'backward', speechSegments);
+  if (snappedEnd <= snappedStart) return null;
+
+  return {
+    start: snappedStart,
+    end: snappedEnd,
+  };
 }
 
 function sanitizeClipIndex(value: unknown, clipCount: number) {
@@ -306,6 +386,7 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
 
   const base = { type, message } as EditAction;
   const safeDuration = Math.max(0, context.videoDuration);
+  const speechSegments = parseTranscriptSpeechSegments(context.transcript);
 
   if (type === 'none') return { type: 'none', message };
 
@@ -316,7 +397,7 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
   }
 
   if (type === 'delete_range') {
-    const range = sanitizeRange(action.deleteStartTime, action.deleteEndTime, safeDuration);
+    const range = sanitizeDeleteRange(action.deleteStartTime, action.deleteEndTime, safeDuration, speechSegments);
     if (!range) return null;
     return { ...base, type, deleteStartTime: range.start, deleteEndTime: range.end };
   }
@@ -327,10 +408,11 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
       .slice(0, MAX_DELETE_RANGES_PER_ACTION)
       .flatMap((range) => {
         if (!range || typeof range !== 'object') return [];
-        const safeRange = sanitizeRange(
+        const safeRange = sanitizeDeleteRange(
           (range as { start?: unknown }).start,
           (range as { end?: unknown }).end,
           safeDuration,
+          speechSegments,
         );
         return safeRange ? [{ start: safeRange.start, end: safeRange.end }] : [];
       });
