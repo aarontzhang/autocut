@@ -31,6 +31,14 @@ import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
+import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
+import {
+  actionsMatch,
+  buildRequestChainContinuationMessage,
+  RequestChainContinuationPayload,
+  RequestChainTranscriptAvailability,
+  serializeActionForComparison,
+} from '@/lib/requestChain';
 import AutocutMark from '@/components/branding/AutocutMark';
 
 const FRAME_DESCRIPTION_BATCH_SIZE = 8;
@@ -68,6 +76,7 @@ type ChatResponse = {
 type ChatRequestMessage = {
   role: 'user' | 'assistant';
   content: string;
+  requestChainId?: string;
   action?: EditAction | null;
   actionType?: EditAction['type'];
   actionMessage?: string;
@@ -107,7 +116,7 @@ type ServerSourceAnalysisCard = {
   etaSeconds?: number | null;
   tone: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'unavailable';
   action?: {
-    label: 'Pause' | 'Resume';
+    label: 'Pause' | 'Resume' | 'Retry';
     onClick: () => void;
     disabled?: boolean;
   } | null;
@@ -117,9 +126,17 @@ const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
-const APPROVAL_CONTINUATION_PREFIX = 'Continue with the remaining steps from my earlier request now that the approved edit was applied.';
-const MAX_AUTO_APPROVAL_CONTINUATIONS = 4;
 const MAX_CHAT_OVERVIEW_FRAMES = 96;
+
+type RequestChainState = {
+  requestChainId: string;
+  originalRequest: string;
+  remainingObjective: string | null;
+  completedActions: EditAction[];
+  duplicateActionBlacklist: EditAction['type'][];
+  transcript: RequestChainTranscriptAvailability;
+  duplicateRerunCount: number;
+};
 
 type ActiveMarkerMention = {
   query: string;
@@ -609,24 +626,6 @@ function scoreFrameHeuristics(
   );
 }
 
-function serializeActionForComparison(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(serializeActionForComparison).join(',')}]`;
-  }
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, nested]) => `${key}:${serializeActionForComparison(nested)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function actionsMatch(a?: EditAction, b?: EditAction): boolean {
-  if (!a || !b) return false;
-  return serializeActionForComparison(a) === serializeActionForComparison(b);
-}
-
 function getLiveMessageActionState(
   message: Pick<ChatMessageType, 'action' | 'actionStatus' | 'actionResult' | 'autoApplied'>,
   appliedActions: AppliedActionRecord[],
@@ -689,86 +688,18 @@ function getLiveMessageActionState(
   };
 }
 
-function assistantPromisesMoreSteps(message: string): boolean {
-  const normalized = message.trim().toLowerCase();
-  if (!normalized) return false;
-
-  return /\b(follow up|afterwards|after that|next[, ]|then[, ]|remaining steps|rest of)\b/.test(normalized)
-    || /\bfirst[, ]/.test(normalized)
-    || /\bi(?:'ll| will)\s+start with\b/.test(normalized)
-    || /\bi(?:'ll| will)\s+(?:handle|take care of)\s+(?:all|both|the rest)\b/.test(normalized)
-    || /\bonce\b[\s\S]{0,60}\b(?:applied|done|finished|committed)\b/.test(normalized)
-    || /\bafter\b[\s\S]{0,60}\b(?:applied|done|finished|committed)\b/.test(normalized);
-}
-
-function isApprovalContinuationMessage(message: string): boolean {
-  return message.trim().startsWith(APPROVAL_CONTINUATION_PREFIX);
-}
-
-function extractOriginalRequestFromApprovalContinuation(message: string): string | null {
-  const match = message.match(/ORIGINAL_REQUEST_START\s*([\s\S]*?)\s*ORIGINAL_REQUEST_END/i);
-  const originalRequest = match?.[1]?.trim();
-  return originalRequest || null;
-}
-
-function countApprovalContinuationMessages(messages: ChatMessageType[]): number {
-  return messages.filter((message) => (
-    message.role === 'user' && isApprovalContinuationMessage(message.content)
-  )).length;
-}
-
-function resolveOriginalRequestFromMessage(message: ChatMessageType | undefined): string | null {
-  if (!message || message.role !== 'user') return null;
-  const extracted = extractOriginalRequestFromApprovalContinuation(message.content);
-  if (extracted) return extracted;
-  const trimmed = message.content.trim();
-  return trimmed || null;
-}
-
-function buildApprovalContinuationMessage(params: {
-  originalRequest: string;
-  action: EditAction;
-  actionResult?: string | null;
-}): string {
-  return [
-    APPROVAL_CONTINUATION_PREFIX,
-    `Approved action: ${params.action.type}.`,
-    params.actionResult ? `Approved result: ${params.actionResult}` : null,
-    'Continue only with the remaining work from that original request, and do not repeat the approved edit unless it is still required after the timeline change.',
-    'ORIGINAL_REQUEST_START',
-    params.originalRequest,
-    'ORIGINAL_REQUEST_END',
-  ].filter(Boolean).join('\n');
-}
-
-function findAssistantMessageIndex(messages: ChatMessageType[], messageId: string): number {
-  return messages.findIndex((message) => message.id === messageId && message.role === 'assistant');
-}
-
-function findOriginalRequestForAssistantMessage(messages: ChatMessageType[], assistantMessageId: string): string | null {
-  const assistantIndex = findAssistantMessageIndex(messages, assistantMessageId);
-  if (assistantIndex === -1) return null;
-
-  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== 'user') continue;
-    const originalRequest = resolveOriginalRequestFromMessage(message);
-    if (originalRequest) return originalRequest;
-  }
-
-  return null;
-}
-
 function buildChatRequestHistory(
   messages: ChatMessageType[],
   appliedActions: AppliedActionRecord[],
   latestUserText?: string,
+  requestChainId?: string,
 ): ChatRequestMessage[] {
   const history: ChatRequestMessage[] = messages.map((message) => {
     const liveActionState = getLiveMessageActionState(message, appliedActions);
     return {
       role: message.role,
       content: message.content,
+      requestChainId: message.requestChainId,
       action: message.action ?? null,
       actionType: message.action?.type,
       actionMessage: liveActionState.actionMessage,
@@ -779,10 +710,43 @@ function buildChatRequestHistory(
   });
 
   if (latestUserText) {
-    history.push({ role: 'user', content: latestUserText });
+    history.push({ role: 'user', content: latestUserText, requestChainId });
   }
 
   return history;
+}
+
+function normalizeRequestObjective(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function isSilenceAndCaptionRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const wantsCaptions = /\b(caption|captions|subtitle|subtitles)\b/.test(normalized);
+  const wantsSilenceRemoval = /\b(remove|cut|trim|delete|auto[- ]?edit)\b[\w\s]{0,32}\b(silence|silent|dead air|pauses?)\b/.test(normalized)
+    || /\bremove silence\b/.test(normalized)
+    || /\bcut out silence\b/.test(normalized);
+  return wantsCaptions && wantsSilenceRemoval;
+}
+
+function buildContinuationPayload(
+  chainState: RequestChainState,
+  trigger: RequestChainContinuationPayload['trigger'],
+  explicitInstruction?: string | null,
+): string {
+  return buildRequestChainContinuationMessage({
+    requestChainId: chainState.requestChainId,
+    originalRequest: chainState.originalRequest,
+    remainingObjective: chainState.remainingObjective,
+    completedActions: chainState.completedActions.map((action) => ({
+      type: action.type,
+      signature: serializeActionForComparison(action),
+    })),
+    duplicateActionBlacklist: chainState.duplicateActionBlacklist,
+    transcript: chainState.transcript,
+    trigger,
+    explicitInstruction: normalizeRequestObjective(explicitInstruction),
+  });
 }
 
 function buildSilenceCandidatePayload(): SilenceCandidate[] {
@@ -983,7 +947,7 @@ function buildServerSourceAnalysisCards(params: {
   sources: Array<{ sourceId: string; fileName: string; status: string; duration: number }>;
   analysisBySourceId: SourceIndexAnalysisStateMap;
   actionLoadingKey: string | null;
-  onAction: (sourceId: string, action: 'pause' | 'resume') => void;
+  onAction: (sourceId: string, action: 'pause' | 'resume' | 'retry') => void;
 }): ServerSourceAnalysisCard[] {
   const shouldRenderTask = (task: SourceIndexTaskState) => (
     task.status === 'queued'
@@ -1010,7 +974,9 @@ function buildServerSourceAnalysisCards(params: {
     };
 
     const buildCard = (kind: 'audio' | 'visual', task: SourceIndexTaskState): ServerSourceAnalysisCard => {
-      const actionType = task.status === 'running' || task.status === 'queued'
+      const actionType = task.status === 'failed'
+        ? 'retry'
+        : task.status === 'running' || task.status === 'queued'
         ? 'pause'
         : task.status === 'paused'
           ? 'resume'
@@ -1025,7 +991,7 @@ function buildServerSourceAnalysisCards(params: {
         etaSeconds: task.status === 'running' ? task.etaSeconds ?? null : null,
         tone: getServerTaskStatusTone(task.status),
         action: actionType ? {
-          label: actionType === 'pause' ? 'Pause' : 'Resume',
+          label: actionType === 'pause' ? 'Pause' : actionType === 'resume' ? 'Resume' : 'Retry',
           onClick: () => params.onAction(source.sourceId, actionType),
           disabled: params.actionLoadingKey === actionKey,
         } : null,
@@ -1150,7 +1116,7 @@ function getClipPrimaryLabel(index: number): string {
 function getReviewItemCount(action?: EditAction | null): number {
   if (!action || action.type === 'none') return 0;
   if (action.type === 'delete_ranges') return action.ranges?.length ?? 0;
-  if (action.type === 'add_captions') return action.captions?.length ?? 0;
+  if (action.type === 'add_captions') return action.captions?.length ?? (action.transcriptRange ? 1 : 0);
   if (action.type === 'add_transition') return action.transitions?.length ?? 0;
   if (action.type === 'add_markers') return action.markers?.length ?? 0;
   if (action.type === 'add_text_overlay') return action.textOverlays?.length ?? 0;
@@ -1194,7 +1160,7 @@ function getReviewAnchorTime(snapshot: EditSnapshot, action: EditAction): number
   }
 
   if (action.type === 'add_captions') {
-    return action.captions?.[0]?.startTime ?? null;
+    return action.captions?.[0]?.startTime ?? action.transcriptRange?.startTime ?? null;
   }
 
   if (action.type === 'add_transition') {
@@ -1234,7 +1200,9 @@ function getReviewSeekTime(snapshot: EditSnapshot, action: EditAction): number |
 function getReviewApplyResult(action: EditAction, reviewCount: number): string {
   if (action.type === 'add_captions') {
     const count = action.captions?.length ?? 0;
-    return `Added ${count} caption${count === 1 ? '' : 's'}.`;
+    return count > 0
+      ? `Added ${count} caption${count === 1 ? '' : 's'}.`
+      : 'Added captions.';
   }
 
   if (action.type === 'add_transition') {
@@ -1263,10 +1231,6 @@ function formatChatTime(seconds: number): string {
   return Math.abs(seconds - Math.round(seconds)) < 0.001
     ? formatTime(seconds)
     : formatTimePrecise(seconds);
-}
-
-function looksLikeVisualSearchQuery(text: string): boolean {
-  return /\bframe|screen|overlay|visual|scene|show|appears?|look|image|logo|transition|cloud|clouds|black\b/i.test(text);
 }
 
 function upsertMarkersFromVisualSearch(
@@ -1370,11 +1334,17 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         summary: 'Defaults updated',
       };
     case 'add_captions':
+      {
+        const captionCount = action.captions?.length ?? (action.transcriptRange ? 1 : 0);
+        const summary = action.transcriptRange
+          ? `${formatChatTime(action.transcriptRange.startTime)} → ${formatChatTime(action.transcriptRange.endTime)}`
+          : 'Subtitle track';
       return {
-        label: `Add ${action.captions?.length ?? 0} caption${(action.captions?.length ?? 0) !== 1 ? 's' : ''}`,
+        label: `Add ${captionCount} caption${captionCount !== 1 ? 's' : ''}`,
         color: '#f59e0b',
-        summary: 'Subtitle track',
+        summary,
       };
+      }
     case 'reorder_clip':
       return {
         label: `Move clip ${(action.clipIndex ?? 0) + 1}`,
@@ -1553,6 +1523,15 @@ function ActionDetails({ action }: { action: EditAction }) {
   }
 
   if (action.type === 'add_captions') {
+    if (!action.captions?.length && action.transcriptRange) {
+      return (
+        <div style={{ padding: '6px 12px 8px' }}>
+          <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
+            Transcript-backed captions for {formatChatTime(action.transcriptRange.startTime)} to {formatChatTime(action.transcriptRange.endTime)}.
+          </span>
+        </div>
+      );
+    }
     return (
       <div style={{ padding: '6px 12px 8px', display: 'flex', flexDirection: 'column' }}>
         {(action.captions ?? []).map((c, i) => (
@@ -2115,7 +2094,10 @@ function AssistantMessage({
     const nextSnapshot = buildReviewPreviewSnapshot(reviewSessionForMessage);
     const sourceRanges = sourceRangesForAction(reviewSessionForMessage.baseSnapshot.clips, reviewedAction);
     commitPreviewSnapshot(nextSnapshot);
-    recordAppliedAction(reviewedAction, reviewedAction.message, { sourceRanges });
+    recordAppliedAction(reviewedAction, reviewedAction.message, {
+      sourceRanges,
+      requestChainId: msg.requestChainId,
+    });
     const result = getReviewApplyResult(reviewedAction, checkedReviewCount);
     updateMessage(msg.id, {
       actionStatus: 'completed',
@@ -2125,7 +2107,7 @@ function AssistantMessage({
     setActiveReviewFocusItemId(null);
     setReviewResult(result);
     void onActionResolved(msg.id, reviewedAction, result);
-  }, [checkedReviewCount, commitPreviewSnapshot, msg.id, onActionResolved, recordAppliedAction, reviewSessionForMessage, reviewedAction, setActiveReviewFocusItemId, setActiveReviewSession, updateMessage]);
+  }, [checkedReviewCount, commitPreviewSnapshot, msg.id, msg.requestChainId, onActionResolved, recordAppliedAction, reviewSessionForMessage, reviewedAction, setActiveReviewFocusItemId, setActiveReviewSession, updateMessage]);
 
   const handleTranscribe = useCallback(async () => {
     if (!action || action.type !== 'transcribe_request') return;
@@ -2179,6 +2161,7 @@ function AssistantMessage({
       addMessage({
         role: 'assistant',
         content: `Transcript ready for ${formatTime(seg.startTime)} to ${formatTime(seg.endTime)}. Continuing with your request.`,
+        requestChainId: msg.requestChainId,
       });
       setTranscriptionDone(true);
       updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'Transcript ready ✓' });
@@ -2188,16 +2171,16 @@ function AssistantMessage({
     } finally {
       setIsTranscribing(false);
     }
-  }, [action, addMessage, availableSourcesById, clips, existingSourceTranscriptCaptions, msg.id, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage]);
+  }, [action, addMessage, availableSourcesById, clips, existingSourceTranscriptCaptions, msg.id, msg.requestChainId, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage]);
 
   const handleApplySettings = useCallback(() => {
     if (!action || action.type !== 'update_ai_settings') return;
     applyStoredAction(action);
-    recordAppliedAction(action, action.message);
+    recordAppliedAction(action, action.message, { requestChainId: msg.requestChainId });
     updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
     setReviewResult('AI settings updated.');
     void onActionResolved(msg.id, action, 'AI settings updated.');
-  }, [action, applyStoredAction, msg.id, onActionResolved, recordAppliedAction, updateMessage]);
+  }, [action, applyStoredAction, msg.id, msg.requestChainId, onActionResolved, recordAppliedAction, updateMessage]);
 
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%', marginBottom: 10 }}>
@@ -2861,6 +2844,7 @@ export default function ChatSidebar() {
   const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
   const syncingTaggedMarkersRef = useRef(false);
   const previousTaggedMarkerIdsRef = useRef<string[]>([]);
+  const requestChainStateRef = useRef<Record<string, RequestChainState>>({});
 
   const messages = useEditorStore(s => s.messages);
   const isChatLoading = useEditorStore(s => s.isChatLoading);
@@ -2879,6 +2863,7 @@ export default function ChatSidebar() {
   const clearTaggedClips = useEditorStore(s => s.clearTaggedClips);
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
+  const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);
   const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
   const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
   const [analysisActionKey, setAnalysisActionKey] = useState<string | null>(null);
@@ -2925,6 +2910,10 @@ export default function ChatSidebar() {
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
   const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+  const initialIndexingReady = useMemo(
+    () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId),
+    [sourceIndexAnalysisBySourceId, sources],
+  );
   const overviewReadySourceIds = useMemo(() => new Set(
     (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
   ), [sourceOverviewFrames]);
@@ -2937,6 +2926,7 @@ export default function ChatSidebar() {
   useEffect(() => {
     setFrameAnalysisError(null);
     setAnalysisActionKey(null);
+    requestChainStateRef.current = {};
   }, [currentProjectId]);
 
   const applyServerSourceIndexPayload = useCallback((payload: {
@@ -2973,7 +2963,7 @@ export default function ChatSidebar() {
     });
   }, [hydrateSourceIndex, updateSource]);
 
-  const handleServerAnalysisAction = useCallback(async (sourceId: string, action: 'pause' | 'resume') => {
+  const handleServerAnalysisAction = useCallback(async (sourceId: string, action: 'pause' | 'resume' | 'retry') => {
     if (!currentProjectId) return;
     const actionKey = `${sourceId}:${action}`;
     setAnalysisActionKey(actionKey);
@@ -3108,7 +3098,7 @@ export default function ChatSidebar() {
 
   // Source overview indexing runs only when a source is missing canonical frame data.
   useEffect(() => {
-    if (useServerSourceIndex) return;
+    if (!initialIndexingReady || useServerSourceIndex) return;
     if (availableSources.length === 0) return;
     if (document.hidden || playbackActive || missingOverviewSources.length === 0) return;
     void (async () => {
@@ -3119,9 +3109,12 @@ export default function ChatSidebar() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [availableSources.length, missingOverviewSources, playbackActive, useServerSourceIndex]);
+  }, [availableSources.length, initialIndexingReady, missingOverviewSources, playbackActive, useServerSourceIndex]);
 
   const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
+    if (!initialIndexingReady) {
+      return useEditorStore.getState().analysisOverviewFrames ?? [];
+    }
     if (!force && extractionPromiseRef.current) return extractionPromiseRef.current;
     const promise = (async () => {
     const state = useEditorStore.getState();
@@ -3224,7 +3217,7 @@ export default function ChatSidebar() {
         extractionPromiseRef.current = null;
       }
     }
-  }, [availableSources, setSourceOverviewFrames]);
+  }, [availableSources, initialIndexingReady, setSourceOverviewFrames]);
 
   const extractDenseFramesForRange = useCallback(async (
     frameRequest: { startTime: number; endTime: number; count?: number },
@@ -3521,10 +3514,41 @@ export default function ChatSidebar() {
     return freshState.backgroundTranscript;
   }, []);
 
+  const updateRequestChainState = useCallback((
+    requestChainId: string,
+    updater: (current: RequestChainState) => RequestChainState,
+  ) => {
+    const current = requestChainStateRef.current[requestChainId];
+    if (!current) return null;
+    const next = updater(current);
+    requestChainStateRef.current[requestChainId] = next;
+    return next;
+  }, []);
+
+  const recordCompletedChainAction = useCallback((requestChainId: string | undefined, action: EditAction) => {
+    if (!requestChainId || action.type === 'none') return null;
+    return updateRequestChainState(requestChainId, (current) => ({
+      ...current,
+      completedActions: [...current.completedActions, action],
+      duplicateRerunCount: 0,
+      remainingObjective: current.remainingObjective,
+      duplicateActionBlacklist: isSilenceAndCaptionRequest(current.originalRequest)
+        && (action.type === 'delete_range' || action.type === 'delete_ranges')
+        ? ['delete_range', 'delete_ranges']
+        : current.duplicateActionBlacklist,
+      transcript: {
+        ...current.transcript,
+        missing: !current.transcript.canonicalAvailable && !current.transcript.requestedDuringChain,
+      },
+    }));
+  }, [updateRequestChainState]);
+
   const runSingleTurn = useCallback(async (
     history: ChatRequestMessage[],
     ctrl: AbortController,
+    requestChainId?: string,
   ) => {
+    if (!initialIndexingReady) return;
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
     const baseFrames = useServerSourceIndex
       ? (useEditorStore.getState().analysisOverviewFrames ?? [])
@@ -3534,13 +3558,20 @@ export default function ChatSidebar() {
     let producedVisibleResponse = false;
 
     for (let round = 0; round < 3; round++) {
+      if (!initialIndexingReady) break;
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
+      const chainState = requestChainId ? requestChainStateRef.current[requestChainId] ?? null : null;
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
       const packedFrames = packFramesForChat(currentFrames, availableSources);
       const frameCoverage = summarizeFrameCoverage(currentFrames);
+      const transcriptAvailability = chainState?.transcript ?? {
+        canonicalAvailable: Boolean((freshState.sourceTranscriptCaptions ?? []).length),
+        requestedDuringChain: false,
+        missing: !(freshState.sourceTranscriptCaptions && freshState.sourceTranscriptCaptions.length > 0),
+      };
 
       const { message = '', action, visualSearch } = await postChatRequest({
         messages: nextHistory,
@@ -3587,6 +3618,7 @@ export default function ChatSidebar() {
           })),
           textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
+          transcriptAvailability,
           silenceCandidates,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
@@ -3596,7 +3628,9 @@ export default function ChatSidebar() {
       }, ctrl);
 
       if (action?.type === 'request_frames' && action.frameRequest && round < 2) {
+        if (!initialIndexingReady) break;
         setLoadingStatus('Dense local refinement…');
+        setLoadingPhaseId('continuing_remaining_step');
         const denseFrames = await extractDenseFramesForRange(action.frameRequest);
         currentFrames = [...baseFrames, ...denseFrames];
         nextHistory = [
@@ -3604,6 +3638,7 @@ export default function ChatSidebar() {
           {
             role: 'assistant',
             content: action.message,
+            requestChainId,
             action,
             actionType: action.type,
             actionMessage: action.message,
@@ -3613,6 +3648,7 @@ export default function ChatSidebar() {
           {
             role: 'user',
             content: `[${denseFrames.length} dense frames extracted from ${formatTime(action.frameRequest.startTime)} to ${formatTime(action.frameRequest.endTime)}, now answer with these frames.]`,
+            requestChainId,
           },
         ];
         continue;
@@ -3624,6 +3660,37 @@ export default function ChatSidebar() {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
+      const duplicateAction = Boolean(
+        requestChainId
+        && action
+        && action.type !== 'none'
+        && chainState?.completedActions.some((completedAction) => actionsMatch(completedAction, action)),
+      );
+      const blacklistedAction = Boolean(
+        requestChainId
+        && action
+        && action.type !== 'none'
+        && chainState?.duplicateActionBlacklist.includes(action.type),
+      );
+      if ((duplicateAction || blacklistedAction) && requestChainId && chainState && chainState.duplicateRerunCount < 1) {
+        const rerunState = updateRequestChainState(requestChainId, (current) => ({
+          ...current,
+          duplicateRerunCount: current.duplicateRerunCount + 1,
+        }));
+        if (rerunState) {
+          nextHistory = buildChatRequestHistory(
+            useEditorStore.getState().messages,
+            useEditorStore.getState().appliedActions,
+            buildContinuationPayload(
+              rerunState,
+              'duplicate_action_retry',
+              'Step already complete; continue remaining work only.',
+            ),
+            requestChainId,
+          );
+          continue;
+        }
+      }
 
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
@@ -3637,14 +3704,28 @@ export default function ChatSidebar() {
 
       if (markerAction && action && !markerActionPreviouslyApplied) {
         applyStoredAction(action);
-        recordAppliedAction(action, action.message);
+        recordAppliedAction(action, action.message, { requestChainId });
+        recordCompletedChainAction(requestChainId, action);
         const markerSeekTime = getMarkerActionSeekTime(action, freshState.markers);
         if (markerSeekTime !== null) requestSeek(markerSeekTime);
+      }
+
+      if (requestChainId && action?.type === 'transcribe_request') {
+        updateRequestChainState(requestChainId, (current) => ({
+          ...current,
+          remainingObjective: current.remainingObjective ?? current.originalRequest,
+          transcript: {
+            ...current.transcript,
+            requestedDuringChain: true,
+            missing: true,
+          },
+        }));
       }
 
       addMessage({
         role: 'assistant',
         content: assistantMessage,
+        requestChainId,
         action: action ?? undefined,
         visualSearch: visualSearch ?? undefined,
         autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
@@ -3663,13 +3744,28 @@ export default function ChatSidebar() {
       addMessage({
         role: 'assistant',
         content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
+        requestChainId,
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, recordAppliedAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedClips, taggedMarkers, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedClips, taggedMarkers, updateRequestChainState, useServerSourceIndex]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
-    if (!text || isChatLoading || reviewLocked) return;
+    if (!text || isChatLoading || reviewLocked || !initialIndexingReady) return;
+    const requestChainId = crypto.randomUUID();
+    requestChainStateRef.current[requestChainId] = {
+      requestChainId,
+      originalRequest: text,
+      remainingObjective: null,
+      completedActions: [],
+      duplicateActionBlacklist: [],
+      transcript: {
+        canonicalAvailable: Boolean((useEditorStore.getState().sourceTranscriptCaptions ?? []).length),
+        requestedDuringChain: false,
+        missing: !(useEditorStore.getState().sourceTranscriptCaptions?.length),
+      },
+      duplicateRerunCount: 0,
+    };
 
     setInput('');
     previousTaggedMarkerIdsRef.current = [];
@@ -3678,40 +3774,57 @@ export default function ChatSidebar() {
     setActiveMarkerMention(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
-    addMessage({ role: 'user', content: text });
+    addMessage({ role: 'user', content: text, requestChainId });
     setIsChatLoading(true);
     setLoadingStatus('');
+    setLoadingPhaseId(null);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     stopRequestedRef.current = false;
 
     try {
-      const history = buildChatRequestHistory(messages, useEditorStore.getState().appliedActions, text);
-      await runSingleTurn(history, ctrl);
+      const history = buildChatRequestHistory(messages, useEditorStore.getState().appliedActions, text, requestChainId);
+      await runSingleTurn(history, ctrl, requestChainId);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
-        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
+        addMessage({
+          role: 'assistant',
+          content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}`,
+          requestChainId,
+        });
       }
     } finally {
       setIsChatLoading(false);
       setLoadingStatus('');
+      setLoadingPhaseId(null);
     }
-  }, [addMessage, clearTaggedClips, clearTaggedMarkers, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, clearTaggedClips, clearTaggedMarkers, initialIndexingReady, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
+    if (!initialIndexingReady) return;
     const storeState = useEditorStore.getState();
     if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
     const currentMessages = useEditorStore.getState().messages;
-    const assistantIndex = currentMessages.findIndex(m => m.id === messageId);
-    if (assistantIndex === -1) return;
-
-    const triggeringUser = [...currentMessages.slice(0, assistantIndex)].reverse().find(m => m.role === 'user');
-    if (!triggeringUser) return;
-    const originalRequest = resolveOriginalRequestFromMessage(triggeringUser);
-    if (!originalRequest) return;
+    const assistantMessage = currentMessages.find((message) => message.id === messageId && message.role === 'assistant');
+    const requestChainId = assistantMessage?.requestChainId;
+    if (!requestChainId) return;
+    const chainState = requestChainStateRef.current[requestChainId];
+    if (!chainState || chainState.transcript.canonicalAvailable || !chainState.transcript.requestedDuringChain || !chainState.remainingObjective) {
+      return;
+    }
+    const nextChainState = updateRequestChainState(requestChainId, (current) => ({
+      ...current,
+      transcript: {
+        ...current.transcript,
+        missing: false,
+      },
+      duplicateRerunCount: 0,
+    }));
+    if (!nextChainState) return;
 
     setIsChatLoading(true);
     setLoadingStatus('Continuing with transcript…');
+    setLoadingPhaseId('continuing_remaining_step');
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     stopRequestedRef.current = false;
@@ -3720,9 +3833,10 @@ export default function ChatSidebar() {
       const history = buildChatRequestHistory(
         currentMessages,
         useEditorStore.getState().appliedActions,
-        `Continue my previous request now that the requested transcript is available. Original request: "${originalRequest}". Do not ask to transcribe the same section again.`,
+        buildContinuationPayload(nextChainState, 'transcript_ready'),
+        requestChainId,
       );
-      await runSingleTurn(history, ctrl);
+      await runSingleTurn(history, ctrl, requestChainId);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
         addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
@@ -3730,45 +3844,57 @@ export default function ChatSidebar() {
     } finally {
       setIsChatLoading(false);
       setLoadingStatus('');
+      setLoadingPhaseId(null);
     }
-  }, [addMessage, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, initialIndexingReady, runSingleTurn, setIsChatLoading, updateRequestChainState]);
 
   const handleActionResolved = useCallback(async (
     messageId: string,
     action: EditAction,
-    actionResult?: string | null,
   ) => {
-    if (action.type === 'transcribe_request') return;
+    if (action.type === 'transcribe_request' || !initialIndexingReady) return;
 
     const currentMessages = useEditorStore.getState().messages;
-    if (countApprovalContinuationMessages(currentMessages) >= MAX_AUTO_APPROVAL_CONTINUATIONS) return;
-
-    const assistantIndex = findAssistantMessageIndex(currentMessages, messageId);
-    if (assistantIndex === -1) return;
-
-    const assistantMessage = currentMessages[assistantIndex];
-    if (!assistantPromisesMoreSteps(assistantMessage.content)) return;
-
-    const originalRequest = findOriginalRequestForAssistantMessage(currentMessages, messageId);
-    if (!originalRequest) return;
+    const assistantMessage = currentMessages.find((message) => message.id === messageId && message.role === 'assistant');
+    const requestChainId = assistantMessage?.requestChainId;
+    if (!requestChainId) return;
+    let nextChainState = recordCompletedChainAction(requestChainId, action);
+    if (!nextChainState) return;
+    nextChainState = updateRequestChainState(requestChainId, (current) => ({
+      ...current,
+      remainingObjective: isSilenceAndCaptionRequest(current.originalRequest)
+        && (action.type === 'delete_range' || action.type === 'delete_ranges')
+        ? 'Add captions on the current timeline.'
+        : null,
+      duplicateActionBlacklist: isSilenceAndCaptionRequest(current.originalRequest)
+        && (action.type === 'delete_range' || action.type === 'delete_ranges')
+        ? ['delete_range', 'delete_ranges']
+        : current.duplicateActionBlacklist,
+    })) ?? nextChainState;
+    if (!nextChainState.remainingObjective) return;
 
     const storeState = useEditorStore.getState();
     if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
 
     setIsChatLoading(true);
     setLoadingStatus('Continuing with remaining steps…');
+    setLoadingPhaseId(
+      nextChainState.remainingObjective?.toLowerCase().includes('caption')
+        ? 'generating_captions'
+        : 'continuing_remaining_step',
+    );
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     stopRequestedRef.current = false;
 
     try {
-      const continuationMessage = buildApprovalContinuationMessage({
-        originalRequest,
-        action,
-        actionResult,
-      });
-      const history = buildChatRequestHistory(currentMessages, useEditorStore.getState().appliedActions, continuationMessage);
-      await runSingleTurn(history, ctrl);
+      const history = buildChatRequestHistory(
+        currentMessages,
+        useEditorStore.getState().appliedActions,
+        buildContinuationPayload(nextChainState, 'action_resolved', 'Continue only with the remaining work.'),
+        requestChainId,
+      );
+      await runSingleTurn(history, ctrl, requestChainId);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
         addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
@@ -3776,8 +3902,9 @@ export default function ChatSidebar() {
     } finally {
       setIsChatLoading(false);
       setLoadingStatus('');
+      setLoadingPhaseId(null);
     }
-  }, [addMessage, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, initialIndexingReady, recordCompletedChainAction, runSingleTurn, setIsChatLoading, updateRequestChainState]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
@@ -3797,10 +3924,12 @@ export default function ChatSidebar() {
     }
     setIsChatLoading(false);
     setLoadingStatus('');
+    setLoadingPhaseId(null);
   }, [setIsChatLoading]);
 
   const handleClearChat = useCallback(() => {
     if (isChatLoading || reviewLocked || messages.length === 0) return;
+    requestChainStateRef.current = {};
     clearChatHistory();
     setInput('');
     setActiveMarkerMention(null);
@@ -3820,9 +3949,6 @@ export default function ChatSidebar() {
     ? frameAnalysisError !== null || frameAnalysisReady || coarseFramesAvailable
     : frameAnalysisError !== null || frameAnalysisReady;
   const transcriptFailed = transcriptStatus === 'error';
-  const agentContextReady = usingServerSourceIndex
-    ? true
-    : framesReady && (transcriptStatus === 'done' || transcriptFailed);
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const estimatedTranscriptRemainingEta =
     transcriptProgress && transcriptProgress.total > 0 && transcriptStartedAtRef.current !== null
@@ -3839,19 +3965,14 @@ export default function ChatSidebar() {
   const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
     ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`
     : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
-      ? `${sourceIndexAnalysis.error} The assistant will keep working with any transcript and representative frames that already finished.`
-    : null;
-  const pendingVisualQuery = looksLikeVisualSearchQuery(input.trim()) && usingServerSourceIndex;
-  const canSendDespiteIndexing = pendingVisualQuery;
+      ? `${sourceIndexAnalysis.error} Retry the failed source analysis to finish initial indexing.`
+      : null;
   const isAnalyzingSampledFrames = hasVideoSource
     && (transcriptStatus === 'done' || transcriptFailed)
     && analysisOverviewFrames !== null
     && frameAnalysisError === null
     && !frameDescriptionsReady;
-  const mediaPreparationBlockingSend = !usingServerSourceIndex && hasVideoSource
-    && !agentContextReady
-    && !canSendDespiteIndexing
-    && !isAnalyzingSampledFrames;
+  const mediaPreparationBlockingSend = hasVideoSource && !initialIndexingReady;
   const secondaryIndexingProgress: IndexingProgress | null = (!usingServerSourceIndex && transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
     ? frameIndexingProgress
     : null;
@@ -3919,6 +4040,7 @@ export default function ChatSidebar() {
   const composerInputDisabled = isChatLoading || reviewLocked;
   const composerMuted = composerInputDisabled || mediaPreparationBlockingSend;
   const canSubmitMessage = input.trim().length > 0 && !composerInputDisabled && !mediaPreparationBlockingSend;
+  const activeLoadingPhaseId = loadingPhaseId ?? (mediaPreparationBlockingSend ? 'initial_indexing_required' : null);
 
   const resizeComposer = useCallback(() => {
     const ta = textareaRef.current;
@@ -4029,7 +4151,7 @@ export default function ChatSidebar() {
       display: 'flex', flexDirection: 'column',
       height: '100%',
       background: 'var(--bg-panel)',
-    }}>
+    }} data-loading-phase={activeLoadingPhaseId ?? undefined}>
       {/* Header */}
       <div style={{
         minHeight: 52,

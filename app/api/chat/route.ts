@@ -9,6 +9,11 @@ import {
   VisualSearchSession,
 } from '@/lib/types';
 import { formatTimePrecise } from '@/lib/timelineUtils';
+import {
+  getRequestChainEffectiveObjective,
+  parseRequestChainContinuationMessage,
+  RequestChainContinuationPayload,
+} from '@/lib/requestChain';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import {
   buildUntrustedDataBlock,
@@ -86,9 +91,12 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ### 6. Add Captions (add_captions)
 - Add timed captions/subtitles to a specific section or across the whole timeline
 - captions: array of caption entries with startTime, endTime, and text
+- transcriptRange: use this instead of a huge captions array when the transcript is already available for a longer section
+- captionStyle: use "rolling_word" for transcript-backed rolling captions, otherwise "static"
 - Use when user says: "add captions", "caption this from 0:30 to 1:00", "add subtitles to the full video", etc.
 - IMPORTANT: if the needed spoken words are not already available in the transcript context, use transcribe_request first for the exact requested range, then follow up with add_captions once the transcript is ready.
 - IMPORTANT: when the transcript is available, build caption entries only for the requested time range. Do not caption outside the user's requested section unless they asked for the whole video.
+- IMPORTANT: for full-video or long transcript-backed captions, prefer transcriptRange plus captionStyle:"rolling_word" instead of emitting a very large explicit captions array.
 
 ### 7. Transcribe Audio (transcribe_request)
 - Request real audio transcription for a region of the video using Whisper
@@ -216,6 +224,7 @@ No action:
 - Resolve short follow-ups like "do it", "place a marker", "cut it", "caption that", "move it earlier", or "remove it" against the active conversation task and the latest assistant evidence window provided in context before asking for clarification.
 - If a previous assistant reply already identified a likely moment or time window and the user asks you to tag, mark, cut, caption, or otherwise act on that same moment, emit the concrete action directly instead of restating the evidence.
 - Prefer reasoning from the structured conversation state in context over keyword matching. Use earlier user goals, the latest unresolved proposal, markers, and the latest assistant evidence together to infer intent.
+- If context includes a structured request-chain continuation block, treat that as the highest-priority instruction for what remains to do next. Continue only the remaining objective, respect the completed-action list and duplicate blacklist, and do not repeat already completed steps.
 - If the latest user message contains a clear edit request, always attempt it — use the transcript and frame summaries to gather evidence. Never ask the user to clarify when you can investigate yourself.
 - When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
@@ -612,34 +621,24 @@ function isSyntheticContinuationUserMessage(message: string): boolean {
   const normalized = message.trim();
   if (!normalized) return false;
   return /^\[\d+\s+dense frames extracted from .*now answer with these frames\.\]$/i.test(normalized)
-    || /^continue my previous request now that the requested transcript is available\./i.test(normalized)
-    || /^continue with the remaining steps from my earlier request now that the approved edit was applied\./i.test(normalized);
+    || Boolean(parseRequestChainContinuationMessage(normalized));
 }
 
-function extractOriginalRequestFromContinuation(message: string): string | null {
-  const approvalContinuationMatch = message.match(/ORIGINAL_REQUEST_START\s*([\s\S]*?)\s*ORIGINAL_REQUEST_END/i);
-  if (approvalContinuationMatch?.[1]) {
-    return approvalContinuationMatch[1].trim();
-  }
-
-  const transcriptContinuationMatch = message.match(/original request:\s*"([\s\S]+?)"\.?\s*do not ask to transcribe/i);
-  if (transcriptContinuationMatch?.[1]) {
-    return transcriptContinuationMatch[1].trim();
-  }
-  return null;
-}
-
-function findEffectiveLatestUserMessage(messages: ChatTurn[]): string {
+function findEffectiveLatestUserMessage(
+  messages: ChatTurn[],
+  continuation: RequestChainContinuationPayload | null,
+): string {
   const latestUserIndex = [...messages].map((message) => message.role).lastIndexOf('user');
   if (latestUserIndex === -1) return '';
+
+  if (continuation) {
+    return getRequestChainEffectiveObjective(continuation);
+  }
 
   const latestUserMessage = messages[latestUserIndex]?.content?.trim() ?? '';
   if (!isSyntheticContinuationUserMessage(latestUserMessage)) {
     return latestUserMessage;
   }
-
-  const parsedOriginalRequest = extractOriginalRequestFromContinuation(latestUserMessage);
-  if (parsedOriginalRequest) return parsedOriginalRequest;
 
   for (let index = latestUserIndex - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -837,6 +836,36 @@ function summarizeConversationTaskState(taskState: ConversationTaskState): strin
     );
   }
 
+  return lines;
+}
+
+function formatRequestChainContinuationContext(
+  continuation: RequestChainContinuationPayload | null,
+): string[] {
+  if (!continuation) return [];
+
+  const lines = [
+    `Structured continuation for request chain ${continuation.requestChainId}: continue only the unfinished objective from "${sanitizeInlineUntrustedText(continuation.originalRequest, 220)}".`,
+  ];
+  if (continuation.remainingObjective) {
+    lines.push(`Remaining objective: "${sanitizeInlineUntrustedText(continuation.remainingObjective, 220)}".`);
+  }
+  if (continuation.completedActions.length > 0) {
+    lines.push(
+      `Completed actions in this chain: ${continuation.completedActions.map((action) => action.type).join(' | ')}.`,
+    );
+  }
+  if (continuation.duplicateActionBlacklist.length > 0) {
+    lines.push(
+      `Do not repeat these action types unless explicitly required by the latest continuation payload: ${continuation.duplicateActionBlacklist.join(' | ')}.`,
+    );
+  }
+  lines.push(
+    `Transcript availability for this chain: canonical=${continuation.transcript.canonicalAvailable ? 'yes' : 'no'}, requested_during_chain=${continuation.transcript.requestedDuringChain ? 'yes' : 'no'}, missing=${continuation.transcript.missing ? 'yes' : 'no'}.`,
+  );
+  if (continuation.explicitInstruction) {
+    lines.push(`Continuation instruction: ${sanitizeInlineUntrustedText(continuation.explicitInstruction, 220)}`);
+  }
   return lines;
 }
 
@@ -1247,7 +1276,9 @@ export async function POST(req: NextRequest) {
 
     const normalizedMessages = normalizeChatTurns(messages);
     const richMessages = normalizeRichChatTurns(messages);
-    const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages);
+    const latestUserMessage = [...normalizedMessages].reverse().find((message) => message.role === 'user')?.content ?? '';
+    const continuation = parseRequestChainContinuationMessage(latestUserMessage);
+    const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages, continuation);
     const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
     const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
@@ -1336,6 +1367,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     if (taskState) {
       contextLines.push(...summarizeConversationTaskState(taskState));
     }
+    contextLines.push(...formatRequestChainContinuationContext(continuation));
 
     contextLines.push(...formatPendingActionContext(latestPendingAssistantAction));
     contextLines.push(
@@ -1498,6 +1530,12 @@ Honor these defaults unless the user explicitly asks for something different in 
           );
         }
       }
+    }
+    if (context?.transcriptAvailability && typeof context.transcriptAvailability === 'object') {
+      const availability = context.transcriptAvailability as Record<string, unknown>;
+      contextLines.push(
+        `\nTranscript readiness: canonical=${availability.canonicalAvailable === true ? 'yes' : 'no'}, requested_during_chain=${availability.requestedDuringChain === true ? 'yes' : 'no'}, missing=${availability.missing === true ? 'yes' : 'no'}.`
+      );
     }
     contextLines.push(
       `\nCurrent AI defaults:\n` +

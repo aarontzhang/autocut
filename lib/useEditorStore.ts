@@ -224,17 +224,41 @@ function normalizeLoadedClip(
 function normalizeCaptionEntry(
   entry: Partial<CaptionEntry>,
   validSourceIds: Set<string>,
-  fallbackSourceId: string,
 ): CaptionEntry | null {
   if (!Number.isFinite(entry.startTime) || !Number.isFinite(entry.endTime) || typeof entry.text !== 'string') {
     return null;
   }
+  const normalizedSourceId = normalizeSourceId(entry.sourceId);
+  const words = Array.isArray(entry.words)
+    ? entry.words.flatMap((word) => {
+        if (
+          !word
+          || typeof word !== 'object'
+          || !Number.isFinite(word.startTime)
+          || !Number.isFinite(word.endTime)
+          || typeof word.text !== 'string'
+        ) {
+          return [];
+        }
+        return [{
+          startTime: word.startTime,
+          endTime: word.endTime,
+          text: word.text,
+        }];
+      })
+    : undefined;
   return {
     id: typeof entry.id === 'string' ? entry.id : undefined,
-    sourceId: getKnownSourceId(entry.sourceId, validSourceIds, fallbackSourceId),
+    sourceId: normalizedSourceId && validSourceIds.has(normalizedSourceId)
+      ? normalizedSourceId
+      : undefined,
     startTime: entry.startTime!,
     endTime: entry.endTime!,
     text: entry.text!,
+    words,
+    renderStyle: entry.renderStyle === 'rolling_word' || entry.renderStyle === 'static'
+      ? entry.renderStyle
+      : undefined,
   };
 }
 
@@ -791,7 +815,10 @@ interface EditorState {
   recordAppliedAction: (
     action: EditAction,
     summary: string,
-    metadata?: { sourceRanges?: AppliedActionRecord['sourceRanges'] },
+    metadata?: {
+      sourceRanges?: AppliedActionRecord['sourceRanges'];
+      requestChainId?: string;
+    },
   ) => void;
   setFFmpegJob: (job: FFmpegJob) => void;
   setVideoCloud: (file: File, blobUrl: string, storagePath: string, projectId: string) => void;
@@ -1493,6 +1520,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   applyAction: (action) => {
     if (action.type === 'none') return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const sourceTranscriptCaptions = get().sourceTranscriptCaptions;
     if (action.type === 'update_ai_settings') {
       set((state) => {
         const aiSettings = mergeAISettings(state.aiSettings, action.settings);
@@ -1511,7 +1539,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       return;
     }
-    const next = applyActionToSnapshot(snap, action);
+    const next = applyActionToSnapshot(snap, action, { sourceTranscriptCaptions });
     if (next === snap) return;
     set((state) => ({
       ...next,
@@ -1658,7 +1686,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   recordAppliedAction: (action, summary, metadata) => set((state) => ({
     appliedActions: [
       ...state.appliedActions.slice(-24),
-      { id: uuidv4(), timestamp: Date.now(), action, summary, sourceRanges: metadata?.sourceRanges },
+      {
+        id: uuidv4(),
+        timestamp: Date.now(),
+        requestChainId: metadata?.requestChainId,
+        action,
+        summary,
+        sourceRanges: metadata?.sourceRanges,
+      },
     ],
   })),
 
@@ -1781,7 +1816,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ?.map((entry) => normalizeCaptionEntry(
         entry as Partial<CaptionEntry>,
         validSourceIds,
-        fallbackSourceId,
       ))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
 
@@ -1855,13 +1889,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...primaryMirror,
       }),
       clips: hydratedClips,
-      captions: (editState.captions as CaptionEntry[] | undefined) ?? [],
+      captions: ((editState.captions as Partial<CaptionEntry>[] | undefined) ?? [])
+        .map((entry) => normalizeCaptionEntry(entry, validSourceIds))
+        .filter((entry): entry is CaptionEntry => !!entry),
       transitions: normalizedTransitions,
       markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
       textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
-      messages: (editState.messages as ChatMessage[] | undefined) ?? [],
+      messages: ((editState.messages as ChatMessage[] | undefined) ?? []).map((message) => ({
+        ...message,
+        requestChainId: typeof message.requestChainId === 'string' ? message.requestChainId : undefined,
+      })),
       appliedActions: ((editState.appliedActions as AppliedActionRecord[] | undefined) ?? []).map((entry) => ({
         ...entry,
+        requestChainId: typeof entry.requestChainId === 'string' ? entry.requestChainId : undefined,
         sourceRanges: entry.sourceRanges?.map((range) => ({
           ...range,
           sourceId: normalizeSourceId(range.sourceId) ?? MAIN_SOURCE_ID,
@@ -2114,9 +2154,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setBackgroundTranscript: (text, status, rawCaptions, errorMessage, options) => set((state) => {
     const validSourceIds = new Set(state.sources.map((source) => source.id));
-    const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
     const normalizedCaptions = rawCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds))
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
     const shouldMarkTranscriptFresh = options?.markFresh ?? (normalizedCaptions !== undefined);
     const nextSourceTranscriptCaptions = normalizedCaptions !== undefined
@@ -2184,7 +2223,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running'
       || audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
     const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, fallbackSourceId))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
     const normalizedIncomingOverviewFrames = payload.sourceOverviewFrames
       ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))

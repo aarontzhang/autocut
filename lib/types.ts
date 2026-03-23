@@ -1,3 +1,11 @@
+export type CaptionRenderStyle = 'rolling_word' | 'static';
+
+export interface CaptionWordTiming {
+  startTime: number;
+  endTime: number;
+  text: string;
+}
+
 export interface VideoClip {
   id: string;
   sourceId: string;
@@ -29,6 +37,8 @@ export interface CaptionEntry {
   startTime: number;
   endTime: number;
   text: string;
+  words?: CaptionWordTiming[];
+  renderStyle?: CaptionRenderStyle;
 }
 
 export interface SourceRangeRef {
@@ -119,6 +129,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  requestChainId?: string;
   action?: EditAction;
   visualSearch?: VisualSearchSession | null;
   autoApplied?: boolean;
@@ -129,6 +140,7 @@ export interface ChatMessage {
 export interface AppliedActionRecord {
   id: string;
   timestamp: number;
+  requestChainId?: string;
   action: EditAction;
   summary: string;
   sourceRanges?: SourceRangeRef[];
@@ -390,6 +402,8 @@ export interface EditAction {
   filter?: ColorFilter;
   // captions / transcription
   captions?: CaptionEntry[];
+  transcriptRange?: { startTime: number; endTime: number };
+  captionStyle?: CaptionRenderStyle;
   segments?: Array<{ startTime: number; endTime: number; reason?: string }>;
   // request_frames
   frameRequest?: { startTime: number; endTime: number; count?: number };

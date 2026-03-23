@@ -680,7 +680,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   const body = await request.json().catch(() => ({}));
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : '';
-  const action = body.action === 'pause' || body.action === 'resume' ? body.action : null;
+  const action = body.action === 'pause' || body.action === 'resume' || body.action === 'retry'
+    ? body.action
+    : null;
 
   if (!sourceId || !action) {
     return NextResponse.json({ error: 'Invalid source-index action' }, { status: 400 });
@@ -708,18 +710,44 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ error: 'Analysis job not found' }, { status: 404 });
     }
 
-    if (action === 'pause') {
+  if (action === 'pause') {
       const patch = job.status === 'queued'
         ? { status: 'paused', pause_requested: false, locked_at: null, locked_by: null }
         : { pause_requested: true };
       const { error } = await supabase.from('analysis_jobs').update(patch).eq('id', job.id);
       if (error) throw error;
-    } else {
+    } else if (action === 'resume') {
       const patch = job.status === 'paused'
         ? { status: 'queued', pause_requested: false, locked_at: null, locked_by: null, error: null }
         : { pause_requested: false };
       const { error } = await supabase.from('analysis_jobs').update(patch).eq('id', job.id);
       if (error) throw error;
+    } else {
+      if (job.status !== 'failed') {
+        return NextResponse.json({ error: 'Retry is only available for failed initial indexing.' }, { status: 409 });
+      }
+      const { error } = await supabase
+        .from('analysis_jobs')
+        .update({
+          status: 'queued',
+          pause_requested: false,
+          locked_at: null,
+          locked_by: null,
+          error: null,
+          progress: {
+            stage: 'queued',
+            completed: 0,
+            total: 1,
+            label: 'Queued',
+            etaSeconds: null,
+          },
+        })
+        .eq('id', job.id);
+      if (error) throw error;
+      await supabase
+        .from('media_assets')
+        .update({ status: 'indexing' })
+        .eq('id', asset.id);
     }
 
     const payload = await buildSourceIndexResponse(id, user.id);

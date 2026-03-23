@@ -17,6 +17,7 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
+import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -113,8 +114,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
+  const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
+  const initialIndexingReady = getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId);
 
   const refreshSourceIndex = useCallback(async (targetProjectId: string) => {
     const sourceIndexRes = await fetch(`/api/projects/${targetProjectId}/source-index`, { cache: 'no-store' });
@@ -254,7 +257,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const shouldUseServerIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
     const sourcesToTranscribe = availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
     if (
-      shouldUseServerIndex
+      !initialIndexingReady
+      || shouldUseServerIndex
       || sourcesToTranscribe.length === 0
       || transcriptStatus === 'loading'
       || transcriptStatus === 'error'
@@ -308,7 +312,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, currentProjectId, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, currentProjectId, initialIndexingReady, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;

@@ -6,7 +6,7 @@ import {
   buildRenderTimeline,
   findRenderEntriesAtTime,
 } from '@/lib/playbackEngine';
-import { buildCaptionCues, getCaptionCueDisplay } from '@/lib/timelineUtils';
+import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
 import type { RenderTimelineEntry, ResolvedTransitionBoundary, VideoClip } from '@/lib/types';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 
@@ -200,9 +200,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const totalTimelineDuration = renderTimeline.length > 0
     ? renderTimeline[renderTimeline.length - 1].timelineEnd
     : videoDuration;
-  const captionCues = useMemo(
-    () => buildCaptionCues(clips, manualCaptions, transitions),
-    [clips, manualCaptions, transitions],
+  const captionWindows = useMemo(
+    () => buildCaptionRenderWindows(manualCaptions),
+    [manualCaptions],
   );
 
   const currentTransition = useMemo(() => {
@@ -222,13 +222,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     [currentTime, currentTransition],
   );
 
-  const activeCaptionCue = captionCues.find((cue) => currentTime >= cue.startTime && currentTime < cue.endTime) ?? null;
-  const activeCaption = useMemo(() => {
-    if (activeCaptionCue) {
-      return getCaptionCueDisplay(activeCaptionCue, currentTime);
-    }
-    return null;
-  }, [activeCaptionCue, currentTime]);
+  const activeCaption = useMemo(
+    () => captionWindows.find((window) => currentTime >= window.startTime && currentTime < window.endTime) ?? null,
+    [captionWindows, currentTime],
+  );
   const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
   const videoDisplaySize = useMemo(
     () => fitVideoFrame(containerSize, videoDimensions),

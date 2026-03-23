@@ -124,6 +124,9 @@ function sanitizeCaption(caption: unknown, videoDuration: number) {
     startTime: range.start,
     endTime: range.end,
     text,
+    renderStyle: candidate.renderStyle === 'rolling_word' || candidate.renderStyle === 'static'
+      ? candidate.renderStyle as 'rolling_word' | 'static'
+      : undefined,
   };
 }
 
@@ -393,15 +396,32 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
   }
 
   if (type === 'add_captions') {
-    if (!Array.isArray(action.captions)) return null;
-    const captions = action.captions
-      .slice(0, MAX_CAPTIONS_PER_ACTION)
-      .flatMap((caption) => {
-        const safeCaption = sanitizeCaption(caption, safeDuration);
-        return safeCaption ? [safeCaption] : [];
-      });
-    if (captions.length === 0) return null;
-    return { ...base, type, captions };
+    const captions = Array.isArray(action.captions)
+      ? action.captions
+          .slice(0, MAX_CAPTIONS_PER_ACTION)
+          .flatMap((caption) => {
+            const safeCaption = sanitizeCaption(caption, safeDuration);
+            return safeCaption ? [safeCaption] : [];
+          })
+      : [];
+    const transcriptRange = action.transcriptRange && typeof action.transcriptRange === 'object'
+      ? sanitizeRange(
+          (action.transcriptRange as { startTime?: unknown }).startTime,
+          (action.transcriptRange as { endTime?: unknown }).endTime,
+          safeDuration,
+        )
+      : null;
+    const captionStyle = action.captionStyle === 'rolling_word' || action.captionStyle === 'static'
+      ? action.captionStyle
+      : undefined;
+    if (captions.length === 0 && !transcriptRange) return null;
+    return {
+      ...base,
+      type,
+      ...(captions.length > 0 ? { captions } : {}),
+      ...(transcriptRange ? { transcriptRange: { startTime: transcriptRange.start, endTime: transcriptRange.end } } : {}),
+      ...(captionStyle ? { captionStyle } : {}),
+    };
   }
 
   if (type === 'transcribe_request') {

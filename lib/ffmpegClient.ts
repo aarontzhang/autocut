@@ -2,9 +2,9 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
-import { buildCaptionCues, getCaptionCueDisplay, invertSegments } from './timelineUtils';
+import { buildCaptionRenderWindows, invertSegments } from './timelineUtils';
 import { normalizeTransitionEntries } from './playbackEngine';
-import { CaptionCue, CaptionEntry, TransitionEntry, VideoClip } from './types';
+import { CaptionEntry, TransitionEntry, VideoClip } from './types';
 import { MAIN_SOURCE_ID } from './sourceUtils';
 
 let ffmpegInstance: FFmpeg | null = null;
@@ -374,28 +374,19 @@ type ExportCaptionWindow = {
   lines: string[];
 };
 
-function buildAutoCaptionWindows(cues: CaptionCue[]): ExportCaptionWindow[] {
-  return cues.flatMap((cue) => cue.words.flatMap((word, index) => {
-    const nextWord = cue.words[index + 1];
-    const startTime = index === 0 ? cue.startTime : word.startTime;
-    const endTime = nextWord ? nextWord.startTime : cue.endTime;
-    if (endTime <= startTime + 1e-3) return [];
-    const display = getCaptionCueDisplay(cue, Math.min(endTime - 0.01, word.startTime + 0.01));
-    return [{
-      startTime,
-      endTime,
-      lines: display.lines,
-    }];
-  }));
-}
-
 function buildExportCaptionWindows(params: {
   clips: VideoClip[];
   transitions: TransitionEntry[];
   captions: CaptionEntry[];
 }): ExportCaptionWindow[] {
-  const captionCues = buildCaptionCues(params.clips, params.captions, params.transitions);
-  return buildAutoCaptionWindows(captionCues)
+  void params.clips;
+  void params.transitions;
+  return buildCaptionRenderWindows(params.captions)
+    .map((window) => ({
+      startTime: window.startTime,
+      endTime: window.endTime,
+      lines: window.lines,
+    }))
     .filter((window) => window.endTime > window.startTime && window.lines.length > 0)
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
 }

@@ -318,6 +318,18 @@ export function sourceRangesForAction(
     ));
   }
 
+  if (action.type === 'add_captions' && action.transcriptRange) {
+    return getSourceSegmentsForTimelineRange(
+      clips,
+      action.transcriptRange.startTime,
+      action.transcriptRange.endTime,
+    ).map((segment) => ({
+      sourceId: segment.sourceId,
+      sourceStart: segment.sourceStart,
+      sourceEnd: segment.sourceStart + segment.sourceDuration,
+    }));
+  }
+
   return [];
 }
 
@@ -397,7 +409,7 @@ function trimCaptionWordsToWindow(
   return visibleWords;
 }
 
-function projectCaptionWordsToTimeline(
+export function projectCaptionWordsToTimeline(
   clips: VideoClip[],
   rawCaptions: CaptionEntry[],
   transitions: TransitionEntry[] = [],
@@ -424,6 +436,162 @@ function projectCaptionWordsToTimeline(
     .flat()
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
     .filter((entry): entry is CaptionCueWord => !!entry && !!entry.text);
+}
+
+export type CaptionRenderWindow = {
+  id: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+  lines: string[];
+};
+
+function buildStaticCaptionLines(
+  text: string,
+  maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
+  maxLines = DEFAULT_CAPTION_MAX_LINES,
+): string[] {
+  const normalized = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (normalized.length === 0) return [];
+  if (normalized.length > 1) return normalized.slice(-maxLines);
+  return buildBalancedCaptionLines(
+    normalized[0]
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((word, index) => ({ text: word, startTime: index, endTime: index + 1 })),
+    maxCharsPerLine,
+  ).slice(-maxLines);
+}
+
+function buildRollingCaptionLines(
+  words: CaptionCueWord[],
+  maxCharsPerLine = DEFAULT_MAX_CAPTION_CHARS_PER_LINE,
+  maxLines = DEFAULT_CAPTION_MAX_LINES,
+): string[] {
+  const lines: string[] = [];
+
+  for (const word of words) {
+    const text = word.text.trim();
+    if (!text) continue;
+    const lastLine = lines[lines.length - 1];
+    if (!lastLine) {
+      lines.push(text);
+    } else if (`${lastLine} ${text}`.length <= maxCharsPerLine) {
+      lines[lines.length - 1] = `${lastLine} ${text}`;
+    } else {
+      lines.push(text);
+    }
+
+    while (lines.length > maxLines) {
+      lines.shift();
+    }
+  }
+
+  return lines;
+}
+
+export function buildCaptionEntriesFromWords(
+  words: CaptionCueWord[],
+  options?: {
+    pauseBreakSeconds?: number;
+  },
+): CaptionEntry[] {
+  const pauseBreakSeconds = options?.pauseBreakSeconds ?? DEFAULT_CAPTION_PAUSE_BREAK_SECONDS;
+  const sortedWords = [...words]
+    .map((word) => ({ ...word, text: word.text.trim() }))
+    .filter((word) => word.text && word.endTime > word.startTime)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+  if (sortedWords.length === 0) return [];
+
+  const entries: CaptionEntry[] = [];
+  let activeWords: CaptionCueWord[] = [];
+
+  const flushActiveWords = () => {
+    if (activeWords.length === 0) return;
+    entries.push({
+      startTime: activeWords[0].startTime,
+      endTime: activeWords[activeWords.length - 1].endTime,
+      text: activeWords.map((word) => word.text).join(' '),
+      words: activeWords.map((word) => ({ ...word })),
+      renderStyle: 'rolling_word',
+    });
+    activeWords = [];
+  };
+
+  for (const word of sortedWords) {
+    const pauseSinceLast = activeWords.length > 0
+      ? word.startTime - activeWords[activeWords.length - 1].endTime
+      : 0;
+    const candidateWords = [...activeWords, word];
+    const candidateDuration = candidateWords[candidateWords.length - 1].endTime - candidateWords[0].startTime;
+    const shouldFlush = activeWords.length > 0 && (
+      pauseSinceLast > pauseBreakSeconds
+      || candidateWords.length > 22
+      || candidateDuration > 6.2
+      || (
+        CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
+        && pauseSinceLast > 0.12
+        && activeWords.length >= 3
+      )
+    );
+
+    if (shouldFlush) {
+      flushActiveWords();
+    }
+
+    activeWords.push(word);
+  }
+
+  flushActiveWords();
+  return entries;
+}
+
+export function buildCaptionRenderWindows(
+  rawCaptions: CaptionEntry[],
+  options?: {
+    maxCharsPerLine?: number;
+    maxLines?: number;
+  },
+): CaptionRenderWindow[] {
+  const maxCharsPerLine = options?.maxCharsPerLine ?? DEFAULT_MAX_CAPTION_CHARS_PER_LINE;
+  const maxLines = options?.maxLines ?? DEFAULT_CAPTION_MAX_LINES;
+
+  return [...rawCaptions]
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
+    .flatMap((caption, captionIndex) => {
+      const renderStyle = caption.renderStyle ?? 'static';
+      const cueId = caption.id ?? `caption_${captionIndex}_${Math.round(caption.startTime * 1000)}`;
+      if (renderStyle === 'rolling_word' && Array.isArray(caption.words) && caption.words.length > 0) {
+        const words = caption.words
+          .map((word) => ({ ...word, text: word.text.trim() }))
+          .filter((word): word is CaptionCueWord => Boolean(word.text) && word.endTime > word.startTime)
+          .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+        return words.flatMap((word, wordIndex) => {
+          const lines = buildRollingCaptionLines(words.slice(0, wordIndex + 1), maxCharsPerLine, maxLines);
+          if (lines.length === 0 || word.endTime <= word.startTime) return [];
+          return [{
+            id: `${cueId}:word:${wordIndex}`,
+            startTime: word.startTime,
+            endTime: word.endTime,
+            text: lines.join('\n'),
+            lines,
+          }];
+        });
+      }
+
+      const lines = buildStaticCaptionLines(caption.text, maxCharsPerLine, maxLines);
+      if (lines.length === 0 || caption.endTime <= caption.startTime) return [];
+      return [{
+        id: cueId,
+        startTime: caption.startTime,
+        endTime: caption.endTime,
+        text: lines.join('\n'),
+        lines,
+      }];
+    });
 }
 
 export function buildCaptionCues(

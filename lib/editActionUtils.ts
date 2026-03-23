@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
+import { buildCaptionEntriesFromWords, projectCaptionWordsToTimeline } from './timelineUtils';
 import type {
   AppliedActionRecord,
   CaptionEntry,
@@ -87,6 +88,136 @@ function mergeDeleteRanges(ranges: Array<{ start: number; end: number }>) {
     }
   }
   return merged;
+}
+
+function withCaptionStyle(caption: CaptionEntry, action: EditAction): CaptionEntry {
+  return {
+    ...caption,
+    renderStyle: caption.renderStyle ?? action.captionStyle ?? (caption.words?.length ? 'rolling_word' : 'static'),
+  };
+}
+
+function buildResolvedCaptionAction(
+  snapshot: EditSnapshot,
+  action: EditAction,
+  sourceTranscriptCaptions?: CaptionEntry[] | null,
+): EditAction {
+  if (action.type !== 'add_captions') return action;
+
+  if (Array.isArray(action.captions) && action.captions.length > 0) {
+    return {
+      ...action,
+      captions: action.captions.map((caption) => withCaptionStyle(caption, action)),
+    };
+  }
+
+  if (!action.transcriptRange || !sourceTranscriptCaptions || sourceTranscriptCaptions.length === 0) {
+    return action;
+  }
+
+  const remappedWords = projectCaptionWordsToTimeline(
+    snapshot.clips,
+    sourceTranscriptCaptions,
+    snapshot.transitions,
+  ).filter((word) => (
+    word.endTime > action.transcriptRange!.startTime
+    && word.startTime < action.transcriptRange!.endTime
+  ));
+
+  if (remappedWords.length === 0) {
+    return action;
+  }
+
+  return {
+    ...action,
+    captions: buildCaptionEntriesFromWords(remappedWords).map((caption) => withCaptionStyle(caption, action)),
+  };
+}
+
+function remapWordAfterDelete(
+  word: NonNullable<CaptionEntry['words']>[number],
+  startTime: number,
+  endTime: number,
+) {
+  if (word.endTime <= startTime) return { ...word };
+
+  const delta = endTime - startTime;
+  if (word.startTime >= endTime) {
+    return {
+      ...word,
+      startTime: word.startTime - delta,
+      endTime: word.endTime - delta,
+    };
+  }
+
+  const nextStart = word.startTime < startTime ? word.startTime : null;
+  const nextEnd = word.endTime > endTime
+    ? word.endTime - delta
+    : word.endTime <= startTime
+      ? word.endTime
+      : null;
+  if (nextStart === null || nextEnd === null || nextEnd <= nextStart) {
+    return null;
+  }
+
+  return {
+    ...word,
+    startTime: nextStart,
+    endTime: nextEnd,
+  };
+}
+
+function remapCaptionAfterDelete(
+  caption: CaptionEntry,
+  startTime: number,
+  endTime: number,
+): CaptionEntry | null {
+  if (caption.words && caption.words.length > 0) {
+    const nextWords = caption.words
+      .map((word) => remapWordAfterDelete(word, startTime, endTime))
+      .filter((word): word is NonNullable<CaptionEntry['words']>[number] => !!word);
+    if (nextWords.length === 0) return null;
+    return {
+      ...caption,
+      startTime: nextWords[0].startTime,
+      endTime: nextWords[nextWords.length - 1].endTime,
+      text: nextWords.map((word) => word.text).join(' '),
+      words: nextWords,
+    };
+  }
+
+  if (caption.endTime <= startTime) return caption;
+
+  const delta = endTime - startTime;
+  if (caption.startTime >= endTime) {
+    return {
+      ...caption,
+      startTime: caption.startTime - delta,
+      endTime: caption.endTime - delta,
+    };
+  }
+
+  const nextStart = caption.startTime < startTime ? caption.startTime : startTime;
+  const nextEnd = caption.endTime > endTime
+    ? caption.endTime - delta
+    : Math.min(caption.endTime, startTime);
+  if (nextEnd <= nextStart) return null;
+
+  return {
+    ...caption,
+    startTime: nextStart,
+    endTime: nextEnd,
+  };
+}
+
+function remapCaptionsAfterDelete(
+  captions: CaptionEntry[],
+  startTime: number,
+  endTime: number,
+): CaptionEntry[] {
+  return captions
+    .map((caption) => remapCaptionAfterDelete(caption, startTime, endTime))
+    .filter((caption): caption is CaptionEntry => !!caption);
 }
 
 export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
@@ -197,48 +328,59 @@ function withTimelineChanges(snapshot: EditSnapshot, patch: Partial<EditSnapshot
   });
 }
 
-export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction): EditSnapshot {
+export function applyActionToSnapshot(
+  snapshot: EditSnapshot,
+  action: EditAction,
+  options?: {
+    sourceTranscriptCaptions?: CaptionEntry[] | null;
+  },
+): EditSnapshot {
+  const resolvedAction = buildResolvedCaptionAction(snapshot, action, options?.sourceTranscriptCaptions);
   if (
-    action.type === 'none' ||
-    action.type === 'transcribe_request' ||
-    action.type === 'request_frames' ||
-    action.type === 'update_ai_settings'
+    resolvedAction.type === 'none' ||
+    resolvedAction.type === 'transcribe_request' ||
+    resolvedAction.type === 'request_frames' ||
+    resolvedAction.type === 'update_ai_settings'
   ) return snapshot;
 
-  if (action.type === 'split_clip') {
-    if (action.splitTime === undefined) return snapshot;
-    const clips = splitClipsAtTime(snapshot.clips, action.splitTime);
+  if (resolvedAction.type === 'split_clip') {
+    if (resolvedAction.splitTime === undefined) return snapshot;
+    const clips = splitClipsAtTime(snapshot.clips, resolvedAction.splitTime);
     return clips === snapshot.clips ? snapshot : withTimelineChanges(snapshot, { clips });
   }
 
-  if (action.type === 'delete_range') {
-    if (action.deleteStartTime === undefined || action.deleteEndTime === undefined) return snapshot;
+  if (resolvedAction.type === 'delete_range') {
+    if (resolvedAction.deleteStartTime === undefined || resolvedAction.deleteEndTime === undefined) return snapshot;
     return withTimelineChanges(snapshot, {
-      clips: deleteRangeFromClips(snapshot.clips, action.deleteStartTime, action.deleteEndTime),
+      clips: deleteRangeFromClips(snapshot.clips, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
+      captions: remapCaptionsAfterDelete(snapshot.captions, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
     });
   }
 
-  if (action.type === 'delete_ranges') {
-    const ranges = mergeDeleteRanges(action.ranges ?? []).sort((a, b) => b.start - a.start);
+  if (resolvedAction.type === 'delete_ranges') {
+    const ranges = mergeDeleteRanges(resolvedAction.ranges ?? []).sort((a, b) => b.start - a.start);
     const clips = ranges.reduce((acc, range) => {
       if (range.end <= range.start) return acc;
       return deleteRangeFromClips(acc, range.start, range.end);
     }, snapshot.clips);
-    return withTimelineChanges(snapshot, { clips });
+    const captions = ranges.reduce((acc, range) => (
+      range.end <= range.start ? acc : remapCaptionsAfterDelete(acc, range.start, range.end)
+    ), snapshot.captions);
+    return withTimelineChanges(snapshot, { clips, captions });
   }
 
-  if (action.type === 'reorder_clip') {
-    const clipIndex = action.clipIndex ?? 0;
+  if (resolvedAction.type === 'reorder_clip') {
+    const clipIndex = resolvedAction.clipIndex ?? 0;
     const clip = snapshot.clips[clipIndex];
-    if (!clip || action.newIndex === undefined) return snapshot;
+    if (!clip || resolvedAction.newIndex === undefined) return snapshot;
     const remaining = snapshot.clips.filter(item => item.id !== clip.id);
-    const targetIndex = Math.max(0, Math.min(action.newIndex, remaining.length));
+    const targetIndex = Math.max(0, Math.min(resolvedAction.newIndex, remaining.length));
     const clips = [...remaining.slice(0, targetIndex), clip, ...remaining.slice(targetIndex)];
     return withTimelineChanges(snapshot, { clips });
   }
 
-  if (action.type === 'delete_clip') {
-    const clipIndex = action.clipIndex ?? 0;
+  if (resolvedAction.type === 'delete_clip') {
+    const clipIndex = resolvedAction.clipIndex ?? 0;
     const clip = snapshot.clips[clipIndex];
     if (!clip) return snapshot;
     return withTimelineChanges(snapshot, {
@@ -246,48 +388,49 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     });
   }
 
-  if (action.type === 'set_clip_speed') {
-    const clip = snapshot.clips[action.clipIndex ?? 0];
-    if (!clip || action.speed === undefined) return snapshot;
+  if (resolvedAction.type === 'set_clip_speed') {
+    const clip = snapshot.clips[resolvedAction.clipIndex ?? 0];
+    if (!clip || resolvedAction.speed === undefined) return snapshot;
     return withTimelineChanges(snapshot, {
-      clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, speed: action.speed ?? item.speed } : item),
+      clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, speed: resolvedAction.speed ?? item.speed } : item),
     });
   }
 
-  if (action.type === 'set_clip_volume') {
-    const clip = snapshot.clips[action.clipIndex ?? 0];
-    if (!clip || action.volume === undefined) return snapshot;
+  if (resolvedAction.type === 'set_clip_volume') {
+    const clip = snapshot.clips[resolvedAction.clipIndex ?? 0];
+    if (!clip || resolvedAction.volume === undefined) return snapshot;
     return {
       ...snapshot,
       clips: snapshot.clips.map(item => item.id === clip.id ? {
         ...item,
-        volume: action.volume ?? item.volume,
-        ...(action.fadeIn !== undefined ? { fadeIn: action.fadeIn } : {}),
-        ...(action.fadeOut !== undefined ? { fadeOut: action.fadeOut } : {}),
+        volume: resolvedAction.volume ?? item.volume,
+        ...(resolvedAction.fadeIn !== undefined ? { fadeIn: resolvedAction.fadeIn } : {}),
+        ...(resolvedAction.fadeOut !== undefined ? { fadeOut: resolvedAction.fadeOut } : {}),
       } : item),
     };
   }
 
-  if (action.type === 'set_clip_filter') {
-    const clip = snapshot.clips[action.clipIndex ?? 0];
+  if (resolvedAction.type === 'set_clip_filter') {
+    const clip = snapshot.clips[resolvedAction.clipIndex ?? 0];
     if (!clip) return snapshot;
     return {
       ...snapshot,
-      clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, filter: action.filter ?? null } : item),
+      clips: snapshot.clips.map(item => item.id === clip.id ? { ...item, filter: resolvedAction.filter ?? null } : item),
     };
   }
 
-  if (action.type === 'add_captions') {
+  if (resolvedAction.type === 'add_captions') {
+    if (!resolvedAction.captions?.length) return snapshot;
     return {
       ...snapshot,
-      captions: [...snapshot.captions, ...(action.captions ?? []).map(caption => ({ ...caption, id: uuidv4() }))],
+      captions: [...snapshot.captions, ...(resolvedAction.captions ?? []).map(caption => ({ ...caption, id: uuidv4() }))],
     };
   }
 
-  if (action.type === 'add_transition') {
+  if (resolvedAction.type === 'add_transition') {
     const transitions = normalizeTransitionEntries(
       snapshot.clips,
-      [...snapshot.transitions, ...(action.transitions ?? []).map((transition) => ({ ...transition, id: uuidv4() }))],
+      [...snapshot.transitions, ...(resolvedAction.transitions ?? []).map((transition) => ({ ...transition, id: uuidv4() }))],
     );
     return {
       ...snapshot,
@@ -295,8 +438,8 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     };
   }
 
-  if (action.type === 'add_marker') {
-    const marker = action.marker;
+  if (resolvedAction.type === 'add_marker') {
+    const marker = resolvedAction.marker;
     if (marker?.timelineTime === undefined) return snapshot;
     const nextNumber = snapshot.markers.length === 0
       ? 1
@@ -321,8 +464,8 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     };
   }
 
-  if (action.type === 'add_markers') {
-    const markers = (action.markers ?? []).filter((marker) => marker.timelineTime !== undefined);
+  if (resolvedAction.type === 'add_markers') {
+    const markers = (resolvedAction.markers ?? []).filter((marker) => marker.timelineTime !== undefined);
     if (markers.length === 0) return snapshot;
     let nextNumber = snapshot.markers.length === 0
       ? 1
@@ -347,41 +490,41 @@ export function applyActionToSnapshot(snapshot: EditSnapshot, action: EditAction
     };
   }
 
-  if (action.type === 'update_marker') {
-    if (!action.markerId) return snapshot;
+  if (resolvedAction.type === 'update_marker') {
+    if (!resolvedAction.markerId) return snapshot;
     return {
       ...snapshot,
       markers: snapshot.markers.map((marker) => (
-        marker.id === action.markerId
+        marker.id === resolvedAction.markerId
           ? {
               ...marker,
-              ...action.marker,
-              timelineTime: action.marker?.timelineTime ?? marker.timelineTime,
-              number: action.marker?.number ?? marker.number,
+              ...resolvedAction.marker,
+              timelineTime: resolvedAction.marker?.timelineTime ?? marker.timelineTime,
+              number: resolvedAction.marker?.number ?? marker.number,
             }
           : marker
       )),
     };
   }
 
-  if (action.type === 'remove_marker') {
-    if (!action.markerId) return snapshot;
+  if (resolvedAction.type === 'remove_marker') {
+    if (!resolvedAction.markerId) return snapshot;
     return {
       ...snapshot,
-      markers: snapshot.markers.filter((marker) => marker.id !== action.markerId),
+      markers: snapshot.markers.filter((marker) => marker.id !== resolvedAction.markerId),
     };
   }
 
-  if (action.type === 'add_text_overlay') {
+  if (resolvedAction.type === 'add_text_overlay') {
     return {
       ...snapshot,
-      textOverlays: [...snapshot.textOverlays, ...(action.textOverlays ?? []).map(overlay => ({ ...overlay, id: uuidv4() }))],
+      textOverlays: [...snapshot.textOverlays, ...(resolvedAction.textOverlays ?? []).map(overlay => ({ ...overlay, id: uuidv4() }))],
     };
   }
 
-  if (action.type === 'replace_text_overlay') {
-    const replacement = action.textOverlays?.[0];
-    const overlayIndex = action.overlayIndex ?? 0;
+  if (resolvedAction.type === 'replace_text_overlay') {
+    const replacement = resolvedAction.textOverlays?.[0];
+    const overlayIndex = resolvedAction.overlayIndex ?? 0;
     if (!replacement || overlayIndex >= snapshot.textOverlays.length) return snapshot;
     const textOverlays = [...snapshot.textOverlays];
     textOverlays[overlayIndex] = { ...replacement, id: uuidv4() };
@@ -404,11 +547,14 @@ export function expandActionForReview(action: EditAction): EditAction[] {
   }
 
   if (action.type === 'add_captions') {
-    return (action.captions ?? []).map(caption => ({
-      type: 'add_captions' as const,
-      captions: [caption],
-      message: action.message,
-    }));
+    if (action.captions?.length) {
+      return action.captions.map(caption => ({
+        type: 'add_captions' as const,
+        captions: [caption],
+        message: action.message,
+      }));
+    }
+    return [action];
   }
 
   if (action.type === 'add_transition') {
@@ -441,7 +587,9 @@ export function expandActionForReview(action: EditAction): EditAction[] {
 function getReviewItemAnchorTime(action: EditAction): number | null {
   if (action.type === 'split_clip') return action.splitTime ?? null;
   if (action.type === 'delete_range') return action.deleteStartTime ?? null;
-  if (action.type === 'add_captions') return action.captions?.[0]?.startTime ?? null;
+  if (action.type === 'add_captions') {
+    return action.captions?.[0]?.startTime ?? action.transcriptRange?.startTime ?? null;
+  }
   if (action.type === 'add_transition') return action.transitions?.[0]?.atTime ?? null;
   if (action.type === 'add_marker') return action.marker?.timelineTime ?? null;
   if (action.type === 'add_text_overlay') return action.textOverlays?.[0]?.startTime ?? null;
@@ -462,14 +610,14 @@ function getReviewItemDescriptor(itemId: string, action: EditAction): ReviewOver
 
   if (action.type === 'add_captions') {
     const caption = action.captions?.[0];
-    if (!caption) return null;
+    if (!caption && !action.transcriptRange) return null;
     return {
       id: `${itemId}:caption`,
       itemId,
       kind: 'caption',
-      startTime: caption.startTime,
-      endTime: caption.endTime,
-      label: caption.text,
+      startTime: caption?.startTime ?? action.transcriptRange?.startTime,
+      endTime: caption?.endTime ?? action.transcriptRange?.endTime,
+      label: caption?.text ?? action.message,
     };
   }
 
@@ -526,7 +674,11 @@ function getReviewItemLabel(action: EditAction, index: number): { label: string;
     const caption = action.captions?.[0];
     return {
       label: `Caption ${index + 1}`,
-      summary: caption ? caption.text : 'Caption preview',
+      summary: caption
+        ? caption.text
+        : action.transcriptRange
+          ? `${action.transcriptRange.startTime.toFixed(3)}s - ${action.transcriptRange.endTime.toFixed(3)}s`
+          : 'Caption preview',
     };
   }
 
@@ -643,7 +795,10 @@ export function collapseReviewItemsToAction(group: EditReviewGroup): EditAction 
 
   if (originalAction.type === 'add_captions') {
     const captions = checkedItems.flatMap((item) => item.action.captions ?? []);
-    return captions.length > 0 ? { type: 'add_captions', captions, message } : null;
+    if (captions.length > 0) {
+      return { type: 'add_captions', captions, message };
+    }
+    return checkedItems.length > 0 ? originalAction : null;
   }
 
   if (originalAction.type === 'add_transition') {
