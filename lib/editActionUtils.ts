@@ -752,12 +752,14 @@ export function getCheckedReviewItems(group: EditReviewGroup): EditReviewItem[] 
 }
 
 export function buildReviewPreviewSnapshot(group: EditReviewGroup): EditSnapshot {
-  return getCheckedReviewItems(group).reduce(
-    (snapshot, item) => applyActionToSnapshot(snapshot, item.action, {
-      sourceTranscriptCaptions: group.sourceTranscriptCaptions,
-    }),
-    group.baseSnapshot,
-  );
+  const collapsedAction = collapseReviewItemsToAction(group);
+  if (!collapsedAction) return group.baseSnapshot;
+
+  // Review items are defined against the base snapshot. Applying the collapsed
+  // action once keeps batched delete ranges aligned with those original times.
+  return applyActionToSnapshot(group.baseSnapshot, collapsedAction, {
+    sourceTranscriptCaptions: group.sourceTranscriptCaptions,
+  });
 }
 
 export function buildReviewGroupWithUpdatedItems(
