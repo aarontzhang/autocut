@@ -17,7 +17,7 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -262,9 +262,13 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         videoDuration,
       },
     }).filter((entry) => entry.source && entry.duration > 0);
-    // Once the media belongs to a persisted project, let the canonical server
-    // indexing worker own transcription instead of starting a local duplicate.
-    const shouldUseServerIndex = Boolean(currentProjectId);
+    const shouldUseServerIndex = Boolean(
+      currentProjectId
+      && sources.some((source) => (
+        isServerBackedSource(source)
+        || Boolean(sourceIndexAnalysisBySourceId[source.id])
+      )),
+    );
     const sourcesToTranscribe = availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
     if (
       !initialIndexingReady
@@ -322,7 +326,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, currentProjectId, initialIndexingReady, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, currentProjectId, initialIndexingReady, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;

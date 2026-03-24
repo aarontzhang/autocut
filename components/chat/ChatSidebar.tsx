@@ -30,7 +30,7 @@ import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
 import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes, getAdaptiveCoarseFrameBudget } from '@/lib/indexer/representativeFrames';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
 import { FRAME_DESCRIPTION_BATCH_SIZE, getFrameDescriptionParallelRequestLimit } from '@/lib/frameDescriptionConfig';
 import {
   actionsMatch,
@@ -945,10 +945,7 @@ function buildServerAnalysisStatusCards(params: {
 
   const trackedSources = params.sources.filter((source) => (
     Boolean(
-      source.storagePath
-      || source.assetId
-      || source.status === 'pending'
-      || source.status === 'indexing'
+      isServerBackedSource(source)
       || params.analysisBySourceId[source.sourceId]
     )
   ));
@@ -2875,9 +2872,13 @@ export default function ChatSidebar() {
       },
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
-  // Project-backed media should wait for the canonical server index instead of
-  // starting a separate client-side coarse-analysis pass during upload.
-  const useServerSourceIndex = Boolean(currentProjectId);
+  const useServerSourceIndex = Boolean(
+    currentProjectId
+    && sources.some((source) => (
+      isServerBackedSource(source)
+      || Boolean(sourceIndexAnalysisBySourceId[source.id])
+    )),
+  );
   const initialIndexingReady = useMemo(
     () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId),
     [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sources],

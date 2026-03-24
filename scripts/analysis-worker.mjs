@@ -51,6 +51,7 @@ const TRANSCRIPT_OVERLAP_SECONDS = 0.75;
 const FRAME_BATCH_SIZE = 8;
 const DEFAULT_LONG_INTERVAL_SECONDS = 5;
 const DEFAULT_MAX_COARSE_FRAMES = 720;
+const STALE_RUNNING_JOB_MS = normalizeInteger(process.env.ANALYSIS_JOB_STALE_MS, 10 * 60_000, 60_000, 24 * 60 * 60_000);
 
 function normalizeInteger(value, fallback, min, max) {
   const parsed = Number(value);
@@ -60,6 +61,21 @@ function normalizeInteger(value, fallback, min, max) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseTimestampMs(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isRunningJobStale(job) {
+  const heartbeatMs = Math.max(
+    parseTimestampMs(job?.updated_at) ?? 0,
+    parseTimestampMs(job?.locked_at) ?? 0,
+  );
+  if (heartbeatMs <= 0) return false;
+  return Date.now() - heartbeatMs >= STALE_RUNNING_JOB_MS;
 }
 
 function getRetryAfterDelayMs(error, attempt) {
@@ -407,6 +423,29 @@ async function updateJob(jobId, patch) {
   if (error) throw error;
 }
 
+async function markRunningJobStale(job) {
+  const message = `Recovered stale analysis lock held by ${job.locked_by || 'unknown worker'}.`;
+  const { error } = await supabase
+    .from('analysis_jobs')
+    .update({
+      status: 'failed',
+      error: message,
+      pause_requested: false,
+      locked_at: null,
+      locked_by: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', job.id)
+    .eq('status', 'running');
+  if (error) throw error;
+
+  if (job.asset_id) {
+    await setAssetStatus(job.asset_id, { status: 'indexing' });
+  }
+
+  console.warn(`[analysis-worker] marked stale running job ${job.id} as failed`);
+}
+
 async function updateProgress(jobId, stage, completed, total, label, options = {}) {
   const etaSeconds = options.etaSeconds ?? estimateStageEta(
     jobId,
@@ -471,7 +510,7 @@ async function claimNextJob(lockerId) {
     if (job.asset_id) {
       const { data: activeSibling, error: activeSiblingError } = await supabase
         .from('analysis_jobs')
-        .select('id')
+        .select('id, asset_id, locked_at, locked_by, updated_at')
         .eq('asset_id', job.asset_id)
         .eq('job_type', 'index_asset')
         .eq('status', 'running')
@@ -479,7 +518,12 @@ async function claimNextJob(lockerId) {
         .limit(1)
         .maybeSingle();
       if (activeSiblingError) throw activeSiblingError;
-      if (activeSibling) continue;
+      if (activeSibling) {
+        if (!isRunningJobStale(activeSibling)) {
+          continue;
+        }
+        await markRunningJobStale(activeSibling);
+      }
     }
 
     const { data: claimed, error: claimError } = await supabase
