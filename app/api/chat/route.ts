@@ -32,6 +32,14 @@ const BASE_SYSTEM_PROMPT = `You are an AI-assisted cutting assistant inside a pr
 
 The video is organized as a sequence of clips on the timeline. You can split, delete, and modify clips.
 
+## Voice And Boundaries
+
+- Speak like a calm editing assistant, not a debugging tool or research agent.
+- Prefer direct timeline observations such as "At 0:30..." or "Around 0:50..." over process narration.
+- Do NOT mention transcripts, frame summaries, representative frames, dense frames, OCR, prompts, APIs, models, providers, or internal analysis steps unless the user is explicitly changing editor defaults.
+- Do NOT say things like "the transcript says", "I checked frame 4", "the visual analysis found", or "I used transcription/frame data". Just state the moment or finding directly.
+- If the user asks about internal implementation or tooling instead of the edit itself, politely redirect with a short answer like "I'm focused on helping you edit the video" and invite them to describe the edit they want.
+
 ## Operations
 
 ### 1. Split Clip (split_clip)
@@ -716,6 +724,21 @@ function findFollowUpParentGoal(messages: ChatTurn[]): string | null {
   return priorUserMessage?.content?.trim() || null;
 }
 
+const IMPLEMENTATION_REDIRECT_MESSAGE = 'I’m focused on helping you edit the video. Tell me what moment you want to find or what cut you want to make.';
+
+function isInternalImplementationQuestion(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const asksHow = /\b(what|which|how|why|are you|do you|can you)\b/.test(normalized);
+  const implementationTerms = /\b(api|model|provider|prompt|backend|service|tooling|pipeline|whisper|openai|anthropic|claude|ocr|transcription api|frame extraction|representative frame|dense frame|analysis step|analysis process)\b/.test(normalized)
+    || /how (?:are|do) you (?:transcrib|analyz|process|work)/.test(normalized)
+    || /what (?:are|do) you use/.test(normalized);
+  const editIntent = /\b(cut|trim|remove|delete|find|tag|mark|caption|subtitle|transcribe|move|reorder|split|speed|mute|fade|overlay|transition|edit)\b/.test(normalized);
+
+  return asksHow && implementationTerms && !editIntent;
+}
+
 function isSyntheticContinuationUserMessage(message: string): boolean {
   const normalized = message.trim();
   if (!normalized) return false;
@@ -1298,9 +1321,15 @@ function shouldHideInternalReasoning(message: string): boolean {
   return normalized.length > 220
     || /frame\s+\d+/.test(normalized)
     || /looking at the transcript/.test(normalized)
+    || /transcript says/.test(normalized)
     || /transcript and frames/.test(normalized)
     || /representative frame/.test(normalized)
     || /dense frame/.test(normalized)
+    || /frame summary/.test(normalized)
+    || /ocr/.test(normalized)
+    || /whisper/.test(normalized)
+    || /\bapi\b/.test(normalized)
+    || /\bmodel\b/.test(normalized)
     || /speaker says/.test(normalized)
     || /appears to run from/.test(normalized);
 }
@@ -1518,6 +1547,12 @@ export async function POST(req: NextRequest) {
     const latestUserMessage = [...normalizedMessages].reverse().find((message) => message.role === 'user')?.content ?? '';
     const continuation = parseRequestChainContinuationMessage(latestUserMessage);
     const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages, continuation);
+    if (isInternalImplementationQuestion(effectiveLatestUserMessage)) {
+      return NextResponse.json({
+        message: IMPLEMENTATION_REDIRECT_MESSAGE,
+        action: null,
+      });
+    }
     const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}

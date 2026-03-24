@@ -2598,22 +2598,20 @@ function ProgressStatusCard({
 }) {
   const targetProgress = getProgressValue(progress);
   const isCompleted = tone === 'completed';
-  const statusText = progress?.label ?? null;
-  const etaKey = `${progress?.etaSeconds ?? 'na'}:${progress?.completed ?? 'na'}:${progress?.total ?? 'na'}:${progress?.stage ?? 'na'}:${progress?.label ?? 'na'}:${isCompleted ? 'done' : 'active'}`;
 
   return (
     <div style={{
       marginLeft: 22,
-      padding: '12px 13px',
+      padding: '14px 15px',
       borderRadius: 10,
       border: '1px solid rgba(255,255,255,0.08)',
       background: 'linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02))',
       display: 'flex',
       flexDirection: 'column',
-      gap: 8,
+      gap: 10,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {isCompleted ? (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 14 }}>
+        {isCompleted && (
           <div style={{
             width: 14,
             height: 14,
@@ -2627,35 +2625,20 @@ function ProgressStatusCard({
               <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
             </svg>
           </div>
-        ) : (
-          <div style={{ display: 'flex', gap: 4 }}>
-            {[0, 1, 2].map((index) => (
-              <div
-                key={index}
-                style={{
-                  width: 5,
-                  height: 5,
-                  borderRadius: '50%',
-                  background: 'rgba(33,212,255,0.9)',
-                  opacity: 0.28,
-                  animation: `dotPulse 1.2s ease-in-out ${index * 0.12}s infinite`,
-                }}
-              />
-            ))}
-          </div>
         )}
         <span style={{
-          fontSize: 11,
-          color: 'var(--fg-secondary)',
+          fontSize: 13,
+          color: 'var(--fg-primary)',
           fontFamily: 'var(--font-serif)',
+          fontWeight: 500,
         }}>
           {title}
         </span>
       </div>
-      {!isCompleted && targetProgress !== null && (
+      {!isCompleted && (
         <div style={{
           width: '100%',
-          height: 6,
+          height: 5,
           borderRadius: 999,
           background: 'rgba(255,255,255,0.06)',
           overflow: 'hidden',
@@ -2670,44 +2653,32 @@ function ProgressStatusCard({
           }} />
         </div>
       )}
-      {statusText && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <span style={{
-            fontSize: 10,
-            color: 'var(--fg-muted)',
-            fontFamily: 'var(--font-serif)',
-          }}>
-            {statusText}
-          </span>
-          <LiveEtaLabel
-            key={etaKey}
-            etaSeconds={progress?.etaSeconds ?? null}
-            isCompleted={isCompleted}
-          />
-        </div>
-      )}
-      {secondaryLabel && (
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.48)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
-          {secondaryLabel}
-        </span>
-      )}
-      {detail && (
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.38)', fontFamily: 'var(--font-serif)', lineHeight: 1.5 }}>
-          {detail}
-        </span>
-      )}
+      <LiveProgressSummary
+        progress={progress}
+        targetProgress={targetProgress}
+        isCompleted={isCompleted}
+        detail={detail}
+        secondaryLabel={secondaryLabel}
+      />
     </div>
   );
 }
 
-function LiveEtaLabel({
-  etaSeconds,
+function LiveProgressSummary({
+  progress,
+  targetProgress,
   isCompleted,
+  detail,
+  secondaryLabel,
 }: {
-  etaSeconds?: number | null;
+  progress: IndexingProgress | null;
+  targetProgress: number | null;
   isCompleted: boolean;
+  detail?: string | null;
+  secondaryLabel?: string | null;
 }) {
   const [targetMs] = useState<number | null>(() => {
+    const etaSeconds = progress?.etaSeconds ?? null;
     if (!etaSeconds || !Number.isFinite(etaSeconds) || etaSeconds <= 0 || isCompleted) {
       return null;
     }
@@ -2723,13 +2694,22 @@ function LiveEtaLabel({
     return () => window.clearInterval(intervalId);
   }, [isCompleted, targetMs]);
 
-  if (isCompleted || targetMs === null) return null;
-
-  const remainingSeconds = Math.ceil((targetMs - countdownNow) / 1000);
-  const label = remainingSeconds <= 0 ? 'Finishing up…' : formatCountdownLabel(remainingSeconds);
+  let label = 'Starting…';
+  if (isCompleted) {
+    label = 'Completed';
+  } else if (detail || /needs attention|error/i.test(progress?.label ?? '')) {
+    label = 'Needs attention';
+  } else if (secondaryLabel === 'Paused' || /paused/i.test(progress?.label ?? '')) {
+    label = 'Paused';
+  } else if (targetMs !== null) {
+    const remainingSeconds = Math.ceil((targetMs - countdownNow) / 1000);
+    label = remainingSeconds <= 0 ? 'Finishing up…' : formatCountdownLabel(remainingSeconds);
+  } else if (targetProgress !== null && targetProgress > 0) {
+    label = `${Math.round(targetProgress * 100)}% complete`;
+  }
 
   return (
-    <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
+    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
       {label}
     </span>
   );
