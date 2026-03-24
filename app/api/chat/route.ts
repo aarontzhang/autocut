@@ -38,6 +38,9 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Prefer direct timeline observations such as "At 0:30..." or "Around 0:50..." over process narration.
 - Do NOT mention transcripts, frame summaries, representative frames, dense frames, OCR, prompts, APIs, models, providers, or internal analysis steps unless the user is explicitly changing editor defaults.
 - Do NOT say things like "the transcript says", "I checked frame 4", "the visual analysis found", or "I used transcription/frame data". Just state the moment or finding directly.
+- When a chat message includes inline references, use the visible forms "@clip N" and "@marker N" or natural phrases like "clip N" and "marker N" in user-facing prose.
+- Never expose clip indexes, raw marker shorthand like "@1", marker IDs, labels, notes, linked ranges, or source/timeline spans unless the user explicitly asks for those details.
+- For any edit that still needs review or approval, use proposal wording like "I found..." or "I can...". Only use completion wording for changes that are immediately applied.
 - If the user asks about internal implementation or tooling instead of the edit itself, politely redirect with a short answer like "I'm focused on helping you edit the video" and invite them to describe the edit they want.
 
 ## Operations
@@ -76,7 +79,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
 Example — delete two silent sections (original silence was 22s–45s and 70s–90s):
-<action>{"type":"delete_ranges","ranges":[{"start":23.5,"end":43.5},{"start":71.5,"end":88.5}],"message":"Removed 2 silent sections."}</action>
+<action>{"type":"delete_ranges","ranges":[{"start":23.5,"end":43.5},{"start":71.5,"end":88.5}],"message":"I found 2 silent sections to remove."}</action>
 
 ### 3. Set Clip Speed (set_clip_speed)
 - Change playback speed for a specific clip
@@ -136,7 +139,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - If the user asked for a marker/bookmark/tag and you have any plausible evidence window, return add_marker/add_markers now instead of type:none
 - For semantic requests like "the school I go to", "my company", "my name", or "the app I'm using", use the transcript and frames to infer the likely named entity or mention. Best-effort marker placement is better than asking for clarification.
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
-- When a user references "marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
+- When a user references "marker 1", "@marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
 - If the latest user message explicitly references one or more markers, prioritize those markers over unmentioned markers when deciding where to inspect, cut, or add emphasis
 
 ### 10. Text Overlays (add_text_overlay / replace_text_overlay)
@@ -169,49 +172,49 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ## Action block examples
 
 Split clip at 10 seconds:
-<action>{"type":"split_clip","splitTime":10,"message":"Splitting the clip at 0:10."}</action>
+<action>{"type":"split_clip","splitTime":10,"message":"I can split this at 0:10."}</action>
 
 Delete the first clip (index 0):
-<action>{"type":"delete_clip","clipIndex":0,"message":"Deleted the first clip."}</action>
+<action>{"type":"delete_clip","clipIndex":0,"message":"I can remove clip 1."}</action>
 
 Move clip 2 to the front:
-<action>{"type":"reorder_clip","clipIndex":1,"newIndex":0,"message":"Moved clip 2 to the front."}</action>
+<action>{"type":"reorder_clip","clipIndex":1,"newIndex":0,"message":"I can move clip 2 to the front."}</action>
 
 Move the last clip to position 1 (assuming 4 clips, last = index 3):
-<action>{"type":"reorder_clip","clipIndex":3,"newIndex":0,"message":"Moved the last clip to the front."}</action>
+<action>{"type":"reorder_clip","clipIndex":3,"newIndex":0,"message":"I can move clip 4 to the front."}</action>
 
 Delete from 20s to 30s:
-<action>{"type":"delete_range","deleteStartTime":20,"deleteEndTime":30,"message":"Removed the section from 0:20 to 0:30."}</action>
+<action>{"type":"delete_range","deleteStartTime":20,"deleteEndTime":30,"message":"I found a section to remove from 0:20 to 0:30."}</action>
 
 Speed up the second clip to 2x:
-<action>{"type":"set_clip_speed","clipIndex":1,"speed":2.0,"message":"Set clip 2 to 2x speed."}</action>
+<action>{"type":"set_clip_speed","clipIndex":1,"speed":2.0,"message":"I can set clip 2 to 2x speed."}</action>
 
 Mute the first clip:
-<action>{"type":"set_clip_volume","clipIndex":0,"volume":0,"message":"Muted clip 1."}</action>
+<action>{"type":"set_clip_volume","clipIndex":0,"volume":0,"message":"I can mute clip 1."}</action>
 
 Fade out the last clip (assumes 1 clip, index 0):
-<action>{"type":"set_clip_volume","clipIndex":0,"volume":1.0,"fadeOut":2.0,"message":"Added 2s fade out."}</action>
+<action>{"type":"set_clip_volume","clipIndex":0,"volume":1.0,"fadeOut":2.0,"message":"I can add a 2s fade out to clip 1."}</action>
 
 Black and white on the first clip:
-<action>{"type":"set_clip_filter","clipIndex":0,"filter":{"type":"bw","intensity":1.0},"message":"Applied black and white filter."}</action>
+<action>{"type":"set_clip_filter","clipIndex":0,"filter":{"type":"bw","intensity":1.0},"message":"I can apply the black and white filter to clip 1."}</action>
 
 Transcribe:
 <action>{"type":"transcribe_request","segments":[{"startTime":0,"endTime":60}],"message":"Transcribing the audio."}</action>
 
 Transition:
-<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"Added fade to black at 0:30."}</action>
+<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"I found a fade to black to add at 0:30."}</action>
 
 Markers:
 <action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review."}</action>
 
 Text overlay:
-<action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"Added title overlay."}</action>
+<action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"I can add a title overlay."}</action>
 
 Captions:
-<action>{"type":"add_captions","captions":[{"startTime":30,"endTime":31.2,"text":"This is"},{"startTime":31.2,"endTime":32.6,"text":"the caption"}],"message":"Added captions from 0:30 to 0:33."}</action>
+<action>{"type":"add_captions","captions":[{"startTime":30,"endTime":31.2,"text":"This is"},{"startTime":31.2,"endTime":32.6,"text":"the caption"}],"message":"I prepared captions from 0:30 to 0:33."}</action>
 
 Replace/edit existing text overlay (index 0):
-<action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"Updated the text overlay."}</action>
+<action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"I can update the text overlay."}</action>
 
 Update AI settings:
 <action>{"type":"update_ai_settings","settings":{"silenceRemoval":{"paddingSeconds":1,"minDurationSeconds":3}},"message":"Updated the silence-removal defaults."}</action>
@@ -227,8 +230,8 @@ No action:
 - For time references: "1:20" = 80s, "2:00" = 120s
 - ALWAYS express times in M:SS format in your messages (e.g., "4:03", "1:20") — never use plain seconds like "243 seconds" or "80s"
 - Never use markdown formatting (no **bold**, no *italic*, no bullet points). Plain text only.
-- If context says "Selected clip: Clip N (index I)", and the user says "this clip", "it", "the selected clip" — use clipIndex I for the operation.
-- If context includes tagged or selected clips and the user says "these clips", "both clips", "between them", or similar, resolve that against the tagged clip set first in timeline order.
+- If the user's latest request includes "@clip N", use the token-keyed clip reference data in context to resolve that clip for the operation.
+- If the user's latest request includes "@marker N", use the token-keyed marker reference data in context to resolve that marker, and never surface it as bare "@N" in user-facing prose.
 - Treat current timeline time and original source time as different once edits have been made. If a prior message mentioned a moment before a cut, map that original/source moment onto the current timeline before making a new edit.
 - Treat short corrective follow-ups as refinements of the latest unfinished task. A task is unfinished if the last proposed edit was not completed/applied, the user corrected it, or the assistant asked for clarification.
 - Do not drop earlier constraints from the same unfinished task unless the user clearly replaces them.
@@ -1724,7 +1727,7 @@ Honor these defaults unless the user explicitly asks for something different in 
         const dur = c.sourceDuration / (c.speed ?? 1);
         const start = cursor;
         cursor += dur;
-        return `clip ${c.index} timeline [${fmtSec(start)}–${fmtSec(cursor)}] from source [${fmtSec(c.sourceStart)}–${fmtSec(c.sourceStart + c.sourceDuration)}] at ${(c.speed ?? 1).toFixed(2)}x`;
+        return `clip ${c.index + 1} timeline [${fmtSec(start)}–${fmtSec(cursor)}] from source [${fmtSec(c.sourceStart)}–${fmtSec(c.sourceStart + c.sourceDuration)}] at ${(c.speed ?? 1).toFixed(2)}x`;
       });
       contextLines.push(`Timeline: ${summaries.join(' | ')}`);
     }
@@ -1794,31 +1797,25 @@ Honor these defaults unless the user explicitly asks for something different in 
       contextLines.push(`Latest user message is a follow-up timing refinement for this earlier request: "${sanitizeInlineUntrustedText(followUpParentGoal, 200)}"`);
     }
 
-    if (context?.selectedClip != null) {
-      const sc = context.selectedClip;
-      contextLines.push(`Selected clip: Clip ${sc.index + 1} (index ${sc.index}), duration ${sc.duration.toFixed(2)}s`);
+    if (clipSummaries.length > 0) {
+      contextLines.push(
+        `CLIP_REFERENCE_MAP_JSON: ${JSON.stringify(clipSummaries.map((clip) => ({
+          token: `@clip ${clip.index + 1}`,
+          clipNumber: clip.index + 1,
+          clipIndex: clip.index,
+          clipId: clip.id ?? null,
+        })))}`
+      );
     }
-    if (Array.isArray(context?.selectedClips)) {
-      const selectedClips = (context.selectedClips as Array<{ index?: number; duration?: number }>)
-        .filter((clip) => typeof clip.index === 'number');
-      if (selectedClips.length > 0) {
-        contextLines.push(
-          'Selected clips: ' +
-          selectedClips
-            .map((clip) => `Clip ${(clip.index as number) + 1} (index ${clip.index})`)
-            .join(' | ')
-        );
-      }
-    }
-    if (context?.selectedMarker && typeof context.selectedMarker === 'object') {
-      const marker = context.selectedMarker as { number?: number; timelineTime?: number; label?: string | null };
-      if (typeof marker.number === 'number' && typeof marker.timelineTime === 'number') {
-        const safeLabel = sanitizeInlineUntrustedText(marker.label, 80);
-        contextLines.push(`Selected marker: @${marker.number} at ${fmtSec(marker.timelineTime)}${safeLabel ? ` labeled "${safeLabel}"` : ''}`);
-      }
+    const explicitlyMentionedClips = extractMentionedClips(effectiveLatestUserMessage, clipSummaries);
+    if (explicitlyMentionedClips.length > 0) {
+      contextLines.push(
+        `Explicit inline clip references in the latest user request: ${explicitlyMentionedClips.map((clip) => clip.token).join(' | ')}. Use CLIP_REFERENCE_MAP_JSON to resolve them.`
+      );
     }
     if (Array.isArray(context?.markers) && context.markers.length > 0) {
       const availableMarkers = (context.markers as Array<{
+        id?: string;
         number?: number;
         timelineTime?: number;
         label?: string | null;
@@ -1827,66 +1824,23 @@ Honor these defaults unless the user explicitly asks for something different in 
         note?: string | null;
       }>)
         .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number');
-      const markerSummary = availableMarkers
-        .slice(0, 12)
-        .map((marker) => {
-          const markerNumber = marker.number as number;
-          const markerTimelineTime = marker.timelineTime as number;
-          return (
-            `@${markerNumber} ${fmtSec(markerTimelineTime)}` +
-          (marker.label ? ` "${sanitizeInlineUntrustedText(marker.label, 80)}"` : '') +
-          (marker.linkedRange?.startTime !== undefined && marker.linkedRange?.endTime !== undefined
-            ? ` range ${fmtSec(marker.linkedRange.startTime)}-${fmtSec(marker.linkedRange.endTime)}`
-            : '') +
-          (marker.status ? ` ${marker.status}` : '') +
-          (marker.note ? ` note "${sanitizeInlineUntrustedText(marker.note, 120)}"` : '')
-          );
-        });
-      if (markerSummary.length > 0) {
-        contextLines.push(`Timeline markers: ${markerSummary.join(' | ')}`);
-      }
-      const taggedMarkers = Array.isArray(context?.taggedMarkers)
-        ? (context.taggedMarkers as Array<{ number?: number; timelineTime?: number; label?: string | null }>)
-            .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
-        : [];
-      if (taggedMarkers.length > 0) {
+      if (availableMarkers.length > 0) {
         contextLines.push(
-          'Tagged markers attached to the latest user request: ' +
-          taggedMarkers.map((marker) => {
-            const markerNumber = marker.number as number;
-            const markerTimelineTime = marker.timelineTime as number;
-            const safeLabel = sanitizeInlineUntrustedText(marker.label, 80);
-            return `@${markerNumber} ${fmtSec(markerTimelineTime)}${safeLabel ? ` "${safeLabel}"` : ''}`;
-          }).join(' | ') +
-          '. If the user says "this", "that", or "here", prefer these tagged markers as the likely reference.'
+          `MARKER_REFERENCE_MAP_JSON: ${JSON.stringify(availableMarkers.map((marker) => ({
+            token: `@marker ${marker.number}`,
+            markerNumber: marker.number,
+            markerId: marker.id ?? null,
+            timelineTime: marker.timelineTime,
+            linkedRange: marker.linkedRange ?? null,
+          })))}`
         );
       }
       const explicitlyMentionedMarkers = extractMentionedMarkers(effectiveLatestUserMessage, availableMarkers);
       if (explicitlyMentionedMarkers.length > 0) {
         contextLines.push(
-          'Explicit marker references in the latest user request: ' +
-          explicitlyMentionedMarkers.map((marker) => {
-            const markerNumber = marker.number as number;
-            const markerTimelineTime = marker.timelineTime as number;
-            const safeLabel = sanitizeInlineUntrustedText(marker.label, 80);
-            return `@${markerNumber} ${fmtSec(markerTimelineTime)}${safeLabel ? ` "${safeLabel}"` : ''}`;
-          }).join(' | ') +
-          '. Prioritize these markers in the response.'
+          `Explicit inline marker references in the latest user request: ${explicitlyMentionedMarkers.map((marker) => marker.token).join(' | ')}. Use MARKER_REFERENCE_MAP_JSON to resolve them and prioritize them in the response.`
         );
       }
-    }
-    const taggedClips = Array.isArray(context?.taggedClips)
-      ? (context.taggedClips as Array<{ index?: number; duration?: number }>)
-          .filter((clip) => typeof clip.index === 'number')
-      : [];
-    if (taggedClips.length > 0) {
-      contextLines.push(
-        'Tagged clips attached to the latest user request: ' +
-        taggedClips
-          .map((clip) => `Clip ${(clip.index as number) + 1} (index ${clip.index})`)
-          .join(' | ') +
-        '. If the user says "these clips", "between them", or "use these", prefer these tagged clips as the likely reference.'
-      );
     }
 
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
@@ -2010,7 +1964,9 @@ Honor these defaults unless the user explicitly asks for something different in 
           latestAssistantEvidence,
           validationContext.videoDuration,
         ) ?? failureAction;
-    const action = validateEditAction(inferredAction, validationContext) ?? failureAction;
+    const action = normalizeActionForChat(
+      validateEditAction(inferredAction, validationContext) ?? failureAction ?? null,
+    );
     const userFacingMessage = buildUserFacingAssistantMessage(message, action);
     return NextResponse.json({
       message: userFacingMessage,
