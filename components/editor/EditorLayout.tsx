@@ -262,7 +262,9 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         videoDuration,
       },
     }).filter((entry) => entry.source && entry.duration > 0);
-    const shouldUseServerIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+    // Once the media belongs to a persisted project, let the canonical server
+    // indexing worker own transcription instead of starting a local duplicate.
+    const shouldUseServerIndex = Boolean(currentProjectId);
     const sourcesToTranscribe = availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
     if (
       !initialIndexingReady
@@ -396,11 +398,14 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           : {};
         const initialServerIndexingReady = getInitialIndexingReady(
           sourceIndexSources
-            .filter((source): source is { id: string; storagePath?: string | null; assetId?: string | null } => typeof source?.id === 'string')
+            .filter((source): source is { id: string; storagePath?: string | null; assetId?: string | null; status?: unknown } => typeof source?.id === 'string')
             .map((source) => ({
               id: source.id,
               storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
               assetId: typeof source.assetId === 'string' ? source.assetId : null,
+              status: source.status === 'pending' || source.status === 'indexing' || source.status === 'ready' || source.status === 'error'
+                ? source.status
+                : 'pending',
             })),
           analysisBySourceId,
           sourceIndexFreshBySourceId,

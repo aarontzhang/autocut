@@ -944,7 +944,13 @@ function buildServerAnalysisStatusCards(params: {
   };
 
   const trackedSources = params.sources.filter((source) => (
-    Boolean(source.storagePath || source.assetId || params.analysisBySourceId[source.sourceId])
+    Boolean(
+      source.storagePath
+      || source.assetId
+      || source.status === 'pending'
+      || source.status === 'indexing'
+      || params.analysisBySourceId[source.sourceId]
+    )
   ));
   if (trackedSources.length === 0) return [];
 
@@ -2869,7 +2875,9 @@ export default function ChatSidebar() {
       },
     }).filter((entry) => entry.source && entry.duration > 0)
   ), [processingVideoUrl, sourceRuntimeById, sources, videoData, videoDuration, videoFile, videoUrl]);
-  const useServerSourceIndex = Boolean(currentProjectId && sources.some((source) => !!source.storagePath));
+  // Project-backed media should wait for the canonical server index instead of
+  // starting a separate client-side coarse-analysis pass during upload.
+  const useServerSourceIndex = Boolean(currentProjectId);
   const initialIndexingReady = useMemo(
     () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId),
     [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sources],

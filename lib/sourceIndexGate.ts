@@ -5,12 +5,17 @@ import type {
   SourceIndexState,
 } from './types';
 
-function requiresInitialIndexing(source: Pick<ProjectSource, 'storagePath' | 'assetId'>) {
-  return Boolean(source.storagePath || source.assetId);
+function requiresInitialIndexing(source: Pick<ProjectSource, 'storagePath' | 'assetId' | 'status'>) {
+  return Boolean(
+    source.storagePath
+    || source.assetId
+    || source.status === 'pending'
+    || source.status === 'indexing'
+  );
 }
 
 export function getInitialIndexingTrackedSourceIds(
-  sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId'>>,
+  sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId' | 'status'>>,
   analysisBySourceId?: SourceIndexAnalysisStateMap,
 ): string[] {
   return sources
@@ -31,7 +36,7 @@ export function isInitialIndexingReadyForSource(input: {
 }
 
 export function getInitialIndexingReady(
-  sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId'>>,
+  sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId' | 'status'>>,
   analysisBySourceId: SourceIndexAnalysisStateMap,
   freshnessBySourceId?: Record<string, Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null | undefined>,
 ): boolean {
