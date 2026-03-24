@@ -121,6 +121,18 @@ export function buildProjectSources(input: {
   return [...baseSources, ...synthesizedSources];
 }
 
+export function extractReferencedSourceIdsFromClips(clips: unknown): string[] {
+  if (!Array.isArray(clips)) return [];
+
+  return clips.reduce<string[]>((acc, clip) => {
+    if (!clip || typeof clip !== 'object') return acc;
+    const sourceId = normalizeSourceId((clip as { sourceId?: unknown }).sourceId);
+    if (!sourceId || acc.includes(sourceId)) return acc;
+    acc.push(sourceId);
+    return acc;
+  }, []);
+}
+
 function chooseMergedStatus(
   existing: ProjectSource['status'],
   incoming: ProjectSource['status'],

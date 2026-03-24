@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
-import { buildProjectSources, upsertProjectSource } from '@/lib/projectSources';
+import {
+  buildProjectSources,
+  extractReferencedSourceIdsFromClips,
+  upsertProjectSource,
+} from '@/lib/projectSources';
 import {
   getStorageObjectSize,
   getUserStorageQuotaSnapshot,
@@ -154,6 +158,7 @@ export async function POST(request: NextRequest) {
         persistedSources: Array.isArray(latestProject.edit_state?.sources) ? latestProject.edit_state.sources : [],
         projectStoragePath: latestProject.video_path,
         projectVideoFilename: latestProject.video_filename,
+        referencedSourceIds: extractReferencedSourceIdsFromClips(latestProject.edit_state?.clips),
       }),
       MAIN_SOURCE_ID,
       {
@@ -218,6 +223,7 @@ export async function POST(request: NextRequest) {
         persistedSources: Array.isArray(latestProject.edit_state?.sources) ? latestProject.edit_state.sources : [],
         projectStoragePath: latestProject.video_path,
         projectVideoFilename: latestProject.video_filename,
+        referencedSourceIds: extractReferencedSourceIdsFromClips(latestProject.edit_state?.clips),
       }),
       requestedSourceId!,
       {

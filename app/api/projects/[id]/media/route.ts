@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { buildProjectSources } from '@/lib/projectSources';
+import { buildProjectSources, extractReferencedSourceIdsFromClips } from '@/lib/projectSources';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
@@ -40,6 +40,7 @@ async function proxyProjectMedia(request: NextRequest, params: Promise<{ id: str
     persistedSources: Array.isArray(project?.edit_state?.sources) ? project.edit_state.sources : [],
     projectStoragePath: project?.video_path ?? null,
     projectVideoFilename: project?.video_filename ?? null,
+    referencedSourceIds: extractReferencedSourceIdsFromClips(project?.edit_state?.clips),
   });
   const requestedSource = persistedSources.find((source) => source.id === requestedSourceId) ?? null;
   if (requestedSourceId !== MAIN_SOURCE_ID && !requestedSource) {

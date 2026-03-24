@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
-import { buildProjectSources } from '@/lib/projectSources';
+import { buildProjectSources, extractReferencedSourceIdsFromClips } from '@/lib/projectSources';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import type {
   AnalysisProgress,
@@ -427,6 +427,7 @@ async function loadProjectAndSources(projectId: string, userId: string) {
       persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state?.sources : [],
       projectStoragePath: project.video_path,
       projectVideoFilename: project.video_filename,
+      referencedSourceIds: extractReferencedSourceIdsFromClips(project.edit_state?.clips),
     }) : [],
   };
 }

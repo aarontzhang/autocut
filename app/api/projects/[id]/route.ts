@@ -5,7 +5,11 @@ import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { buildProjectSources, mergeProjectSources } from '@/lib/projectSources';
+import {
+  buildProjectSources,
+  extractReferencedSourceIdsFromClips,
+  mergeProjectSources,
+} from '@/lib/projectSources';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -40,6 +44,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state?.sources : [],
       projectStoragePath: project.video_path,
       projectVideoFilename: project.video_filename,
+      referencedSourceIds: extractReferencedSourceIdsFromClips(project.edit_state?.clips),
     }),
   });
 }
@@ -113,6 +118,10 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         projectStoragePath: typeof body.video_path === 'string' ? body.video_path : currentProject.video_path,
         projectVideoFilename: typeof body.video_filename === 'string' ? body.video_filename : currentProject.video_filename,
         projectDuration: Number.isFinite(incomingEditState.videoDuration) ? Number(incomingEditState.videoDuration) : undefined,
+        referencedSourceIds: [
+          ...extractReferencedSourceIdsFromClips(existingEditState.clips),
+          ...extractReferencedSourceIdsFromClips(incomingEditState.clips),
+        ],
       }),
     };
   }
