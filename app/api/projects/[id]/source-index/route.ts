@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { buildProjectSources } from '@/lib/projectSources';
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import type {
   AnalysisProgress,
   AnalysisJobStatus,
@@ -36,42 +36,6 @@ type AnalysisJobRow = {
   result: Record<string, unknown> | null;
   pause_requested: boolean;
 };
-
-function buildProjectSources(project: ProjectRow): ProjectSource[] {
-  const persistedSources = Array.isArray(project.edit_state?.sources)
-    ? project.edit_state!.sources as ProjectSource[]
-    : [];
-  if (persistedSources.length > 0) {
-    const hasPrimary = persistedSources.some((source) => (
-      source.id === MAIN_SOURCE_ID || source.isPrimary === true
-    ));
-    return persistedSources.map((source, index) => {
-      const isPrimary = source.id === MAIN_SOURCE_ID || source.isPrimary === true || (!hasPrimary && index === 0);
-      return {
-        ...source,
-        id: isPrimary ? MAIN_SOURCE_ID : (source.id || `source-${index + 1}`),
-        fileName: source.fileName || `Source ${index + 1}`,
-        storagePath: source.storagePath ?? null,
-        assetId: source.assetId ?? null,
-        duration: Number.isFinite(source.duration) ? Number(source.duration) : 0,
-        status: source.status ?? 'pending',
-        isPrimary,
-      };
-    });
-  }
-  if (!project.video_path && !project.video_filename) {
-    return [];
-  }
-  return [{
-    id: MAIN_SOURCE_ID,
-    fileName: project.video_filename?.trim() || 'Main video',
-    storagePath: project.video_path ?? null,
-    assetId: null,
-    duration: 0,
-    status: project.video_path ? 'pending' : 'ready',
-    isPrimary: true,
-  }];
-}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
@@ -451,7 +415,11 @@ async function loadProjectAndSources(projectId: string, userId: string) {
   if (projectError) throw projectError;
   return {
     project,
-    sources: project ? buildProjectSources(project) : [],
+    sources: project ? buildProjectSources({
+      persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state?.sources : [],
+      projectStoragePath: project.video_path,
+      projectVideoFilename: project.video_filename,
+    }) : [],
   };
 }
 

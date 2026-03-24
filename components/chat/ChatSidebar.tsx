@@ -884,6 +884,15 @@ function buildServerAnalysisStatusCards(params: {
     source: { status: string },
     freshness: { transcript?: boolean; overview?: boolean } | null,
   ): SourceIndexTaskState => {
+    if (source.status === 'missing') {
+      return {
+        status: 'failed',
+        completed: 0,
+        total: 1,
+        etaSeconds: null,
+        reason: 'Source media is missing.',
+      };
+    }
     if (source.status === 'error') {
       return {
         status: 'failed',
@@ -2816,7 +2825,6 @@ export default function ChatSidebar() {
   const clips = useEditorStore(s => s.clips);
   const markers = useEditorStore(s => s.markers);
   const selectedItem = useEditorStore(s => s.selectedItem);
-  const setSelectedItem = useEditorStore(s => s.setSelectedItem);
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);

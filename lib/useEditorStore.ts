@@ -43,6 +43,7 @@ import {
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 import { buildClipSchedule, getTimelineDuration, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
+import { buildProjectSources } from './projectSources';
 import { normalizeTextOverlayEntry } from './textOverlays';
 
 export type { EditSnapshot } from './editActionUtils';
@@ -105,84 +106,21 @@ function createProjectSource(input: ImportedSourceDraft): ProjectSource {
   };
 }
 
-function normalizeProjectSource(
-  value: Partial<ProjectSource> | null | undefined,
-  fallback: {
-    id: string;
-    fileName: string;
-    duration: number;
-    isPrimary: boolean;
-    storagePath?: string | null;
-  },
-): ProjectSource {
-  const fileName = typeof value?.fileName === 'string' && value.fileName.trim().length > 0
-    ? value.fileName.trim()
-    : fallback.fileName;
-  const status = value?.status === 'pending' || value?.status === 'indexing' || value?.status === 'ready' || value?.status === 'error'
-    ? value.status
-    : (fallback.storagePath ? 'pending' : 'ready');
-
-  return {
-    id: normalizeSourceId(value?.id) ?? fallback.id,
-    fileName,
-    storagePath: typeof value?.storagePath === 'string' && value.storagePath.trim().length > 0
-      ? value.storagePath.trim()
-      : (fallback.storagePath ?? null),
-    assetId: normalizeSourceId(value?.assetId) ?? null,
-    duration: Number.isFinite(value?.duration) && value!.duration! > 0 ? Number(value!.duration) : Math.max(0, fallback.duration),
-    status,
-    isPrimary: value?.isPrimary === true || fallback.isPrimary,
-  };
-}
-
 function buildHydratedSources(input: {
   persistedSources?: unknown[];
   projectStoragePath?: string | null;
   projectVideoFilename?: string | null;
   projectDuration?: number;
+  referencedSourceIds?: Iterable<string>;
 }): ProjectSource[] {
-  const persisted = Array.isArray(input.persistedSources)
-    ? input.persistedSources
-        .map((entry, index) => normalizeProjectSource(
-          (entry && typeof entry === 'object' ? entry : null) as Partial<ProjectSource> | null,
-          {
-            id: index === 0 ? MAIN_SOURCE_ID : uuidv4(),
-            fileName: index === 0
-              ? (input.projectVideoFilename?.trim() || 'Main video')
-              : `Source ${index + 1}`,
-            duration: input.projectDuration ?? 0,
-            isPrimary: index === 0,
-          },
-        ))
-        .filter((source, index, sources) => (
-          sources.findIndex((candidate) => candidate.id === source.id) === index
-        ))
-    : [];
-
-  if (persisted.length > 0) {
-    const hasPrimary = persisted.some((source) => source.isPrimary);
-    return persisted.map((source, index) => {
-      const isPrimary = source.id === MAIN_SOURCE_ID || source.isPrimary || (!hasPrimary && index === 0);
-      return {
-        ...source,
-        id: isPrimary ? MAIN_SOURCE_ID : source.id,
-        isPrimary,
-      };
-    });
-  }
-
-  if (!input.projectStoragePath && !(input.projectDuration && input.projectDuration > 0) && !input.projectVideoFilename) {
-    return [];
-  }
-
-  return [createProjectSource({
-    id: MAIN_SOURCE_ID,
-    fileName: input.projectVideoFilename?.trim() || 'Main video',
-    duration: input.projectDuration ?? 0,
-    isPrimary: true,
-    storagePath: input.projectStoragePath ?? null,
-    status: input.projectStoragePath ? 'pending' : 'ready',
-  })];
+  return buildProjectSources({
+    persistedSources: input.persistedSources,
+    projectStoragePath: input.projectStoragePath,
+    projectVideoFilename: input.projectVideoFilename,
+    projectDuration: input.projectDuration,
+    referencedSourceIds: input.referencedSourceIds,
+    fallbackId: () => uuidv4(),
+  });
 }
 
 function getPrimarySource(sources: ProjectSource[]): ProjectSource | null {
@@ -192,26 +130,17 @@ function getPrimarySource(sources: ProjectSource[]): ProjectSource | null {
     ?? null;
 }
 
-function getKnownSourceId(
-  value: unknown,
-  validSourceIds: Set<string>,
-  fallbackSourceId: string,
-) {
-  const sourceId = normalizeSourceId(value);
-  return sourceId && validSourceIds.has(sourceId) ? sourceId : fallbackSourceId;
-}
-
 function normalizeLoadedClip(
   clip: Partial<VideoClip> & { sourcePath?: unknown },
-  validSourceIds: Set<string>,
   fallbackSourceId: string,
 ): VideoClip | null {
   if (typeof clip.id !== 'string') return null;
   if (!Number.isFinite(clip.sourceStart) || !Number.isFinite(clip.sourceDuration)) return null;
+  const sourceId = normalizeSourceId(clip.sourceId) ?? fallbackSourceId;
 
   return {
     id: clip.id,
-    sourceId: getKnownSourceId(clip.sourceId, validSourceIds, fallbackSourceId),
+    sourceId,
     sourceStart: clip.sourceStart!,
     sourceDuration: clip.sourceDuration!,
     speed: Number.isFinite(clip.speed) && clip.speed! > 0 ? clip.speed! : 1,
@@ -302,8 +231,9 @@ function normalizeOverviewFrame(
   fallbackSourceId: string,
 ): SourceIndexedFrame | null {
   if (!Number.isFinite(entry.sourceTime)) return null;
+  const sourceId = normalizeSourceId(entry.sourceId);
   return {
-    sourceId: getKnownSourceId(entry.sourceId, validSourceIds, fallbackSourceId),
+    sourceId: sourceId && validSourceIds.has(sourceId) ? sourceId : fallbackSourceId,
     sourceTime: entry.sourceTime!,
     description: typeof entry.description === 'string' ? entry.description : undefined,
     image: typeof entry.image === 'string' ? entry.image : undefined,
@@ -1802,11 +1732,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const existingState = get();
     const persistedDuration = typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0;
     const effectiveDuration = (typeof duration === 'number' && duration > 0) ? duration : persistedDuration;
+    const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
+    const referencedSourceIds = rawClips
+      .map((clip) => normalizeSourceId((clip as Partial<VideoClip>).sourceId))
+      .filter((sourceId): sourceId is string => !!sourceId);
     const hydratedSources = buildHydratedSources({
       persistedSources: Array.isArray(editState.sources) ? editState.sources : project.sources,
       projectStoragePath: storagePath,
       projectVideoFilename: videoFilename ?? null,
       projectDuration: effectiveDuration,
+      referencedSourceIds,
     });
     const validSourceIds = new Set(hydratedSources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(hydratedSources)?.id ?? MAIN_SOURCE_ID;
@@ -1842,11 +1777,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     }
 
-    const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
     const clips = sanitizeTimelineClips(rawClips
       .map((clip) => normalizeLoadedClip(
         clip as Partial<VideoClip> & { sourcePath?: unknown },
-        validSourceIds,
         fallbackSourceId,
       ))
       .filter((clip): clip is VideoClip => !!clip));

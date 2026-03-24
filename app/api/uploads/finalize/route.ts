@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureAssetIndexingJob, ensurePrimaryMediaAssetIfSupported } from '@/lib/analysisJobs';
+import { buildProjectSources, upsertProjectSource } from '@/lib/projectSources';
 import {
   getStorageObjectSize,
   getUserStorageQuotaSnapshot,
@@ -17,6 +18,7 @@ import {
   type ManagedUploadKind,
 } from '@/lib/storageQuota';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { MAIN_SOURCE_ID, normalizeSourceId } from '@/lib/sourceUtils';
 
 function isUploadKind(value: unknown): value is ManagedUploadKind {
   return value === 'project-main' || value === 'main' || value === 'sources' || value === 'tracks';
@@ -52,6 +54,7 @@ export async function POST(request: NextRequest) {
   const storagePath = typeof body.storagePath === 'string' ? body.storagePath : '';
   const fileName = typeof body.fileName === 'string' ? body.fileName : null;
   const fileSize = typeof body.fileSize === 'number' && Number.isFinite(body.fileSize) ? Math.max(0, body.fileSize) : null;
+  const requestedSourceId = normalizeSourceId(body.sourceId);
   const clientDurationSeconds = typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
     ? Math.max(0, body.durationSeconds)
     : null;
@@ -59,10 +62,13 @@ export async function POST(request: NextRequest) {
   if (!isUploadKind(kind) || !projectId || !storagePath || !isExpectedStoragePath(user.id, projectId, kind, storagePath)) {
     return NextResponse.json({ error: 'Invalid finalize request' }, { status: 400 });
   }
+  if (kind === 'sources' && !requestedSourceId) {
+    return NextResponse.json({ error: 'Missing source ID for uploaded source' }, { status: 400 });
+  }
 
   const { data: project, error: projectError } = await supabase
     .from('projects')
-    .select('id')
+    .select('id, video_path, video_filename, edit_state')
     .eq('id', projectId)
     .eq('user_id', user.id)
     .single();
@@ -115,9 +121,10 @@ export async function POST(request: NextRequest) {
     }, { status: 413 });
   };
 
+  let effectiveDurationSeconds = clientDurationSeconds ?? 0;
   try {
     const probedDurationSeconds = await readStoredVideoDurationSeconds(supabase, storagePath);
-    const effectiveDurationSeconds = probedDurationSeconds > 0
+    effectiveDurationSeconds = probedDurationSeconds > 0
       ? probedDurationSeconds
       : (clientDurationSeconds ?? 0);
     if (effectiveDurationSeconds > MAX_UPLOAD_VIDEO_DURATION_SECONDS) {
@@ -132,12 +139,32 @@ export async function POST(request: NextRequest) {
 
   let assetId: string | null = null;
   if (kind === 'project-main' || kind === 'main') {
+    const nextSources = upsertProjectSource(
+      buildProjectSources({
+        persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state.sources : [],
+        projectStoragePath: project.video_path,
+        projectVideoFilename: project.video_filename,
+      }),
+      MAIN_SOURCE_ID,
+      {
+        fileName: fileName?.trim() || project.video_filename?.trim() || 'Main video',
+        storagePath,
+        assetId: null,
+        duration: effectiveDurationSeconds,
+        status: 'pending',
+        isPrimary: true,
+      },
+    );
     const { error: updateError } = await supabase
       .from('projects')
       .update({
         video_path: storagePath,
         video_filename: fileName,
         video_size: uploadedSize,
+        edit_state: {
+          ...(project.edit_state ?? {}),
+          sources: nextSources,
+        },
       })
       .eq('id', projectId)
       .eq('user_id', user.id);
@@ -164,6 +191,37 @@ export async function POST(request: NextRequest) {
       }
     } catch (assetError) {
       console.error('[uploads.finalize] failed to initialize source media asset record', assetError);
+    }
+
+    const nextSources = upsertProjectSource(
+      buildProjectSources({
+        persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state.sources : [],
+        projectStoragePath: project.video_path,
+        projectVideoFilename: project.video_filename,
+      }),
+      requestedSourceId!,
+      {
+        fileName: fileName?.trim() || `Source ${requestedSourceId}`,
+        storagePath,
+        assetId,
+        duration: effectiveDurationSeconds,
+        status: assetId ? 'indexing' : 'pending',
+      },
+    );
+
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update({
+        edit_state: {
+          ...(project.edit_state ?? {}),
+          sources: nextSources,
+        },
+      })
+      .eq('id', projectId)
+      .eq('user_id', user.id);
+
+    if (updateError) {
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
     }
   }
 

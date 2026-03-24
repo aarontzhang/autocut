@@ -9,6 +9,7 @@ function formatSourceStatus(status: string, options?: {
   isIndexReady?: boolean;
   hasActiveAnalysis?: boolean;
 }) {
+  if (status === 'missing') return 'Missing media';
   if (status === 'error') return 'Issue';
   if (options?.isIndexReady) return 'Ready';
   if (options?.hasActiveAnalysis) return 'Indexing';

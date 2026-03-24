@@ -6,7 +6,7 @@ import { exportClips, isFFmpegAbortError } from '@/lib/ffmpegClient';
 import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
-import { resolveProjectSources } from '@/lib/sourceMedia';
+import { describeSourceResolutionFailure, resolveProjectSources } from '@/lib/sourceMedia';
 
 export default function TopBar() {
   const videoFile = useEditorStore(s => s.videoFile);
@@ -20,6 +20,7 @@ export default function TopBar() {
   const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
   const captions = useEditorStore(s => s.previewSnapshot?.captions ?? s.captions);
   const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
+  const textOverlays = useEditorStore(s => s.previewSnapshot?.textOverlays ?? s.textOverlays);
   const setFFmpegJob = useEditorStore(s => s.setFFmpegJob);
   const undo = useEditorStore(s => s.undo);
   const redo = useEditorStore(s => s.redo);
@@ -27,8 +28,7 @@ export default function TopBar() {
   const canRedo = useEditorStore(s => s.future.length > 0);
   const { user } = useAuth();
 
-  const sourcesById = Object.fromEntries(
-    resolveProjectSources({
+  const resolvedSources = resolveProjectSources({
       sources,
       runtimeBySourceId: sourceRuntimeById,
       primaryFallback: {
@@ -38,7 +38,10 @@ export default function TopBar() {
         processingVideoUrl,
         videoDuration,
       },
-    }).map((entry) => {
+    });
+  const sourceInfoById = Object.fromEntries(resolvedSources.map((entry) => [entry.sourceId, entry]));
+  const sourcesById = Object.fromEntries(
+    resolvedSources.map((entry) => {
       const runtime = sourceRuntimeById[entry.sourceId];
       // Prefer the stable in-session or same-origin playback source for exports.
       // Live projects otherwise fall back to short-lived signed processing URLs,
@@ -51,14 +54,30 @@ export default function TopBar() {
       return [entry.sourceId, exportSource];
     }),
   );
+  const firstUnresolvedClip = clips.find((clip) => !sourcesById[clip.sourceId]) ?? null;
+  const exportDisabledReason = firstUnresolvedClip
+    ? (
+      sourceInfoById[firstUnresolvedClip.sourceId]?.missingReason
+      ?? describeSourceResolutionFailure({
+        sourceId: firstUnresolvedClip.sourceId,
+        fileName: sources.find((source) => source.id === firstUnresolvedClip.sourceId)?.fileName,
+        status: sources.find((source) => source.id === firstUnresolvedClip.sourceId)?.status,
+        storagePath: sources.find((source) => source.id === firstUnresolvedClip.sourceId)?.storagePath,
+      })
+    )
+    : null;
 
   const outputReady = ffmpegJob.status === 'done';
   const canExport = clips.length > 0
     && ffmpegJob.status === 'idle'
-    && clips.every((clip) => !!sourcesById[clip.sourceId]);
+    && !firstUnresolvedClip;
 
   const handleExport = useCallback(async () => {
     if (clips.length === 0) return;
+    if (firstUnresolvedClip) {
+      setFFmpegJob({ status: 'error', message: exportDisabledReason ?? `Missing media for source ${firstUnresolvedClip.sourceId}.` });
+      return;
+    }
     const abortController = new AbortController();
     const setRunningJob = (patch: Partial<{ progress: number; stage: string; isCancelling?: boolean }>) => {
       const currentJob = useEditorStore.getState().ffmpegJob;
@@ -74,6 +93,7 @@ export default function TopBar() {
         clips,
         captions,
         transitions,
+        textOverlays,
         signal: abortController.signal,
         onStage: (stage) => setRunningJob({ stage }),
         onProgress: (progress) => setRunningJob({ progress }),
@@ -87,7 +107,7 @@ export default function TopBar() {
       const msg = err instanceof Error ? err.message : (typeof err === 'string' ? err : JSON.stringify(err));
       setFFmpegJob({ status: 'error', message: msg || 'Unknown error' });
     }
-  }, [captions, clips, setFFmpegJob, sourcesById, transitions]);
+  }, [captions, clips, exportDisabledReason, firstUnresolvedClip, setFFmpegJob, sourcesById, textOverlays, transitions]);
 
   return (
     <div
@@ -218,6 +238,7 @@ export default function TopBar() {
         <button
           onClick={handleExport}
           disabled={!canExport}
+          title={canExport ? 'Export the current timeline' : (exportDisabledReason ?? 'Export is unavailable')}
           className={canExport ? 'iridescent-button' : undefined}
           style={{
             display: 'flex',

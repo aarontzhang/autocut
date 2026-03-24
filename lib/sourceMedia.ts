@@ -23,6 +23,8 @@ export interface ResolvedProjectSourceMedia {
   isPrimary: boolean;
   playerUrl: string;
   processingUrl: string;
+  isResolved: boolean;
+  missingReason: string | null;
 }
 
 type LegacyPrimarySourceInput = {
@@ -68,10 +70,12 @@ function buildResolvedEntry(
     || fallback?.videoUrl
     || '';
   const duration = source.duration > 0 ? source.duration : Math.max(0, fallback?.videoDuration ?? 0);
+  const resolvedSource = pickRuntimeSource(runtime, fallback);
+  const isResolved = Boolean(resolvedSource);
 
   return {
     sourceId: source.id,
-    source: pickRuntimeSource(runtime, fallback),
+    source: resolvedSource,
     duration,
     fileName: source.fileName || fallback?.videoName || 'Source video',
     storagePath: source.storagePath,
@@ -80,6 +84,13 @@ function buildResolvedEntry(
     isPrimary: source.isPrimary,
     playerUrl,
     processingUrl,
+    isResolved,
+    missingReason: isResolved ? null : describeSourceResolutionFailure({
+      sourceId: source.id,
+      fileName: source.fileName || fallback?.videoName || 'Source video',
+      status: source.status,
+      storagePath: source.storagePath,
+    }),
   };
 }
 
@@ -107,7 +118,25 @@ function buildFallbackPrimarySource(
       || fallback.processingVideoUrl
       || fallback.videoUrl
       || '',
+    isResolved: true,
+    missingReason: null,
   };
+}
+
+export function describeSourceResolutionFailure(source: {
+  sourceId: string;
+  fileName?: string | null;
+  status?: ProjectSource['status'];
+  storagePath?: string | null;
+}) {
+  const label = source.fileName?.trim() || source.sourceId;
+  if (source.status === 'missing' || !source.storagePath) {
+    return `Missing media for "${label}".`;
+  }
+  if (source.status === 'error') {
+    return `Could not load "${label}".`;
+  }
+  return `Source media for "${label}" is unavailable.`;
 }
 
 export function resolveProjectSources(input: ResolveProjectSourcesInput): ResolvedProjectSourceMedia[] {
@@ -117,7 +146,7 @@ export function resolveProjectSources(input: ResolveProjectSourcesInput): Resolv
   });
 
   if (sources.length > 0) {
-    return sources.filter((entry) => entry.source && entry.duration > 0);
+    return sources;
   }
 
   if (!input.primaryFallback) return [];

@@ -146,7 +146,7 @@ export interface AppliedActionRecord {
   sourceRanges?: SourceRangeRef[];
 }
 
-export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error';
+export type MediaAssetStatus = 'pending' | 'indexing' | 'ready' | 'error' | 'missing';
 
 export interface ProjectSource {
   id: string;

@@ -11,6 +11,7 @@ export async function uploadProjectMedia(
   projectId: string,
   folder: 'main' | 'sources' | 'tracks' = 'sources',
   durationSeconds?: number,
+  sourceId?: string,
 ) {
   if (file.size > STORAGE_FILE_LIMIT_BYTES) {
     throw new Error(getFileSizeErrorMessage());
@@ -49,6 +50,7 @@ export async function uploadProjectMedia(
       fileName: file.name,
       fileSize: file.size,
       durationSeconds,
+      sourceId,
     }),
   });
   if (!finalizeRes.ok) throw new Error(await readErrorMessage(finalizeRes));

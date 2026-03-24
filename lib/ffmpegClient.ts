@@ -4,8 +4,9 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 import { buildCaptionRenderWindows, invertSegments } from './timelineUtils';
 import { normalizeTransitionEntries, resolveTransitions } from './playbackEngine';
-import { CaptionEntry, TransitionEntry, VideoClip } from './types';
+import { CaptionEntry, TextOverlayEntry, TransitionEntry, VideoClip } from './types';
 import { MAIN_SOURCE_ID } from './sourceUtils';
+import { getTextOverlayExportY, getTextOverlayFontSize, normalizeTextOverlayEntry } from './textOverlays';
 
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<void> | null = null;
@@ -412,6 +413,14 @@ type ExportCaptionWindow = {
   lines: string[];
 };
 
+type ExportTextOverlay = {
+  startTime: number;
+  endTime: number;
+  text: string;
+  position: TextOverlayEntry['position'];
+  fontSize: number;
+};
+
 function buildExportCaptionWindows(params: {
   clips: VideoClip[];
   transitions: TransitionEntry[];
@@ -426,6 +435,20 @@ function buildExportCaptionWindows(params: {
       lines: window.lines,
     }))
     .filter((window) => window.endTime > window.startTime && window.lines.length > 0)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+}
+
+function buildExportTextOverlays(textOverlays: TextOverlayEntry[]): ExportTextOverlay[] {
+  return textOverlays
+    .map((overlay) => normalizeTextOverlayEntry(overlay))
+    .filter((overlay): overlay is TextOverlayEntry => !!overlay)
+    .map((overlay) => ({
+      startTime: overlay.startTime,
+      endTime: overlay.endTime,
+      text: overlay.text,
+      position: overlay.position,
+      fontSize: getTextOverlayFontSize(overlay),
+    }))
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
 }
 
@@ -446,6 +469,30 @@ async function writeCaptionTextFiles(
       `borderw=3:bordercolor=black:shadowcolor=black@0.45:shadowx=0:shadowy=3:` +
       `x=(w-text_w)/2:y=h-(h*0.14)-text_h:` +
       `enable='gte(t,${window.startTime.toFixed(3)})*lt(t,${window.endTime.toFixed(3)})'`,
+    );
+  }
+
+  return drawTextFilters;
+}
+
+async function writeTextOverlayTextFiles(
+  ffmpeg: FFmpeg,
+  textOverlays: ExportTextOverlay[],
+  frameHeight: number,
+) {
+  const encoder = new TextEncoder();
+  const drawTextFilters: string[] = [];
+  const fontFileName = await ensureCaptionFontFile(ffmpeg);
+
+  for (let overlayIndex = 0; overlayIndex < textOverlays.length; overlayIndex += 1) {
+    const overlay = textOverlays[overlayIndex];
+    const fileName = `text_overlay_${overlayIndex}.txt`;
+    await ffmpeg.writeFile(fileName, encoder.encode(overlay.text));
+    drawTextFilters.push(
+      `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=${getTextOverlayFontSize(overlay)}:` +
+      `line_spacing=8:shadowcolor=black@0.8:shadowx=0:shadowy=3:` +
+      `x=(w-text_w)/2:y=${getTextOverlayExportY(overlay.position, frameHeight)}:` +
+      `enable='gte(t,${overlay.startTime.toFixed(3)})*lt(t,${overlay.endTime.toFixed(3)})'`,
     );
   }
 
@@ -627,6 +674,7 @@ export interface ExportClipsOptions {
   sourcesById: Record<string, Uint8Array | File | string | null | undefined>;
   clips: VideoClip[];
   captions?: CaptionEntry[];
+  textOverlays?: TextOverlayEntry[];
   transitions?: TransitionEntry[];
   signal?: AbortSignal;
   onStage?: (stage: string) => void;
@@ -637,6 +685,7 @@ export async function exportClips({
   sourcesById,
   clips,
   captions = [],
+  textOverlays = [],
   transitions = [],
   signal,
   onStage,
@@ -654,14 +703,18 @@ export async function exportClips({
     transitions: normalizedTransitions,
     captions,
   });
+  const normalizedTextOverlays = buildExportTextOverlays(textOverlays);
   const resolvedTransitions = resolveTransitions(clips, normalizedTransitions);
   const uniqueSourceCount = new Set(clips.map((clip) => clip.sourceId)).size;
-  const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0 || uniqueSourceCount > 1;
+  const requiresFullRender = normalizedTransitions.length > 0
+    || captionWindows.length > 0
+    || normalizedTextOverlays.length > 0
+    || uniqueSourceCount > 1;
 
   const getSourceInput = (sourceId: string) => {
     const source = sourcesById[sourceId];
     if (!source) {
-      throw new Error(`Missing media for source ${sourceId}.`);
+      throw new Error(`Missing media for source ${sourceId}. Reload or re-upload this source before exporting.`);
     }
     return source;
   };
@@ -751,9 +804,9 @@ export async function exportClips({
     }
     reportOverallProgress(15);
 
-    const dimensionProbeSourceId = sourcesById[MAIN_SOURCE_ID]
-      ? MAIN_SOURCE_ID
-      : clips[0]?.sourceId;
+    const dimensionProbeSourceId = (sourcesById[MAIN_SOURCE_ID] ? MAIN_SOURCE_ID : null)
+      ?? clips.find((clip) => !!sourcesById[clip.sourceId])?.sourceId
+      ?? null;
     const dimensions = dimensionProbeSourceId
       ? await probeMediaInput(getSourceInput(dimensionProbeSourceId)).catch(() => ({ width: 0, height: 0 }))
       : { width: 0, height: 0 };
@@ -763,8 +816,8 @@ export async function exportClips({
     onStage?.(
       normalizedTransitions.length > 0
         ? 'Rendering boundary fades…'
-        : captionWindows.length > 0
-          ? 'Rendering clips for captions…'
+        : (captionWindows.length > 0 || normalizedTextOverlays.length > 0)
+          ? 'Rendering clips for overlays…'
           : requiresFullRender
             ? 'Rendering final video…'
             : 'Processing clips…',
@@ -823,30 +876,35 @@ export async function exportClips({
     let stitchedOutputName = segFiles[0];
     if (segFiles.length > 1) {
       phaseStart = 90;
-      phaseSpan = captionWindows.length > 0 ? 3 : 8;
+      phaseSpan = (captionWindows.length > 0 || normalizedTextOverlays.length > 0) ? 3 : 8;
       onStage?.('Concatenating clips…');
       const concatContent = segFiles.map((file) => `file '${file}'`).join('\n');
       const encoder = new TextEncoder();
-      stitchedOutputName = captionWindows.length > 0 ? 'export_stitched.mp4' : 'export_output.mp4';
+      stitchedOutputName = (captionWindows.length > 0 || normalizedTextOverlays.length > 0) ? 'export_stitched.mp4' : 'export_output.mp4';
       await ffmpeg.writeFile('export_concat.txt', encoder.encode(concatContent));
       await execOrThrow(ffmpeg, [
         '-f', 'concat',
         '-safe', '0',
         '-i', 'export_concat.txt',
         '-c', 'copy',
-        ...(captionWindows.length > 0 ? [] : ['-movflags', '+faststart']),
+        ...((captionWindows.length > 0 || normalizedTextOverlays.length > 0) ? [] : ['-movflags', '+faststart']),
         stitchedOutputName,
       ]);
     }
 
-    if (captionWindows.length > 0) {
+    if (captionWindows.length > 0 || normalizedTextOverlays.length > 0) {
       phaseStart = segFiles.length > 1 ? 93 : 90;
       phaseSpan = 6;
-      onStage?.('Rendering captions…');
-      const drawTextFilters = await writeCaptionTextFiles(ffmpeg, captionWindows);
+      onStage?.('Rendering timeline overlays…');
+      const captionFilters = captionWindows.length > 0
+        ? await writeCaptionTextFiles(ffmpeg, captionWindows)
+        : [];
+      const textOverlayFilters = normalizedTextOverlays.length > 0
+        ? await writeTextOverlayTextFiles(ffmpeg, normalizedTextOverlays, targetHeight)
+        : [];
       await execOrThrow(ffmpeg, [
         '-i', stitchedOutputName,
-        '-vf', drawTextFilters.join(','),
+        '-vf', [...captionFilters, ...textOverlayFilters].join(','),
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p',

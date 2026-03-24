@@ -407,7 +407,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
               id: source.id,
               storagePath: typeof source.storagePath === 'string' ? source.storagePath : null,
               assetId: typeof source.assetId === 'string' ? source.assetId : null,
-              status: source.status === 'pending' || source.status === 'indexing' || source.status === 'ready' || source.status === 'error'
+              status: source.status === 'pending' || source.status === 'indexing' || source.status === 'ready' || source.status === 'error' || source.status === 'missing'
                 ? source.status
                 : 'pending',
             })),
@@ -548,7 +548,13 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       const draft = drafts[index];
       const folder = !hadSources && index === 0 && source.isPrimary ? 'main' : 'sources';
       try {
-        const uploaded = await uploadProjectMedia(draft.file, targetProjectId, folder, draft.duration);
+        const uploaded = await uploadProjectMedia(
+          draft.file,
+          targetProjectId,
+          folder,
+          draft.duration,
+          folder === 'sources' ? source.id : undefined,
+        );
         updateSource(source.id, {
           storagePath: uploaded.storagePath,
           assetId: uploaded.assetId,
