@@ -4,10 +4,18 @@ import { useMemo, useRef } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import { formatTimeShort } from '@/lib/timelineUtils';
 
-function formatSourceStatus(status: string) {
-  if (status === 'ready') return 'Ready';
-  if (status === 'indexing') return 'Indexing';
+function formatSourceStatus(status: string, options?: {
+  isPlayable?: boolean;
+  isIndexReady?: boolean;
+  hasActiveAnalysis?: boolean;
+}) {
   if (status === 'error') return 'Issue';
+  if (options?.isIndexReady) return 'Ready';
+  if (options?.hasActiveAnalysis) return 'Indexing';
+  if (status === 'ready') return 'Ready';
+  if (status === 'indexing' && options?.isPlayable) return 'Ready';
+  if ((status === 'pending' || status === 'indexing') && options?.isPlayable) return 'Ready';
+  if (status === 'indexing') return 'Indexing';
   return 'Pending';
 }
 
@@ -19,19 +27,29 @@ export default function MediaPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const sources = useEditorStore((s) => s.sources);
   const sourceRuntimeById = useEditorStore((s) => s.sourceRuntimeById);
+  const sourceIndexFreshBySourceId = useEditorStore((s) => s.sourceIndexFreshBySourceId);
+  const sourceIndexAnalysisBySourceId = useEditorStore((s) => s.sourceIndexAnalysisBySourceId);
   const appendClipFromSource = useEditorStore((s) => s.appendClipFromSource);
 
   const sourceCards = useMemo(() => (
-    sources.map((source) => ({
-      ...source,
-      previewUrl: sourceRuntimeById[source.id]?.objectUrl || sourceRuntimeById[source.id]?.playerUrl || sourceRuntimeById[source.id]?.processingUrl || '',
-      isPlayable: Boolean(
-        sourceRuntimeById[source.id]?.objectUrl
-        || sourceRuntimeById[source.id]?.playerUrl
-        || sourceRuntimeById[source.id]?.file,
-      ),
-    }))
-  ), [sourceRuntimeById, sources]);
+    sources.map((source) => {
+      const runtime = sourceRuntimeById[source.id];
+      const freshness = sourceIndexFreshBySourceId[source.id];
+      const analysis = sourceIndexAnalysisBySourceId[source.id];
+      const isPlayable = Boolean(
+        runtime?.objectUrl
+        || runtime?.playerUrl
+        || runtime?.file,
+      );
+      return {
+        ...source,
+        previewUrl: runtime?.objectUrl || runtime?.playerUrl || runtime?.processingUrl || '',
+        isPlayable,
+        isIndexReady: freshness?.transcript === true && freshness?.overview === true,
+        hasActiveAnalysis: analysis?.status === 'queued' || analysis?.status === 'running',
+      };
+    })
+  ), [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: 'var(--bg-panel)' }}>
@@ -162,7 +180,11 @@ export default function MediaPanel({
                 {source.fileName || 'Source video'}
               </p>
               <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.72)', fontFamily: 'var(--font-serif)' }}>
-                {formatSourceStatus(source.status)}
+                {formatSourceStatus(source.status, {
+                  isPlayable: source.isPlayable,
+                  isIndexReady: source.isIndexReady,
+                  hasActiveAnalysis: source.hasActiveAnalysis,
+                })}
               </span>
             </div>
           </div>

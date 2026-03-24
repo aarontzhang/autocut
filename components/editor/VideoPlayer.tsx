@@ -414,14 +414,17 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const upcomingEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const spareLayerId = getOtherLayer(leadLayerId);
     const secondaryVideo = getVideoElement(spareLayerId);
+    const upcomingUsesDifferentSource = Boolean(
+      upcomingEntry && upcomingEntry.sourceId !== primaryEntry.sourceId,
+    );
     const shouldPreloadUpcomingLayer = Boolean(
       upcomingEntry
       && secondaryVideo
-      && (
-        upcomingEntry.sourceId !== primaryEntry.sourceId
-        || upcomingEntry.transitionIn
-        || primaryEntry.transitionOut
-      ),
+      // Fade-to-black transitions do not need a second element when both clips
+      // come from the same source file. Reusing one element avoids duplicate
+      // loads on the same URL, which can blank the preview after transitions
+      // are added between split clips.
+      && upcomingUsesDifferentSource,
     );
 
     if (
@@ -537,7 +540,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current = handoffTime;
       setCurrentTime(handoffTime);
       const nextSourceTime = getEntrySourceTime(nextEntry, handoffTime);
-      const shouldStayOnLeadLayer = nextEntry.sourceId === primaryEntry.sourceId && !nextEntry.transitionIn;
+      const shouldStayOnLeadLayer = nextEntry.sourceId === primaryEntry.sourceId;
 
       if (shouldStayOnLeadLayer) {
         if (Math.abs(primaryVideo.currentTime - nextSourceTime) > DRIFT_EPSILON) {
