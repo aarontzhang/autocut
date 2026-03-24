@@ -43,7 +43,7 @@ import {
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 import { buildClipSchedule, getTimelineDuration, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
-import { normalizeTextOverlayEntry } from './overlayTracks';
+import { normalizeTextOverlayEntry } from './textOverlays';
 
 export type { EditSnapshot } from './editActionUtils';
 

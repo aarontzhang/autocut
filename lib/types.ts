@@ -112,56 +112,12 @@ export interface MarkerEntry {
 
 export interface TextOverlayEntry {
   id?: string;
-  trackId?: string;
-  layer?: number;
   startTime: number;
   endTime: number;
   text: string;
   position: 'top' | 'center' | 'bottom';
   fontSize?: number;
 }
-
-export type OverlayTrackKind = 'text' | 'image';
-
-export interface OverlayTrack {
-  id: string;
-  kind: OverlayTrackKind;
-  label?: string;
-  order: number;
-}
-
-export interface ImageOverlayEntry {
-  id?: string;
-  trackId?: string;
-  layer?: number;
-  startTime: number;
-  endTime: number;
-  sourceId?: string | null;
-}
-
-export interface OverlayCompositionEntryBase {
-  id: string;
-  trackId: string;
-  trackKind: OverlayTrackKind;
-  trackOrder: number;
-  layer: number;
-  startTime: number;
-  endTime: number;
-}
-
-export interface TextOverlayCompositionEntry extends OverlayCompositionEntryBase {
-  type: 'text';
-  overlay: TextOverlayEntry;
-}
-
-export interface ImageOverlayCompositionEntry extends OverlayCompositionEntryBase {
-  type: 'image';
-  overlay: ImageOverlayEntry;
-}
-
-export type OverlayCompositionEntry =
-  | TextOverlayCompositionEntry
-  | ImageOverlayCompositionEntry;
 
 export interface ColorFilter {
   type: 'cinematic' | 'vintage' | 'warm' | 'cool' | 'bw' | 'none';

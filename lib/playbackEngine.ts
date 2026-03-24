@@ -12,7 +12,7 @@ function getClipDuration(clip: Pick<VideoClip, 'sourceDuration' | 'speed'>): num
 }
 
 function clampTransitionDuration(duration: number, fromClip: VideoClip, toClip: VideoClip): number {
-  const maxDuration = Math.max(0, Math.min(getClipDuration(fromClip), getClipDuration(toClip)) - 1e-3);
+  const maxDuration = Math.max(0, Math.min(getClipDuration(fromClip), getClipDuration(toClip)) * 2 - 1e-3);
   return Math.max(0, Math.min(duration, maxDuration));
 }
 
@@ -25,27 +25,56 @@ function getBoundaryIndexForTransition(
   transition: TransitionEntry,
   plainSchedule: ClipScheduleEntry[],
 ): number {
+  const boundaryCount = Math.max(0, plainSchedule.length - 1);
+  if (boundaryCount === 0) return -1;
+
   if (transition.afterClipId) {
     const clipIndex = clips.findIndex((clip) => clip.id === transition.afterClipId);
     if (clipIndex >= 0 && clipIndex < clips.length - 1) {
       return clipIndex;
     }
+    return -1;
   }
 
   const candidateTime = Number.isFinite(transition.atTime) ? transition.atTime : 0;
-  let bestIndex = -1;
-  let bestDistance = Number.POSITIVE_INFINITY;
+  const maxLegacyOffset = Number.isFinite(transition.duration)
+    ? Math.max(0, Number(transition.duration)) + 1e-3
+    : 1e-3;
+  let bestMatch: { index: number; delta: number } | null = null;
 
-  for (let index = 0; index < plainSchedule.length - 1; index += 1) {
+  for (let index = 0; index < boundaryCount; index += 1) {
     const boundaryTime = plainSchedule[index].timelineEnd;
-    const distance = Math.abs(boundaryTime - candidateTime);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = index;
+    const delta = boundaryTime - candidateTime;
+    if (delta < -1e-3 || delta > maxLegacyOffset) {
+      continue;
+    }
+    if (!bestMatch || delta < bestMatch.delta) {
+      bestMatch = { index, delta };
     }
   }
 
-  return bestIndex;
+  return bestMatch?.index ?? -1;
+}
+
+function buildPlainSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
+  const schedule: ClipScheduleEntry[] = [];
+  let cursor = 0;
+
+  for (const clip of clips) {
+    const duration = getClipDuration(clip);
+    schedule.push({
+      clipId: clip.id,
+      sourceId: clip.sourceId,
+      timelineStart: cursor,
+      timelineEnd: cursor + duration,
+      sourceStart: clip.sourceStart,
+      sourceDuration: clip.sourceDuration,
+      speed: clip.speed,
+    });
+    cursor += duration;
+  }
+
+  return schedule;
 }
 
 export function resolveTransitions(
@@ -54,7 +83,7 @@ export function resolveTransitions(
 ): ResolvedTransitionBoundary[] {
   if (clips.length < 2 || transitions.length === 0) return [];
 
-  const plainSchedule = buildClipSchedule(clips);
+  const plainSchedule = buildPlainSchedule(clips);
   const resolvedByBoundary = new Map<number, Omit<ResolvedTransitionBoundary, 'atTime'>>();
 
   for (const transition of transitions) {
@@ -80,19 +109,11 @@ export function resolveTransitions(
     });
   }
 
-  if (resolvedByBoundary.size === 0) return [];
-
-  const renderEntries = buildRenderTimeline(clips, Array.from(resolvedByBoundary.values()).map((boundary) => ({
-    id: boundary.id,
-    afterClipId: boundary.afterClipId,
-    atTime: 0,
-    type: boundary.type,
-    duration: boundary.duration,
-  })));
-
-  return renderEntries
-    .map((entry) => entry.transitionOut)
-    .filter((boundary): boundary is ResolvedTransitionBoundary => !!boundary)
+  return Array.from(resolvedByBoundary.entries())
+    .map(([boundaryIndex, boundary]) => ({
+      ...boundary,
+      atTime: plainSchedule[boundaryIndex].timelineEnd,
+    }))
     .sort((a, b) => a.atTime - b.atTime);
 }
 
@@ -115,82 +136,16 @@ export function buildRenderTimeline(
 ): RenderTimelineEntry[] {
   if (clips.length === 0) return [];
 
-  const plainSchedule: ClipScheduleEntry[] = [];
-  let plainCursor = 0;
-  for (const clip of clips) {
-    const duration = getClipDuration(clip);
-    plainSchedule.push({
-      clipId: clip.id,
-      sourceId: clip.sourceId,
-      timelineStart: plainCursor,
-      timelineEnd: plainCursor + duration,
-      sourceStart: clip.sourceStart,
-      sourceDuration: clip.sourceDuration,
-      speed: clip.speed,
-    });
-    plainCursor += duration;
-  }
+  const plainSchedule = buildPlainSchedule(clips);
+  const resolvedTransitions = resolveTransitions(clips, transitions);
+  const transitionOutByClipId = new Map(resolvedTransitions.map((boundary) => [boundary.fromClipId, boundary]));
+  const transitionInByClipId = new Map(resolvedTransitions.map((boundary) => [boundary.toClipId, boundary]));
 
-  const pendingByBoundary = new Map<number, Omit<ResolvedTransitionBoundary, 'atTime'>>();
-  for (const transition of transitions) {
-    const boundaryIndex = getBoundaryIndexForTransition(clips, transition, plainSchedule);
-    if (boundaryIndex < 0 || boundaryIndex >= clips.length - 1) continue;
-
-    const fromClip = clips[boundaryIndex];
-    const toClip = clips[boundaryIndex + 1];
-    const duration = clampTransitionDuration(
-      Number.isFinite(transition.duration) ? transition.duration : 0,
-      fromClip,
-      toClip,
-    );
-    if (duration <= 0) continue;
-
-    pendingByBoundary.set(boundaryIndex, {
-      id: transition.id,
-      afterClipId: fromClip.id,
-      type: normalizeTransitionType(transition.type),
-      duration,
-      fromClipId: fromClip.id,
-      toClipId: toClip.id,
-    });
-  }
-
-  const entries: RenderTimelineEntry[] = [];
-  let renderCursor = 0;
-
-  for (let index = 0; index < clips.length; index += 1) {
-    const clip = clips[index];
-    const duration = getClipDuration(clip);
-    const transitionIn = index > 0 ? entries[index - 1]?.transitionOut ?? null : null;
-    const timelineStart = index > 0
-      ? Math.max(0, renderCursor - (transitionIn?.duration ?? 0))
-      : 0;
-    const timelineEnd = timelineStart + duration;
-
-    const pendingOut = pendingByBoundary.get(index) ?? null;
-    const transitionOut = pendingOut
-      ? {
-          ...pendingOut,
-          atTime: Math.max(timelineStart, timelineEnd - pendingOut.duration),
-        }
-      : null;
-
-    entries.push({
-      clipId: clip.id,
-      sourceId: clip.sourceId,
-      timelineStart,
-      timelineEnd,
-      sourceStart: clip.sourceStart,
-      sourceDuration: clip.sourceDuration,
-      speed: clip.speed,
-      transitionIn,
-      transitionOut,
-    });
-
-    renderCursor = timelineEnd;
-  }
-
-  return entries;
+  return plainSchedule.map((entry) => ({
+    ...entry,
+    transitionIn: transitionInByClipId.get(entry.clipId) ?? null,
+    transitionOut: transitionOutByClipId.get(entry.clipId) ?? null,
+  }));
 }
 
 export function buildClipSchedule(
@@ -222,7 +177,7 @@ export function findRenderEntriesAtTime(
 ): RenderTimelineEntry[] {
   if (schedule.length === 0) return [];
 
-  const matches = schedule.filter((entry, index) => {
+  const match = schedule.find((entry, index) => {
     const isLastEntry = index === schedule.length - 1;
     return (
       timelineTime >= entry.timelineStart
@@ -230,14 +185,8 @@ export function findRenderEntriesAtTime(
     );
   });
 
-  if (matches.length > 0) {
-    return matches;
-  }
-
-  if (timelineTime >= schedule[schedule.length - 1].timelineEnd) {
-    return [schedule[schedule.length - 1]];
-  }
-
+  if (match) return [match];
+  if (timelineTime >= schedule[schedule.length - 1].timelineEnd) return [schedule[schedule.length - 1]];
   return [schedule[0]];
 }
 

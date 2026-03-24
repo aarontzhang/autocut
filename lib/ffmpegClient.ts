@@ -3,7 +3,7 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 import { buildCaptionRenderWindows, invertSegments } from './timelineUtils';
-import { normalizeTransitionEntries } from './playbackEngine';
+import { normalizeTransitionEntries, resolveTransitions } from './playbackEngine';
 import { CaptionEntry, TransitionEntry, VideoClip } from './types';
 import { MAIN_SOURCE_ID } from './sourceUtils';
 
@@ -309,9 +309,21 @@ function getClipExportState(clip: VideoClip) {
   };
 }
 
-function buildClipVideoFilterChain(clip: VideoClip, targetWidth: number, targetHeight: number): string[] {
+function buildClipVideoFilterChain(
+  clip: VideoClip,
+  targetWidth: number,
+  targetHeight: number,
+  options?: {
+    durationSeconds?: number;
+    extraFadeIn?: number;
+    extraFadeOut?: number;
+  },
+): string[] {
   const clipState = getClipExportState(clip);
   const vFilters: string[] = [];
+  const durationSeconds = Number.isFinite(options?.durationSeconds) ? Math.max(0, Number(options?.durationSeconds)) : 0;
+  const fadeInSeconds = Math.max(0, clipState.fadeIn, options?.extraFadeIn ?? 0);
+  const fadeOutSeconds = Math.max(0, clipState.fadeOut, options?.extraFadeOut ?? 0);
 
   if (clipState.speed !== 1.0) {
     vFilters.push(`setpts=(PTS-STARTPTS)/${clipState.speed}`);
@@ -333,6 +345,14 @@ function buildClipVideoFilterChain(clip: VideoClip, targetWidth: number, targetH
     }
   }
 
+  if (fadeInSeconds > 0) {
+    vFilters.push(`fade=t=in:st=0:d=${fadeInSeconds.toFixed(3)}`);
+  }
+  if (fadeOutSeconds > 0 && durationSeconds > 0) {
+    const fadeOutStart = Math.max(0, durationSeconds - fadeOutSeconds);
+    vFilters.push(`fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutSeconds.toFixed(3)}`);
+  }
+
   vFilters.push(
     `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease`,
     `pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2`,
@@ -344,9 +364,19 @@ function buildClipVideoFilterChain(clip: VideoClip, targetWidth: number, targetH
   return vFilters;
 }
 
-function buildClipAudioFilterChain(clip: VideoClip): string[] {
+function buildClipAudioFilterChain(
+  clip: VideoClip,
+  options?: {
+    durationSeconds?: number;
+    extraFadeIn?: number;
+    extraFadeOut?: number;
+  },
+): string[] {
   const clipState = getClipExportState(clip);
   const aFilters: string[] = ['asetpts=PTS-STARTPTS'];
+  const durationSeconds = Number.isFinite(options?.durationSeconds) ? Math.max(0, Number(options?.durationSeconds)) : 0;
+  const fadeInSeconds = Math.max(0, clipState.fadeIn, options?.extraFadeIn ?? 0);
+  const fadeOutSeconds = Math.max(0, clipState.fadeOut, options?.extraFadeOut ?? 0);
 
   if (clipState.speed !== 1.0) {
     let remainingSpeed = clipState.speed;
@@ -363,6 +393,14 @@ function buildClipAudioFilterChain(clip: VideoClip): string[] {
 
   if (clipState.volume !== 1.0) {
     aFilters.push(`volume=${clipState.volume.toFixed(3)}`);
+  }
+
+  if (fadeInSeconds > 0) {
+    aFilters.push(`afade=t=in:st=0:d=${fadeInSeconds.toFixed(3)}`);
+  }
+  if (fadeOutSeconds > 0 && durationSeconds > 0) {
+    const fadeOutStart = Math.max(0, durationSeconds - fadeOutSeconds);
+    aFilters.push(`afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutSeconds.toFixed(3)}`);
   }
 
   return aFilters;
@@ -616,6 +654,7 @@ export async function exportClips({
     transitions: normalizedTransitions,
     captions,
   });
+  const resolvedTransitions = resolveTransitions(clips, normalizedTransitions);
   const uniqueSourceCount = new Set(clips.map((clip) => clip.sourceId)).size;
   const requiresFullRender = normalizedTransitions.length > 0 || captionWindows.length > 0 || uniqueSourceCount > 1;
 
@@ -721,88 +760,47 @@ export async function exportClips({
     const targetWidth = toEvenDimension(dimensions.width || 1280, 1280);
     const targetHeight = toEvenDimension(dimensions.height || 720, 720);
 
-    if (requiresFullRender) {
-      onStage?.(
-        normalizedTransitions.length > 0 || captionWindows.length > 0
-          ? 'Rendering transitions and captions…'
-          : 'Rendering final video…',
-      );
-      const args: string[] = [];
-      const filterGraph: string[] = [];
-      const transitionByClipId = new Map(normalizedTransitions.map((transition) => [transition.afterClipId, transition]));
+    onStage?.(
+      normalizedTransitions.length > 0
+        ? 'Rendering boundary fades…'
+        : captionWindows.length > 0
+          ? 'Rendering clips for captions…'
+          : requiresFullRender
+            ? 'Rendering final video…'
+            : 'Processing clips…',
+    );
 
-      for (const clip of clips) {
-        const inputName = inputNameBySourceId.get(clip.sourceId);
-        if (!inputName) {
-          throw new Error(`Missing input for source ${clip.sourceId}.`);
-        }
-        args.push('-ss', String(clip.sourceStart), '-t', String(clip.sourceDuration), '-i', inputName);
+    const segFiles: string[] = [];
+    const processingSpan = clips.length > 0 ? 75 / clips.length : 75;
+    const transitionInByClipId = new Map(resolvedTransitions.map((transition) => [transition.toClipId, transition]));
+    const transitionOutByClipId = new Map(resolvedTransitions.map((transition) => [transition.fromClipId, transition]));
+
+    for (let i = 0; i < clips.length; i++) {
+      job.throwIfCancelled();
+      const clip = clips[i];
+      const segName = `export_seg${i}.mp4`;
+      const inputName = inputNameBySourceId.get(clip.sourceId);
+      if (!inputName) {
+        throw new Error(`Missing input for source ${clip.sourceId}.`);
       }
 
-      const clipDurations = clips.map((clip) => clip.sourceDuration / clip.speed);
-      let currentVideoLabel = '';
-      let currentAudioLabel = '';
-      let currentDuration = 0;
-
-      for (let index = 0; index < clips.length; index += 1) {
-        const clip = clips[index];
-        const videoLabel = `v${index}`;
-        const audioLabel = `a${index}`;
-        filterGraph.push(`[${index}:v]${buildClipVideoFilterChain(clip, targetWidth, targetHeight).join(',')}[${videoLabel}]`);
-        filterGraph.push(`[${index}:a]${buildClipAudioFilterChain(clip).join(',')}[${audioLabel}]`);
-
-        if (index === 0) {
-          currentVideoLabel = videoLabel;
-          currentAudioLabel = audioLabel;
-          currentDuration = clipDurations[index];
-          continue;
-        }
-
-        const transition = transitionByClipId.get(clips[index - 1].id);
-        if (transition) {
-          const nextVideoLabel = `vx${index}`;
-          const nextAudioLabel = `ax${index}`;
-          const trimmedIncomingAudioLabel = `at${index}`;
-          const offset = Math.max(0, currentDuration - transition.duration);
-          const incomingAudioTrim = Math.max(0, Math.min(clipDurations[index], transition.duration));
-          filterGraph.push(
-            `[${currentVideoLabel}][${videoLabel}]xfade=transition=fadeblack:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[${nextVideoLabel}]`,
-          );
-          filterGraph.push(
-            `[${audioLabel}]atrim=start=${incomingAudioTrim.toFixed(3)},asetpts=PTS-STARTPTS[${trimmedIncomingAudioLabel}]`,
-          );
-          filterGraph.push(
-            `[${currentAudioLabel}][${trimmedIncomingAudioLabel}]concat=n=2:v=0:a=1[${nextAudioLabel}]`,
-          );
-          currentVideoLabel = nextVideoLabel;
-          currentAudioLabel = nextAudioLabel;
-          currentDuration = currentDuration + clipDurations[index] - transition.duration;
-          continue;
-        }
-
-        const nextVideoLabel = `vc${index}`;
-        const nextAudioLabel = `ac${index}`;
-        filterGraph.push(`[${currentVideoLabel}][${currentAudioLabel}][${videoLabel}][${audioLabel}]concat=n=2:v=1:a=1[${nextVideoLabel}][${nextAudioLabel}]`);
-        currentVideoLabel = nextVideoLabel;
-        currentAudioLabel = nextAudioLabel;
-        currentDuration += clipDurations[index];
-      }
-
-      const drawTextFilters = await writeCaptionTextFiles(ffmpeg, captionWindows);
-      let finalVideoLabel = currentVideoLabel;
-      if (drawTextFilters.length > 0) {
-        const captionedVideoLabel = 'v_captioned';
-        filterGraph.push(`[${currentVideoLabel}]${drawTextFilters.join(',')}[${captionedVideoLabel}]`);
-        finalVideoLabel = captionedVideoLabel;
-      }
-
-      phaseStart = 20;
-      phaseSpan = 76;
-      await execOrThrow(ffmpeg, [
-        ...args,
-        '-filter_complex', filterGraph.join(';'),
-        '-map', `[${finalVideoLabel}]`,
-        '-map', `[${currentAudioLabel}]`,
+      const clipDurationSeconds = clip.sourceDuration / clip.speed;
+      const transitionInHalf = (transitionInByClipId.get(clip.id)?.duration ?? 0) / 2;
+      const transitionOutHalf = (transitionOutByClipId.get(clip.id)?.duration ?? 0) / 2;
+      const args: string[] = [
+        '-ss', String(clip.sourceStart),
+        '-t', String(clip.sourceDuration),
+        '-i', inputName,
+        '-vf', buildClipVideoFilterChain(clip, targetWidth, targetHeight, {
+          durationSeconds: clipDurationSeconds,
+          extraFadeIn: transitionInHalf,
+          extraFadeOut: transitionOutHalf,
+        }).join(','),
+        '-af', buildClipAudioFilterChain(clip, {
+          durationSeconds: clipDurationSeconds,
+          extraFadeIn: transitionInHalf,
+          extraFadeOut: transitionOutHalf,
+        }).join(','),
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p',
@@ -810,68 +808,61 @@ export async function exportClips({
         '-c:a', 'aac',
         '-ar', '48000',
         '-ac', '2',
-        '-movflags', '+faststart',
-        'export_output.mp4',
-      ]);
-    } else {
-      onStage?.('Processing clips…');
-      const segFiles: string[] = [];
-      const processingSpan = clips.length > 0 ? 75 / clips.length : 75;
+        '-avoid_negative_ts', 'make_zero',
+        segName,
+      ];
 
-      for (let i = 0; i < clips.length; i++) {
-        job.throwIfCancelled();
-        const clip = clips[i];
-        const segName = `export_seg${i}.mp4`;
-        const inputName = inputNameBySourceId.get(clip.sourceId);
-        if (!inputName) {
-          throw new Error(`Missing input for source ${clip.sourceId}.`);
-        }
-        const args: string[] = [
-          '-ss', String(clip.sourceStart),
-          '-t', String(clip.sourceDuration),
-          '-i', inputName,
-          '-vf', buildClipVideoFilterChain(clip, targetWidth, targetHeight).join(','),
-          '-af', buildClipAudioFilterChain(clip).join(','),
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-pix_fmt', 'yuv420p',
-          '-r', '30',
-          '-c:a', 'aac',
-          '-ar', '48000',
-          '-ac', '2',
-          '-avoid_negative_ts', 'make_zero',
-          segName,
-        ];
+      phaseStart = 15 + (processingSpan * i);
+      phaseSpan = processingSpan;
+      onStage?.(`Processing clip ${i + 1} of ${clips.length}…`);
+      await execOrThrow(ffmpeg, args);
+      segFiles.push(segName);
+      reportOverallProgress(phaseStart + phaseSpan);
+    }
 
-        phaseStart = 15 + (processingSpan * i);
-        phaseSpan = processingSpan;
-        onStage?.(`Processing clip ${i + 1} of ${clips.length}…`);
-        await execOrThrow(ffmpeg, args);
-        segFiles.push(segName);
-        reportOverallProgress(phaseStart + phaseSpan);
-      }
-
-      if (segFiles.length === 1) {
-        return createExportObjectUrl(ffmpeg, segFiles[0], reportOverallProgress, onStage);
-      }
-
+    let stitchedOutputName = segFiles[0];
+    if (segFiles.length > 1) {
       phaseStart = 90;
-      phaseSpan = 8;
+      phaseSpan = captionWindows.length > 0 ? 3 : 8;
       onStage?.('Concatenating clips…');
       const concatContent = segFiles.map((file) => `file '${file}'`).join('\n');
       const encoder = new TextEncoder();
+      stitchedOutputName = captionWindows.length > 0 ? 'export_stitched.mp4' : 'export_output.mp4';
       await ffmpeg.writeFile('export_concat.txt', encoder.encode(concatContent));
       await execOrThrow(ffmpeg, [
         '-f', 'concat',
         '-safe', '0',
         '-i', 'export_concat.txt',
         '-c', 'copy',
-        '-movflags', '+faststart',
-        'export_output.mp4',
+        ...(captionWindows.length > 0 ? [] : ['-movflags', '+faststart']),
+        stitchedOutputName,
       ]);
     }
 
-    return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+    if (captionWindows.length > 0) {
+      phaseStart = segFiles.length > 1 ? 93 : 90;
+      phaseSpan = 6;
+      onStage?.('Rendering captions…');
+      const drawTextFilters = await writeCaptionTextFiles(ffmpeg, captionWindows);
+      await execOrThrow(ffmpeg, [
+        '-i', stitchedOutputName,
+        '-vf', drawTextFilters.join(','),
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-r', '30',
+        '-c:a', 'copy',
+        '-movflags', '+faststart',
+        'export_output.mp4',
+      ]);
+      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+    }
+
+    if (stitchedOutputName === 'export_output.mp4') {
+      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+    }
+
+    return createExportObjectUrl(ffmpeg, stitchedOutputName, reportOverallProgress, onStage);
   } catch (error) {
     if (isFFmpegAbortError(error)) {
       throw createAbortError();

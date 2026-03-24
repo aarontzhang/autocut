@@ -1,5 +1,4 @@
 import { AIEditingSettings, ColorFilter, EditAction, MarkerEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
-import { DEFAULT_TEXT_OVERLAY_TRACK_ID } from '@/lib/overlayTracks';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -243,10 +242,6 @@ function sanitizeTextOverlay(overlay: unknown, videoDuration: number): TextOverl
   const position: TextOverlayEntry['position'] = candidate.position;
 
   return {
-    trackId: typeof candidate.trackId === 'string' && candidate.trackId.trim()
-      ? candidate.trackId.trim()
-      : DEFAULT_TEXT_OVERLAY_TRACK_ID,
-    layer: Number.isInteger(candidate.layer) ? Math.max(0, Number(candidate.layer)) : 0,
     startTime: range.start,
     endTime: range.end,
     text,

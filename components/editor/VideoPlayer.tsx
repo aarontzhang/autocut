@@ -6,9 +6,8 @@ import {
   buildRenderTimeline,
   findRenderEntriesAtTime,
 } from '@/lib/playbackEngine';
-import { buildOverlayComposition } from '@/lib/overlayTracks';
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
-import type { RenderTimelineEntry, ResolvedTransitionBoundary, VideoClip } from '@/lib/types';
+import type { RenderTimelineEntry, VideoClip } from '@/lib/types';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 
 export interface VideoPlayerHandle {
@@ -63,32 +62,42 @@ function getEntrySourceTime(entry: RenderTimelineEntry, timelineTime: number) {
   return entry.sourceStart + (clampedTimelineTime - entry.timelineStart) * entry.speed;
 }
 
-function getTransitionProgress(boundary: ResolvedTransitionBoundary, timelineTime: number) {
-  if (boundary.duration <= 0) return 1;
-  return Math.max(0, Math.min(1, (timelineTime - boundary.atTime) / boundary.duration));
-}
+function getBoundaryFadeState(entry: RenderTimelineEntry | null, timelineTime: number) {
+  if (!entry) return null;
 
-function getTransitionMix(boundary: ResolvedTransitionBoundary, timelineTime: number) {
-  const progress = getTransitionProgress(boundary, timelineTime);
-
-  if (progress < 0.5) {
-    return {
-      outgoingOpacity: 1 - progress * 2,
-      incomingOpacity: 0,
-      outgoingVolume: 1 - progress * 2,
-      incomingVolume: 0,
-      blackOpacity: progress * 2,
-      incomingClipPath: 'inset(0 0 0 0)',
-    };
+  if (entry.transitionOut) {
+    const halfDuration = entry.transitionOut.duration / 2;
+    if (halfDuration > 0) {
+      const fadeStart = entry.transitionOut.atTime - halfDuration;
+      if (timelineTime >= fadeStart && timelineTime < entry.transitionOut.atTime) {
+        const progress = Math.max(0, Math.min(1, (timelineTime - fadeStart) / halfDuration));
+        return {
+          boundary: entry.transitionOut,
+          phase: 'outgoing' as const,
+          blackOpacity: progress,
+          volumeMultiplier: 1 - progress,
+        };
+      }
+    }
   }
-  return {
-    outgoingOpacity: 0,
-    incomingOpacity: progress,
-    outgoingVolume: 0,
-    incomingVolume: progress,
-    blackOpacity: (1 - progress) * 2,
-    incomingClipPath: 'inset(0 0 0 0)',
-  };
+
+  if (entry.transitionIn) {
+    const halfDuration = entry.transitionIn.duration / 2;
+    if (halfDuration > 0) {
+      const fadeEnd = entry.transitionIn.atTime + halfDuration;
+      if (timelineTime >= entry.transitionIn.atTime && timelineTime < fadeEnd) {
+        const progress = Math.max(0, Math.min(1, (timelineTime - entry.transitionIn.atTime) / halfDuration));
+        return {
+          boundary: entry.transitionIn,
+          phase: 'incoming' as const,
+          blackOpacity: 1 - progress,
+          volumeMultiplier: progress,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 function ensureVideoElementSource(video: HTMLVideoElement, nextUrl: string) {
@@ -209,32 +218,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     [captionMaxCharsPerLine, manualCaptions],
   );
 
-  const currentTransition = useMemo(() => {
-    const activeEntries = findRenderEntriesAtTime(renderTimeline, currentTime);
-    if (activeEntries.length < 2) return null;
-    const incomingEntry = activeEntries[1];
-    return incomingEntry?.transitionIn ?? null;
-  }, [currentTime, renderTimeline]);
-  const activeEntriesAtCurrentTime = useMemo(
-    () => findRenderEntriesAtTime(renderTimeline, currentTime),
-    [currentTime, renderTimeline],
+  const activeEntriesAtCurrentTime = useMemo(() => (
+    findRenderEntriesAtTime(renderTimeline, currentTime)
+  ), [currentTime, renderTimeline]);
+  const activeEntryAtCurrentTime = activeEntriesAtCurrentTime[0] ?? null;
+  const currentBoundaryFade = useMemo(
+    () => getBoundaryFadeState(activeEntryAtCurrentTime, currentTime),
+    [activeEntryAtCurrentTime, currentTime],
   );
-  const primaryLayerSourceId = activeEntriesAtCurrentTime[0]?.sourceId ?? renderTimeline[0]?.sourceId ?? null;
-
-  const transitionMix = useMemo(
-    () => currentTransition ? getTransitionMix(currentTransition, currentTime) : null,
-    [currentTime, currentTransition],
-  );
+  const primaryLayerSourceId = activeEntryAtCurrentTime?.sourceId ?? renderTimeline[0]?.sourceId ?? null;
 
   const activeCaption = useMemo(
     () => captionWindows.find((window) => currentTime >= window.startTime && currentTime < window.endTime) ?? null,
     [captionWindows, currentTime],
   );
   const activeTextOverlays = useMemo(
-    () => buildOverlayComposition({
-      textOverlays,
-      currentTime,
-    }).flatMap((entry) => entry.type === 'text' ? [entry.overlay] : []),
+    () => textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime),
     [currentTime, textOverlays],
   );
 
@@ -412,8 +411,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     layerClipIdRef.current[leadLayerId] = primaryEntry.clipId;
 
     const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
-    const upcomingEntry = activeEntries[1]
-      ?? (primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null);
+    const upcomingEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const spareLayerId = getOtherLayer(leadLayerId);
     const secondaryVideo = getVideoElement(spareLayerId);
     const shouldPreloadUpcomingLayer = Boolean(
@@ -440,52 +438,25 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         secondaryVideo.currentTime = Math.max(0, upcomingSourceTime);
       }
       layerClipIdRef.current[spareLayerId] = upcomingEntry.clipId;
+      pauseVideo(secondaryVideo);
     } else {
       layerClipIdRef.current[spareLayerId] = null;
       layerSourceIdRef.current[spareLayerId] = null;
       pauseVideo(secondaryVideo);
     }
 
-    if (activeEntries.length < 2) {
-      applyClipEffects(primaryVideo, primaryClip, 1);
-      pauseInactiveVideo();
-      refreshLeadVideoState();
-      return;
+    const boundaryFade = getBoundaryFadeState(primaryEntry, timelineTime);
+    applyClipEffects(primaryVideo, primaryClip, boundaryFade?.volumeMultiplier ?? 1);
+
+    if (secondaryVideo) {
+      secondaryVideo.volume = 0;
     }
 
-    const incomingEntry = activeEntries[1];
-    const boundary = incomingEntry?.transitionIn;
-    const incomingClip = incomingEntry ? clipById.get(incomingEntry.clipId) : null;
-
-    if (!boundary || !incomingEntry || !incomingClip || !secondaryVideo) {
-      applyClipEffects(primaryVideo, primaryClip, 1);
-      pauseInactiveVideo();
-      refreshLeadVideoState();
-      return;
-    }
-
-    const incomingSourceTime = getEntrySourceTime(incomingEntry, timelineTime);
-    if (Math.abs(secondaryVideo.currentTime - incomingSourceTime) > DRIFT_EPSILON) {
-      secondaryVideo.currentTime = Math.max(0, incomingSourceTime);
-    }
-
-    // Keep transition audio as a single active stream to avoid repeated speech
-    // on jump-cut style transitions while still rendering the visual blend.
-    applyClipEffects(primaryVideo, primaryClip, 1);
-    applyClipEffects(secondaryVideo, incomingClip, 0);
-
-    if (options?.allowPlay && playbackIntentRef.current) {
-      if (primaryVideo.paused) {
-        primaryVideo.play().catch(() => {});
-      }
-      if (secondaryVideo.paused) {
-        secondaryVideo.play().catch(() => {});
-      }
-    } else {
-      pauseVideo(secondaryVideo);
+    if (options?.allowPlay && playbackIntentRef.current && primaryVideo.paused) {
+      primaryVideo.play().catch(() => {});
     }
     refreshLeadVideoState();
-  }, [applyClipEffects, clipById, ensureLayerSource, getVideoElement, maybePromotePreparedLayer, pauseInactiveVideo, pauseVideo, refreshLeadVideoState, renderTimeline, sourceById]);
+  }, [applyClipEffects, clipById, ensureLayerSource, getVideoElement, maybePromotePreparedLayer, pauseVideo, refreshLeadVideoState, renderTimeline, sourceById]);
 
   const syncAfterSourceLoad = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
     if (!video) return;
@@ -545,11 +516,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const primaryVideo = getLeadVideo();
     if (!primaryVideo || renderTimeline.length === 0) return;
 
-    const activeEntries = findRenderEntriesAtTime(renderTimeline, currentTimeRef.current);
-    const primaryEntry = activeEntries[0] ?? renderTimeline[0];
+    const primaryEntry = findRenderEntriesAtTime(renderTimeline, currentTimeRef.current)[0] ?? renderTimeline[0];
     const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
-    const nextEntry = activeEntries.find((entry) => entry.clipId !== primaryEntry.clipId)
-      ?? (primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null);
+    const nextEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const sourceTime = primaryVideo.currentTime;
     const entrySourceEnd = primaryEntry.sourceStart + primaryEntry.sourceDuration;
 
@@ -598,7 +567,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         pauseVideo(primaryVideo);
         setLeadLayerSafely(spareLayerId);
       } else {
+        const nextSource = sourceById.get(nextEntry.sourceId);
+        if (nextSource?.playerUrl) {
+          ensureLayerSource(leadLayerRef.current, nextEntry.sourceId, nextSource.playerUrl);
+        }
         primaryVideo.currentTime = Math.max(0, nextSourceTime);
+        layerClipIdRef.current[leadLayerRef.current] = nextEntry.clipId;
       }
 
       syncLayers(handoffTime, { allowPlay: true });
@@ -612,8 +586,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       pauseInactiveVideo();
       currentTimeRef.current = totalTimelineDuration;
       setCurrentTime(totalTimelineDuration);
+      syncLayers(totalTimelineDuration, { allowPlay: false });
     }
-  }, [getLeadVideo, getVideoElement, pauseInactiveVideo, pauseVideo, renderTimeline, setCurrentTime, setLeadLayerSafely, syncLayers, totalTimelineDuration]);
+  }, [ensureLayerSource, getLeadVideo, getVideoElement, pauseInactiveVideo, pauseVideo, renderTimeline, setCurrentTime, setLeadLayerSafely, sourceById, syncLayers, totalTimelineDuration]);
 
   useEffect(() => {
     playbackTickRef.current = handlePlaybackTick;
@@ -736,18 +711,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [getLeadVideo, pauseInactiveVideo, syncLayers]);
 
-  const primaryLayerOpacity = transitionMix
-    ? (leadLayer === 'primary' ? transitionMix.outgoingOpacity : transitionMix.incomingOpacity)
-    : (leadLayer === 'primary' ? 1 : 0);
-  const secondaryLayerOpacity = transitionMix
-    ? (leadLayer === 'secondary' ? transitionMix.outgoingOpacity : transitionMix.incomingOpacity)
-    : (leadLayer === 'secondary' ? 1 : 0);
-  const primaryLayerClipPath = transitionMix && leadLayer !== 'primary'
-    ? transitionMix.incomingClipPath
-    : 'inset(0 0 0 0)';
-  const secondaryLayerClipPath = transitionMix && leadLayer !== 'secondary'
-    ? transitionMix.incomingClipPath
-    : 'inset(0 0 0 0)';
+  const primaryLayerOpacity = leadLayer === 'primary' ? 1 : 0;
+  const secondaryLayerOpacity = leadLayer === 'secondary' ? 1 : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -777,7 +742,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               objectFit: 'contain',
               pointerEvents: 'none',
               opacity: primaryLayerOpacity,
-              clipPath: primaryLayerClipPath,
             }}
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
@@ -839,7 +803,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               objectFit: 'contain',
               pointerEvents: 'none',
               opacity: secondaryLayerOpacity,
-              clipPath: secondaryLayerClipPath,
             }}
             muted={false}
             playsInline
@@ -894,13 +857,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
           />
 
-          {transitionMix && transitionMix.blackOpacity > 0 && (
+          {currentBoundaryFade && currentBoundaryFade.blackOpacity > 0 && (
             <div
               style={{
                 position: 'absolute',
                 inset: 0,
                 background: '#000',
-                opacity: transitionMix.blackOpacity,
+                opacity: currentBoundaryFade.blackOpacity,
                 pointerEvents: 'none',
               }}
             />

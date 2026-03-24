@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
-import { normalizeTextOverlayEntry } from './overlayTracks';
+import { normalizeTextOverlayEntry } from './textOverlays';
 import { buildCaptionEntriesFromWords, projectCaptionWordsToTimeline } from './timelineUtils';
 import type {
   AppliedActionRecord,
