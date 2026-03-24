@@ -43,6 +43,7 @@ import {
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 import { buildClipSchedule, getTimelineDuration, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
+import { normalizeTextOverlayEntry } from './overlayTracks';
 
 export type { EditSnapshot } from './editActionUtils';
 
@@ -263,11 +264,12 @@ function normalizeCaptionEntry(
 }
 
 function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEntry | null {
+  const rawType = entry.type;
   if (
-    entry.type !== 'crossfade'
-    && entry.type !== 'fade_black'
-    && entry.type !== 'dissolve'
-    && entry.type !== 'wipe'
+    rawType !== 'fade_black'
+    && rawType !== 'crossfade'
+    && rawType !== 'dissolve'
+    && rawType !== 'wipe'
   ) {
     return null;
   }
@@ -277,7 +279,7 @@ function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEn
     id: typeof entry.id === 'string' ? entry.id : undefined,
     afterClipId: typeof entry.afterClipId === 'string' ? entry.afterClipId : undefined,
     atTime,
-    type: entry.type,
+    type: 'fade_black',
     duration: Math.max(0.05, entry.duration!),
   };
 }
@@ -536,7 +538,7 @@ export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   },
   transitions: {
     defaultDuration: 1,
-    defaultType: 'crossfade',
+    defaultType: 'fade_black',
   },
   textOverlays: {
     defaultPosition: 'bottom',
@@ -549,11 +551,17 @@ function mergeAISettings(
   patch?: Partial<AIEditingSettings>,
 ): AIEditingSettings {
   if (!patch) return current;
+  const normalizedTransitionPatch = patch.transitions
+    ? {
+        ...patch.transitions,
+        ...(patch.transitions.defaultType ? { defaultType: 'fade_black' as const } : {}),
+      }
+    : undefined;
   return {
     silenceRemoval: { ...current.silenceRemoval, ...patch.silenceRemoval },
     frameInspection: { ...current.frameInspection, ...patch.frameInspection },
     captions: { ...current.captions, ...patch.captions },
-    transitions: { ...current.transitions, ...patch.transitions },
+    transitions: { ...current.transitions, ...normalizedTransitionPatch },
     textOverlays: { ...current.textOverlays, ...patch.textOverlays },
   };
 }
@@ -1933,7 +1941,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         .filter((entry): entry is CaptionEntry => !!entry),
       transitions: normalizedTransitions,
       markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
-      textOverlays: (editState.textOverlays as TextOverlayEntry[] | undefined) ?? [],
+      textOverlays: ((editState.textOverlays as Partial<TextOverlayEntry>[] | undefined) ?? [])
+        .map((entry) => normalizeTextOverlayEntry(entry))
+        .filter((entry): entry is TextOverlayEntry => !!entry),
       messages: ((editState.messages as ChatMessage[] | undefined) ?? []).map((message) => ({
         ...message,
         requestChainId: typeof message.requestChainId === 'string' ? message.requestChainId : undefined,

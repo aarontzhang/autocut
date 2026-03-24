@@ -6,6 +6,7 @@ import {
   buildRenderTimeline,
   findRenderEntriesAtTime,
 } from '@/lib/playbackEngine';
+import { buildOverlayComposition } from '@/lib/overlayTracks';
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
 import type { RenderTimelineEntry, ResolvedTransitionBoundary, VideoClip } from '@/lib/types';
 import { resolveProjectSources } from '@/lib/sourceMedia';
@@ -70,57 +71,22 @@ function getTransitionProgress(boundary: ResolvedTransitionBoundary, timelineTim
 function getTransitionMix(boundary: ResolvedTransitionBoundary, timelineTime: number) {
   const progress = getTransitionProgress(boundary, timelineTime);
 
-  if (boundary.type === 'fade_black') {
-    if (progress < 0.5) {
-      return {
-        outgoingOpacity: 1 - progress * 2,
-        incomingOpacity: 0,
-        outgoingVolume: 1 - progress * 2,
-        incomingVolume: 0,
-        blackOpacity: progress * 1.7,
-        incomingClipPath: 'inset(0 0 0 0)',
-      };
-    }
+  if (progress < 0.5) {
     return {
-      outgoingOpacity: 0,
-      incomingOpacity: (progress - 0.5) * 2,
-      outgoingVolume: 0,
-      incomingVolume: (progress - 0.5) * 2,
-      blackOpacity: (1 - progress) * 1.7,
+      outgoingOpacity: 1 - progress * 2,
+      incomingOpacity: 0,
+      outgoingVolume: 1 - progress * 2,
+      incomingVolume: 0,
+      blackOpacity: progress * 2,
       incomingClipPath: 'inset(0 0 0 0)',
     };
   }
-
-  if (boundary.type === 'wipe') {
-    return {
-      outgoingOpacity: 1,
-      incomingOpacity: 1,
-      outgoingVolume: 1 - progress,
-      incomingVolume: progress,
-      blackOpacity: 0,
-      incomingClipPath: `inset(0 ${Math.max(0, (1 - progress) * 100)}% 0 0)`,
-    };
-  }
-
-  if (boundary.type === 'dissolve') {
-    const easedIn = Math.pow(progress, 0.85);
-    const easedOut = Math.pow(1 - progress, 1.1);
-    return {
-      outgoingOpacity: easedOut,
-      incomingOpacity: easedIn,
-      outgoingVolume: Math.max(0, 1 - progress * 1.1),
-      incomingVolume: Math.min(1, progress * 1.1),
-      blackOpacity: 0,
-      incomingClipPath: 'inset(0 0 0 0)',
-    };
-  }
-
   return {
-    outgoingOpacity: 1 - progress,
+    outgoingOpacity: 0,
     incomingOpacity: progress,
-    outgoingVolume: 1 - progress,
+    outgoingVolume: 0,
     incomingVolume: progress,
-    blackOpacity: 0,
+    blackOpacity: (1 - progress) * 2,
     incomingClipPath: 'inset(0 0 0 0)',
   };
 }
@@ -264,7 +230,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     () => captionWindows.find((window) => currentTime >= window.startTime && currentTime < window.endTime) ?? null,
     [captionWindows, currentTime],
   );
-  const activeTextOverlays = textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime);
+  const activeTextOverlays = useMemo(
+    () => buildOverlayComposition({
+      textOverlays,
+      currentTime,
+    }).flatMap((entry) => entry.type === 'text' ? [entry.overlay] : []),
+    [currentTime, textOverlays],
+  );
 
   useEffect(() => {
     currentTimeRef.current = currentTime;

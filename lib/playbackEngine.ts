@@ -16,6 +16,10 @@ function clampTransitionDuration(duration: number, fromClip: VideoClip, toClip: 
   return Math.max(0, Math.min(duration, maxDuration));
 }
 
+function normalizeTransitionType(type: TransitionEntry['type'] | string | undefined): TransitionEntry['type'] {
+  return type === 'fade_black' ? 'fade_black' : 'fade_black';
+}
+
 function getBoundaryIndexForTransition(
   clips: VideoClip[],
   transition: TransitionEntry,
@@ -69,7 +73,7 @@ export function resolveTransitions(
     resolvedByBoundary.set(boundaryIndex, {
       id: transition.id,
       afterClipId: fromClip.id,
-      type: transition.type,
+      type: normalizeTransitionType(transition.type),
       duration,
       fromClipId: fromClip.id,
       toClipId: toClip.id,
@@ -144,7 +148,7 @@ export function buildRenderTimeline(
     pendingByBoundary.set(boundaryIndex, {
       id: transition.id,
       afterClipId: fromClip.id,
-      type: transition.type,
+      type: normalizeTransitionType(transition.type),
       duration,
       fromClipId: fromClip.id,
       toClipId: toClip.id,

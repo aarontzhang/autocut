@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
+import { normalizeTextOverlayEntry } from './overlayTracks';
 import { buildCaptionEntriesFromWords, projectCaptionWordsToTimeline } from './timelineUtils';
 import type {
   AppliedActionRecord,
@@ -519,12 +520,19 @@ export function applyActionToSnapshot(
   if (resolvedAction.type === 'add_text_overlay') {
     return {
       ...snapshot,
-      textOverlays: [...snapshot.textOverlays, ...(resolvedAction.textOverlays ?? []).map(overlay => ({ ...overlay, id: uuidv4() }))],
+      textOverlays: [
+        ...snapshot.textOverlays,
+        ...(resolvedAction.textOverlays ?? [])
+          .map((overlay) => normalizeTextOverlayEntry(overlay))
+          .filter((overlay): overlay is TextOverlayEntry => !!overlay)
+          .map((overlay) => ({ ...overlay, id: uuidv4() })),
+      ],
     };
   }
 
   if (resolvedAction.type === 'replace_text_overlay') {
-    const replacement = resolvedAction.textOverlays?.[0];
+    const replacementSource = resolvedAction.textOverlays?.[0];
+    const replacement = replacementSource ? normalizeTextOverlayEntry(replacementSource) : null;
     const overlayIndex = resolvedAction.overlayIndex ?? 0;
     if (!replacement || overlayIndex >= snapshot.textOverlays.length) return snapshot;
     const textOverlays = [...snapshot.textOverlays];

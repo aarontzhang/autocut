@@ -763,16 +763,10 @@ export async function exportClips({
           const nextVideoLabel = `vx${index}`;
           const nextAudioLabel = `ax${index}`;
           const trimmedIncomingAudioLabel = `at${index}`;
-          const xfadeTransition = (
-            transition.type === 'crossfade' ? 'fade'
-              : transition.type === 'fade_black' ? 'fadeblack'
-                : transition.type === 'dissolve' ? 'dissolve'
-                  : 'wipeleft'
-          );
           const offset = Math.max(0, currentDuration - transition.duration);
           const incomingAudioTrim = Math.max(0, Math.min(clipDurations[index], transition.duration));
           filterGraph.push(
-            `[${currentVideoLabel}][${videoLabel}]xfade=transition=${xfadeTransition}:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[${nextVideoLabel}]`,
+            `[${currentVideoLabel}][${videoLabel}]xfade=transition=fadeblack:duration=${transition.duration.toFixed(3)}:offset=${offset.toFixed(3)}[${nextVideoLabel}]`,
           );
           filterGraph.push(
             `[${audioLabel}]atrim=start=${incomingAudioTrim.toFixed(3)},asetpts=PTS-STARTPTS[${trimmedIncomingAudioLabel}]`,

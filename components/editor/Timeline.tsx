@@ -12,6 +12,7 @@ import {
   mapTimelineTimeAcrossSnapshots,
 } from '@/lib/timelineUtils';
 import { buildClipSchedule, findTimelineEntryAtTime, getTimelineDuration } from '@/lib/playbackEngine';
+import { buildOverlayComposition, buildOverlayTracks, getOverlayTrackLabel } from '@/lib/overlayTracks';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getReviewOverlayDescriptors } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
@@ -228,9 +229,31 @@ export default function Timeline({
     [activeReviewSession],
   );
   const hasCaptions = captions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'caption');
-  const hasTextOverlays = textOverlays.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'text');
   const hasTransitions = transitions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'transition');
   const cutReviewOverlays = reviewOverlays.filter((overlay) => overlay.kind === 'cut');
+  const overlayTracks = useMemo(
+    () => buildOverlayTracks({ textOverlays }),
+    [textOverlays],
+  );
+  const textOverlayEntriesByTrack = useMemo(() => {
+    const map = new Map<string, typeof textOverlays>();
+    buildOverlayComposition({ textOverlays }).forEach((entry) => {
+      if (entry.type !== 'text') return;
+      const existing = map.get(entry.trackId) ?? [];
+      map.set(entry.trackId, [...existing, entry.overlay]);
+    });
+    return map;
+  }, [textOverlays]);
+  const visibleTextOverlayTracks = useMemo(
+    () => overlayTracks.filter((track) => (
+      track.kind === 'text'
+      && (
+        (textOverlayEntriesByTrack.get(track.id)?.length ?? 0) > 0
+        || reviewOverlays.some((overlay) => overlay.kind === 'text')
+      )
+    )),
+    [overlayTracks, reviewOverlays, textOverlayEntriesByTrack],
+  );
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -553,7 +576,9 @@ export default function Timeline({
           <TrackHeader icon={<VideoIcon />} label="V1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           {hasCaptions && <EffectHeader label="CC" color="var(--caption-clip)" />}
-          {hasTextOverlays && <EffectHeader label="Text" color="var(--text-clip)" />}
+          {visibleTextOverlayTracks.map((track) => (
+            <EffectHeader key={track.id} label={getOverlayTrackLabel(track)} color="var(--text-clip)" />
+          ))}
           {hasTransitions && <EffectHeader label="Trans." color="rgba(255,255,255,0.5)" />}
         </div>
 
@@ -923,9 +948,9 @@ export default function Timeline({
             </EffectTrackRow>
           )}
 
-          {hasTextOverlays && (
-            <EffectTrackRow height={EFFECT_TRACK_H}>
-              {textOverlays.map((overlay) => {
+          {visibleTextOverlayTracks.map((track) => (
+            <EffectTrackRow key={track.id} height={EFFECT_TRACK_H}>
+              {(textOverlayEntriesByTrack.get(track.id) ?? []).map((overlay) => {
                 const isSelected = selectedItem?.type === 'text' && selectedItem.id === overlay.id;
                 return (
                   <button
@@ -991,7 +1016,7 @@ export default function Timeline({
                   );
                 })}
             </EffectTrackRow>
-          )}
+          ))}
 
           {hasTransitions && (
             <EffectTrackRow height={EFFECT_TRACK_H}>

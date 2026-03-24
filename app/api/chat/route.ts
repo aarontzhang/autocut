@@ -113,7 +113,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 
 ### 9. Transitions (add_transition)
 - Add a transition effect at a specific timeline time
-- Types: "crossfade", "fade_black", "dissolve", "wipe"
+- Types: "fade_black"
 - Use when user says: "add a fade between clips", "transition at 0:30", etc.
 - Use the transition defaults from context unless the user asks for something different.
 
@@ -191,7 +191,7 @@ Transcribe:
 <action>{"type":"transcribe_request","segments":[{"startTime":0,"endTime":60}],"message":"Transcribing the audio."}</action>
 
 Transition:
-<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"crossfade","duration":1.0}],"message":"Added crossfade at 0:30."}</action>
+<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"Added fade to black at 0:30."}</action>
 
 Markers:
 <action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review."}</action>
@@ -275,7 +275,7 @@ const DEFAULT_SETTINGS: AIEditingSettings = {
   },
   transitions: {
     defaultDuration: 1,
-    defaultType: 'crossfade',
+    defaultType: 'fade_black',
   },
   textOverlays: {
     defaultPosition: 'bottom',
@@ -284,11 +284,17 @@ const DEFAULT_SETTINGS: AIEditingSettings = {
 };
 
 function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
+  const normalizedTransitionPatch = patch?.transitions
+    ? {
+        ...patch.transitions,
+        ...(patch.transitions.defaultType ? { defaultType: 'fade_black' as const } : {}),
+      }
+    : undefined;
   return {
     silenceRemoval: { ...DEFAULT_SETTINGS.silenceRemoval, ...patch?.silenceRemoval },
     frameInspection: { ...DEFAULT_SETTINGS.frameInspection, ...patch?.frameInspection },
     captions: { ...DEFAULT_SETTINGS.captions, ...patch?.captions },
-    transitions: { ...DEFAULT_SETTINGS.transitions, ...patch?.transitions },
+    transitions: { ...DEFAULT_SETTINGS.transitions, ...normalizedTransitionPatch },
     textOverlays: { ...DEFAULT_SETTINGS.textOverlays, ...patch?.textOverlays },
   };
 }
@@ -305,6 +311,8 @@ type RichChatTurn = ChatTurn & {
 };
 
 const MAX_TRANSCRIPT_LINES = 160;
+const MAX_PROMPT_OVERVIEW_FRAMES = 40;
+const MAX_PROMPT_DENSE_FRAMES = 24;
 
 function isVisualSearchSession(value: unknown): value is VisualSearchSession {
   if (!value || typeof value !== 'object') return false;
@@ -390,6 +398,85 @@ function selectRelevantTranscriptLines(
       .join('\n'),
     truncated: true,
   };
+}
+
+function getFrameTimelinePosition(frame: IndexedVideoFrame): number {
+  return typeof frame.projectedTimelineTime === 'number'
+    ? frame.projectedTimelineTime
+    : frame.timelineTime;
+}
+
+function scoreFrameForPrompt(
+  frame: IndexedVideoFrame,
+  focusWindow: TranscriptWindow | null,
+  queryTokens: Set<string>,
+): number {
+  let score = 0;
+  const timelineTime = getFrameTimelinePosition(frame);
+
+  if (focusWindow) {
+    if (timelineTime >= focusWindow.startTime && timelineTime <= focusWindow.endTime) {
+      score += 10;
+    } else if (timelineTime >= focusWindow.startTime - 2 && timelineTime <= focusWindow.endTime + 2) {
+      score += 4;
+    }
+  }
+
+  if (frame.visibleOnTimeline !== false) score += 1;
+  if (frame.sampleKind === 'scene_rep') score += 0.75;
+  if (frame.kind === 'dense') score += 2;
+
+  const descriptionTokens = new Set(tokenizeForRetrieval(frame.description ?? ''));
+  for (const token of queryTokens) {
+    if (descriptionTokens.has(token)) {
+      score += 2;
+    }
+  }
+
+  return score;
+}
+
+function selectRelevantFramesForPrompt(params: {
+  frames: IndexedVideoFrame[];
+  latestUserMessage: string;
+  markers: Array<{
+    number?: number;
+    timelineTime?: number;
+    linkedRange?: { startTime?: number; endTime?: number } | null;
+  }>;
+}): IndexedVideoFrame[] {
+  const denseFrames = params.frames
+    .filter((frame) => frame.kind === 'dense')
+    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
+  const overviewFrames = params.frames
+    .filter((frame) => frame.kind === 'overview')
+    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
+
+  const focusWindow = resolveTranscriptWindow({
+    latestUserMessage: params.latestUserMessage,
+    frames: params.frames,
+    markers: params.markers,
+  });
+  const queryTokens = new Set(tokenizeForRetrieval(params.latestUserMessage));
+
+  const scoredOverview = overviewFrames
+    .map((frame, index) => ({
+      frame,
+      index,
+      score: scoreFrameForPrompt(frame, focusWindow, queryTokens),
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, MAX_PROMPT_OVERVIEW_FRAMES)
+    .map((entry) => entry.frame)
+    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
+
+  const selectedDense = denseFrames.length <= MAX_PROMPT_DENSE_FRAMES
+    ? denseFrames
+    : denseFrames
+        .filter((_, index) => index % Math.ceil(denseFrames.length / MAX_PROMPT_DENSE_FRAMES) === 0)
+        .slice(0, MAX_PROMPT_DENSE_FRAMES);
+
+  return [...scoredOverview, ...selectedDense];
 }
 
 type TranscriptTimelineLine = {
@@ -1144,6 +1231,19 @@ function isLikelyActionableRequest(message: string): boolean {
   return /\b(remove|cut|trim|delete|find|locate|where|when|mark|marker|bookmark|tag|place|caption|add|transcribe|split|move|set|speed|mute|fade|inspect|check)\b/.test(normalized);
 }
 
+function buildExplicitActionFailure(
+  latestUserMessage: string,
+  continuation: RequestChainContinuationPayload | null,
+): EditAction {
+  const actionable = isLikelyActionableRequest(latestUserMessage) || Boolean(continuation);
+  return {
+    type: 'none',
+    message: actionable
+      ? 'I could not produce a concrete edit or tool request from the current evidence.'
+      : 'I could not complete that request.',
+  };
+}
+
 function inferMarkerActionFromEvidence(
   latestUserMessage: string,
   message: string,
@@ -1206,8 +1306,19 @@ function shouldHideInternalReasoning(message: string): boolean {
 }
 
 function buildUserFacingAssistantMessage(message: string, action: EditAction | null): string {
-  if (action && action.type !== 'none') {
-    return action.message.trim();
+  if (action) {
+    if (action.type !== 'none') {
+      return action.message.trim();
+    }
+
+    const normalized = message.trim().toLowerCase();
+    if (
+      !normalized
+      || shouldHideInternalReasoning(normalized)
+      || /\b(i('| wi)?ll|let me|going to|i can do that|i can help with that)\b/.test(normalized)
+    ) {
+      return action.message.trim();
+    }
   }
 
   const trimmed = message.trim();
@@ -1407,7 +1518,6 @@ export async function POST(req: NextRequest) {
     const latestUserMessage = [...normalizedMessages].reverse().find((message) => message.role === 'user')?.content ?? '';
     const continuation = parseRequestChainContinuationMessage(latestUserMessage);
     const effectiveLatestUserMessage = findEffectiveLatestUserMessage(normalizedMessages, continuation);
-    const requestFrames = ((context?.frames as IndexedVideoFrame[] | undefined) ?? []);
     const taskState = buildConversationTaskState(richMessages);
     const settings = mergeSettings(context?.settings as Partial<AIEditingSettings> | undefined);
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}
@@ -1426,6 +1536,19 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const clipSummaries = ((context?.clips && Array.isArray(context.clips) ? context.clips : []) as ClipSummary[])
       .filter((clip) => clip.sourceDuration >= MIN_CHAT_CLIP_DURATION_SECONDS);
+    const availableMarkersForPrompt = Array.isArray(context?.markers)
+      ? (context.markers as Array<{
+          number?: number;
+          timelineTime?: number;
+          linkedRange?: { startTime?: number; endTime?: number } | null;
+        }>)
+          .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
+      : [];
+    const promptFrames = selectRelevantFramesForPrompt({
+      frames: ((context?.frames as IndexedVideoFrame[] | undefined) ?? []),
+      latestUserMessage: effectiveLatestUserMessage,
+      markers: availableMarkersForPrompt,
+    });
     const frameCoverage = context?.frameCoverage && typeof context.frameCoverage === 'object'
       ? context.frameCoverage as {
           totalOverviewFrames?: unknown;
@@ -1621,18 +1744,10 @@ Honor these defaults unless the user explicitly asks for something different in 
     const silenceCandidates = sanitizeSilenceCandidates(context?.silenceCandidates, Number(context?.videoDuration ?? 0));
     contextLines.push(...formatSilenceCandidatesContext(silenceCandidates));
     if (context?.transcript) {
-      const availableMarkers = Array.isArray(context?.markers)
-        ? (context.markers as Array<{
-            number?: number;
-            timelineTime?: number;
-            linkedRange?: { startTime?: number; endTime?: number } | null;
-          }>)
-            .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
-        : [];
       const transcriptWindow = resolveTranscriptWindow({
         latestUserMessage: effectiveLatestUserMessage,
-        frames: requestFrames,
-        markers: availableMarkers,
+        frames: promptFrames,
+        markers: availableMarkersForPrompt,
       });
       const transcriptExcerpt = transcriptWindow
         ? selectTranscriptLinesForWindow(
@@ -1694,7 +1809,7 @@ Honor these defaults unless the user explicitly asks for something different in 
 
     const contextContent: Anthropic.ContentBlockParam[] = [];
 
-    const frames = requestFrames;
+    const frames = promptFrames;
     const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
     const overviewFrameNote = overviewFrames.length > 0
       ? `\n[Representative frame summaries: showing ${overviewFrames.length} coarse frames]\n` +
@@ -1732,6 +1847,9 @@ Honor these defaults unless the user explicitly asks for something different in 
       validatedAction,
       validationContext.videoDuration,
     );
+    const failureAction = isLikelyActionableRequest(effectiveLatestUserMessage) || Boolean(continuation)
+      ? buildExplicitActionFailure(effectiveLatestUserMessage, continuation)
+      : null;
     const inferredAction = reconciledAction && reconciledAction.type !== 'none'
       ? reconciledAction
       : inferDeleteRangeActionFromNarration(
@@ -1743,8 +1861,8 @@ Honor these defaults unless the user explicitly asks for something different in 
           message,
           latestAssistantEvidence,
           validationContext.videoDuration,
-        ) ?? reconciledAction;
-    const action = validateEditAction(inferredAction, validationContext);
+        ) ?? failureAction;
+    const action = validateEditAction(inferredAction, validationContext) ?? failureAction;
     const userFacingMessage = buildUserFacingAssistantMessage(message, action);
     return NextResponse.json({
       message: userFacingMessage,

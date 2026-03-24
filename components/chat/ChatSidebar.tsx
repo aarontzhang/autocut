@@ -108,6 +108,7 @@ type AnalysisStatusCard = {
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
+const MAX_CHAIN_CHAT_ROUNDS = 4;
 const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
 const MAX_CHAT_OVERVIEW_FRAMES = 96;
 
@@ -3440,7 +3441,7 @@ export default function ChatSidebar() {
     let nextHistory = [...history];
     let producedVisibleResponse = false;
 
-    for (let round = 0; round < 2; round++) {
+    for (let round = 0; round < MAX_CHAIN_CHAT_ROUNDS; round++) {
       if (!initialIndexingReady) break;
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
@@ -3543,6 +3544,50 @@ export default function ChatSidebar() {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
       const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
+      const duplicateCompletedAction = requestChainId && action && action.type !== 'none' && chainState
+        ? chainState.completedActions.find((completedAction) => actionsMatch(completedAction, action)) ?? null
+        : null;
+
+      if (duplicateCompletedAction && round < MAX_CHAIN_CHAT_ROUNDS - 1) {
+        const requestChainKey = requestChainId;
+        const duplicateAction = action;
+        if (!requestChainKey || !duplicateAction || duplicateAction.type === 'none') {
+          continue;
+        }
+        const nextChainState = updateRequestChainState(requestChainKey, (current) => ({
+          ...current,
+          duplicateRerunCount: current.duplicateRerunCount + 1,
+          duplicateActionBlacklist: current.duplicateActionBlacklist.includes(duplicateAction.type)
+            ? current.duplicateActionBlacklist
+            : [...current.duplicateActionBlacklist, duplicateAction.type],
+        }));
+
+        if (nextChainState) {
+          nextHistory = [
+            ...nextHistory,
+            {
+              role: 'assistant',
+              content: assistantMessage,
+              requestChainId: requestChainKey,
+              action: duplicateAction,
+              actionType: duplicateAction.type,
+              actionMessage: duplicateAction.message,
+              actionStatus: 'completed',
+              actionResult: 'Duplicate of an already completed chain step.',
+            },
+            {
+              role: 'user',
+              content: buildContinuationPayload(
+                nextChainState,
+                'duplicate_action_retry',
+                'That action is already complete. Continue only the unfinished objective with a different next step or return an explicit failure.',
+              ),
+              requestChainId: requestChainKey,
+            },
+          ];
+          continue;
+        }
+      }
 
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
@@ -3599,6 +3644,47 @@ export default function ChatSidebar() {
       });
     }
   }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedClips, taggedMarkers, updateRequestChainState, useServerSourceIndex]);
+
+  const continueRequestChain = useCallback(async (
+    requestChainId: string,
+    trigger: RequestChainContinuationPayload['trigger'],
+    explicitInstruction: string,
+  ) => {
+    if (!initialIndexingReady) return;
+    const storeState = useEditorStore.getState();
+    if (storeState.isChatLoading || storeState.previewOwnerId !== null) return;
+    const chainState = requestChainStateRef.current[requestChainId];
+    if (!chainState) return;
+
+    setIsChatLoading(true);
+    setLoadingStatus(trigger === 'transcript_ready' ? 'Continuing with transcript…' : 'Continuing remaining request…');
+    setLoadingPhaseId('continuing_remaining_step');
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    stopRequestedRef.current = false;
+
+    try {
+      const history = buildChatRequestHistory(
+        useEditorStore.getState().messages,
+        useEditorStore.getState().appliedActions,
+        buildContinuationPayload(chainState, trigger, explicitInstruction),
+        requestChainId,
+      );
+      await runSingleTurn(history, ctrl, requestChainId);
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') {
+        addMessage({
+          role: 'assistant',
+          content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}`,
+          requestChainId,
+        });
+      }
+    } finally {
+      setIsChatLoading(false);
+      setLoadingStatus('');
+      setLoadingPhaseId(null);
+    }
+  }, [addMessage, initialIndexingReady, runSingleTurn, setIsChatLoading]);
 
   const handleSendSingle = useCallback(async () => {
     const text = input.trim();
@@ -3667,52 +3753,38 @@ export default function ChatSidebar() {
       ...current,
       transcript: {
         ...current.transcript,
+        canonicalAvailable: true,
         missing: false,
       },
       duplicateRerunCount: 0,
     }));
     if (!nextChainState) return;
-
-    setIsChatLoading(true);
-    setLoadingStatus('Continuing with transcript…');
-    setLoadingPhaseId('continuing_remaining_step');
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    stopRequestedRef.current = false;
-
-    try {
-      const history = buildChatRequestHistory(
-        currentMessages,
-        useEditorStore.getState().appliedActions,
-        buildContinuationPayload(
-          nextChainState,
-          'transcript_ready',
-          'The transcript is now ready. Continue the original request, using the completed-action history to skip anything already done.',
-        ),
-        requestChainId,
-      );
-      await runSingleTurn(history, ctrl, requestChainId);
-    } catch (err) {
-      if ((err as Error)?.name !== 'AbortError') {
-        addMessage({ role: 'assistant', content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}` });
-      }
-    } finally {
-      setIsChatLoading(false);
-      setLoadingStatus('');
-      setLoadingPhaseId(null);
-    }
-  }, [addMessage, initialIndexingReady, runSingleTurn, setIsChatLoading, updateRequestChainState]);
+    await continueRequestChain(
+      requestChainId,
+      'transcript_ready',
+      'The transcript is now ready. Continue the original request, using the completed-action history to skip anything already done.',
+    );
+  }, [continueRequestChain, initialIndexingReady, updateRequestChainState]);
 
   const handleActionResolved = useCallback(async (
     messageId: string,
     action: EditAction,
+    actionResult?: string | null,
   ) => {
     const currentMessages = useEditorStore.getState().messages;
     const assistantMessage = currentMessages.find((message) => message.id === messageId && message.role === 'assistant');
     const requestChainId = assistantMessage?.requestChainId;
     if (!requestChainId) return;
-    recordCompletedChainAction(requestChainId, action);
-  }, [recordCompletedChainAction]);
+    const nextChainState = recordCompletedChainAction(requestChainId, action);
+    if (!nextChainState || action.type === 'transcribe_request') return;
+    await continueRequestChain(
+      requestChainId,
+      'action_resolved',
+      actionResult?.trim()
+        ? `${actionResult.trim()} Continue only the unfinished remainder of the original request.`
+        : 'The approved edit was applied. Continue only the unfinished remainder of the original request.',
+    );
+  }, [continueRequestChain, recordCompletedChainAction]);
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;

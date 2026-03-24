@@ -1,4 +1,5 @@
 import { AIEditingSettings, ColorFilter, EditAction, MarkerEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
+import { DEFAULT_TEXT_OVERLAY_TRACK_ID } from '@/lib/overlayTracks';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -215,21 +216,14 @@ function sanitizeTransition(transition: unknown, videoDuration: number): Transit
   const candidate = transition as Record<string, unknown>;
   const atTime = sanitizeTime(candidate.atTime, videoDuration);
   if (atTime === null) return null;
-  if (
-    candidate.type !== 'crossfade' &&
-    candidate.type !== 'fade_black' &&
-    candidate.type !== 'dissolve' &&
-    candidate.type !== 'wipe'
-  ) {
+  if (candidate.type !== 'fade_black') {
     return null;
   }
   if (!isFiniteNumber(candidate.duration)) return null;
 
-  const type: TransitionEntry['type'] = candidate.type;
-
   return {
     atTime,
-    type,
+    type: 'fade_black',
     duration: clamp(candidate.duration, 0.1, 10),
   };
 }
@@ -249,6 +243,10 @@ function sanitizeTextOverlay(overlay: unknown, videoDuration: number): TextOverl
   const position: TextOverlayEntry['position'] = candidate.position;
 
   return {
+    trackId: typeof candidate.trackId === 'string' && candidate.trackId.trim()
+      ? candidate.trackId.trim()
+      : DEFAULT_TEXT_OVERLAY_TRACK_ID,
+    layer: Number.isInteger(candidate.layer) ? Math.max(0, Number(candidate.layer)) : 0,
     startTime: range.start,
     endTime: range.end,
     text,
@@ -295,13 +293,8 @@ function sanitizeSettings(settings: unknown): Partial<AIEditingSettings> | null 
     const defaultType = transitions.defaultType;
     const partial: Partial<AIEditingSettings['transitions']> = {};
     if (isFiniteNumber(transitions.defaultDuration)) partial.defaultDuration = clamp(transitions.defaultDuration, 0.1, 10);
-    if (
-      defaultType === 'crossfade' ||
-      defaultType === 'fade_black' ||
-      defaultType === 'dissolve' ||
-      defaultType === 'wipe'
-    ) {
-      partial.defaultType = defaultType;
+    if (defaultType === 'fade_black') {
+      partial.defaultType = 'fade_black';
     }
     if (Object.keys(partial).length > 0) next.transitions = partial as AIEditingSettings['transitions'];
   }
