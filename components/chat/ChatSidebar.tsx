@@ -109,8 +109,8 @@ const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MAX_CHAIN_CHAT_ROUNDS = 4;
-const MARKER_TAG_PATTERN = /(?:@|marker\s+|bookmark\s+)(\d+)/gi;
 const MAX_CHAT_OVERVIEW_FRAMES = 96;
+const INLINE_REFERENCE_PATTERN = /@(?:clip|marker)\s+\d+\b/gi;
 
 type RequestChainState = {
   requestChainId: string;
@@ -382,49 +382,29 @@ function getActiveMarkerMention(text: string, caret: number | null): ActiveMarke
 }
 
 function replaceMarkerMention(text: string, mention: ActiveMarkerMention, markerNumber: number): string {
-  return `${text.slice(0, mention.start)}@${markerNumber} ${text.slice(mention.end)}`;
+  return `${text.slice(0, mention.start)}@marker ${markerNumber} ${text.slice(mention.end)}`;
 }
 
-function appendMarkerReference(text: string, markerNumber: number): string {
-  const token = `@${markerNumber}`;
-  if (new RegExp(`(^|\\s)${token}\\b`).test(text)) return text;
-  return text.trim().length > 0 ? `${text.replace(/\s+$/, '')} ${token} ` : `${token} `;
+function formatClipReferenceToken(clipNumber: number): string {
+  return `@clip ${clipNumber}`;
 }
 
-function removeMarkerReference(text: string, markerNumber: number): string {
+function formatMarkerReferenceToken(markerNumber: number): string {
+  return `@marker ${markerNumber}`;
+}
+
+function stripInlineSelectionReferences(text: string): string {
   return text
-    .replace(new RegExp(`(^|[\\s])@${markerNumber}\\b`, 'g'), '$1')
+    .replace(INLINE_REFERENCE_PATTERN, ' ')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^[ \t]+/gm, '')
     .trimStart();
 }
 
-function extractTaggedMarkers(text: string, markers: MarkerEntry[]): MarkerEntry[] {
-  const markerNumbers = new Set<number>();
-  let match: RegExpExecArray | null;
-  MARKER_TAG_PATTERN.lastIndex = 0;
-  while ((match = MARKER_TAG_PATTERN.exec(text)) !== null) {
-    const markerNumber = Number(match[1]);
-    if (Number.isFinite(markerNumber)) markerNumbers.add(markerNumber);
-  }
-  return [...markerNumbers]
-    .map((number) => markers.find((marker) => marker.number === number) ?? null)
-    .filter((marker): marker is MarkerEntry => marker !== null)
-    .sort((a, b) => a.number - b.number);
-}
-
-function areStringArraysEqual(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((value, index) => value === b[index]);
-}
-
-function resolveMarkersById(ids: string[], markers: MarkerEntry[]): MarkerEntry[] {
-  const byId = new Map(markers.map((marker) => [marker.id, marker]));
-  return ids
-    .map((id) => byId.get(id) ?? null)
-    .filter((marker): marker is MarkerEntry => marker !== null)
-    .sort((a, b) => a.number - b.number);
+function upsertInlineSelectionReference(text: string, token: string): string {
+  const stripped = stripInlineSelectionReferences(text).trimStart();
+  return stripped.length > 0 ? `${token} ${stripped}` : `${token} `;
 }
 
 function getProgressValue(progress: IndexingProgress | null): number | null {
@@ -1152,15 +1132,11 @@ function getMarkerActionResult(action: EditAction): string {
 }
 
 function getMarkerPrimaryLabel(marker: Pick<MarkerEntry, 'number'>): string {
-  return `Marker ${marker.number}`;
+  return formatMarkerReferenceToken(marker.number);
 }
 
 function getMarkerSecondaryLabel(marker: Pick<MarkerEntry, 'timelineTime' | 'label'>): string {
   return marker.label?.trim() || formatChatTime(marker.timelineTime);
-}
-
-function getClipPrimaryLabel(index: number): string {
-  return `Clip ${index + 1}`;
 }
 
 function getReviewItemCount(action?: EditAction | null): number {
@@ -1861,16 +1837,58 @@ function renderMarkdown(text: string): React.ReactNode {
 
 function MarkerAwareText({ text }: { text: string }) {
   const markers = useEditorStore(s => s.markers);
+  const clips = useEditorStore(s => s.previewSnapshot?.clips ?? s.clips);
+  const transitions = useEditorStore(s => s.previewSnapshot?.transitions ?? s.transitions);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
-  const parts = text.split(/((?:marker|bookmark)\s+\d+|@\d+)/gi);
+  const schedule = useMemo(() => buildClipSchedule(clips, transitions), [clips, transitions]);
+  const parts = text.split(/(@clip\s+\d+|@marker\s+\d+|(?:marker|bookmark)\s+\d+|@\d+)/gi);
 
   return parts.map((part, index) => {
-    const match = part.match(/(?:marker\s+|bookmark\s+|@)(\d+)/i);
-    if (!match) return <span key={index}>{renderMarkdown(part)}</span>;
-    const markerNumber = Number(match[1]);
+    const clipMatch = part.match(/@clip\s+(\d+)/i);
+    if (clipMatch) {
+      const clipNumber = Number(clipMatch[1]);
+      const clipIndex = clipNumber - 1;
+      const clip = clips[clipIndex];
+      const clipStartTime = schedule[clipIndex]?.timelineStart;
+      if (!clip || clipStartTime === undefined) return <span key={index}>{part}</span>;
+      return (
+        <button
+          key={index}
+          onClick={() => {
+            setSelectedItem({ type: 'clip', id: clip.id });
+            requestSeek(clipStartTime);
+          }}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            margin: '0 2px',
+            padding: '1px 6px',
+            borderRadius: 999,
+            border: '1px solid rgba(56,189,248,0.28)',
+            background: 'rgba(56,189,248,0.12)',
+            color: '#7dd3fc',
+            fontSize: 11,
+            fontFamily: 'var(--font-serif)',
+            cursor: 'pointer',
+          }}
+        >
+          {formatClipReferenceToken(clipNumber)}
+        </button>
+      );
+    }
+
+    const markerMatch = part.match(/@marker\s+(\d+)|(?:marker\s+|bookmark\s+|@)(\d+)/i);
+    if (!markerMatch) return <span key={index}>{renderMarkdown(part)}</span>;
+    const markerNumber = Number(markerMatch[1] ?? markerMatch[2]);
     const marker = markers.find((entry) => entry.number === markerNumber);
     if (!marker) return <span key={index}>{part}</span>;
+
+    const label = /^@\d+$/.test(part.trim())
+      ? formatMarkerReferenceToken(marker.number)
+      : part.trim().replace(/^bookmark/i, 'marker');
+
     return (
       <button
         key={index}
@@ -1893,7 +1911,7 @@ function MarkerAwareText({ text }: { text: string }) {
           cursor: 'pointer',
         }}
       >
-        @{marker.number}
+        {label}
       </button>
     );
   });
@@ -2152,12 +2170,12 @@ function AssistantMessage({
     if (!reviewSessionForMessage || !reviewedAction) return;
     const nextSnapshot = buildReviewPreviewSnapshot(reviewSessionForMessage);
     const sourceRanges = sourceRangesForAction(reviewSessionForMessage.baseSnapshot.clips, reviewedAction);
+    const result = getReviewApplyResult(reviewedAction, checkedReviewCount);
     commitPreviewSnapshot(nextSnapshot);
-    recordAppliedAction(reviewedAction, reviewedAction.message, {
+    recordAppliedAction(reviewedAction, result, {
       sourceRanges,
       requestChainId: msg.requestChainId,
     });
-    const result = getReviewApplyResult(reviewedAction, checkedReviewCount);
     updateMessage(msg.id, {
       actionStatus: 'completed',
       actionResult: result,
@@ -2788,8 +2806,6 @@ export default function ChatSidebar() {
   const stopRequestedRef = useRef(false);
   const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
   const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
-  const syncingTaggedMarkersRef = useRef(false);
-  const previousTaggedMarkerIdsRef = useRef<string[]>([]);
   const requestChainStateRef = useRef<Record<string, RequestChainState>>({});
 
   const messages = useEditorStore(s => s.messages);
@@ -2800,13 +2816,7 @@ export default function ChatSidebar() {
   const clips = useEditorStore(s => s.clips);
   const markers = useEditorStore(s => s.markers);
   const selectedItem = useEditorStore(s => s.selectedItem);
-  const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
-  const taggedClipIds = useEditorStore(s => s.taggedClipIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
-  const setTaggedMarkerIds = useEditorStore(s => s.setTaggedMarkerIds);
-  const setTaggedClipIds = useEditorStore(s => s.setTaggedClipIds);
-  const clearTaggedMarkers = useEditorStore(s => s.clearTaggedMarkers);
-  const clearTaggedClips = useEditorStore(s => s.clearTaggedClips);
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);
@@ -2885,36 +2895,28 @@ export default function ChatSidebar() {
     }
   }, [transcriptStatus, transcriptProgress]);
 
-  // Build selected clip context for the API
-  const selectedClipContext = (() => {
+  const selectedClipContext = useMemo(() => {
     if (!selectedItem || selectedItem.type !== 'clip') return null;
-    const idx = clips.findIndex(c => c.id === selectedItem.id);
-    if (idx === -1) return null;
-    return { index: idx, duration: clips[idx].sourceDuration, id: clips[idx].id };
-  })();
-  const taggedClips = useMemo(() => (
-    taggedClipIds
-      .map((clipId) => clips.find((clip) => clip.id === clipId) ?? null)
-      .filter((clip): clip is typeof clips[number] => clip !== null)
-      .map((clip) => ({
-        id: clip.id,
-        index: clips.findIndex((entry) => entry.id === clip.id),
-        duration: clip.sourceDuration,
-      }))
-      .filter((clip) => clip.index >= 0)
-  ), [clips, taggedClipIds]);
-  const taggedMarkers = useMemo(() => resolveMarkersById(taggedMarkerIds, markers), [markers, taggedMarkerIds]);
-  const selectedMarkerContext = (() => {
-    const selectedMarker = selectedItem && selectedItem.type === 'marker'
-      ? markers.find((marker) => marker.id === selectedItem.id) ?? null
-      : null;
-    if (selectedMarker) return selectedMarker;
-    return taggedMarkers.length === 1 ? taggedMarkers[0] : null;
-  })();
-  const inputTaggedMarkers = useMemo(() => extractTaggedMarkers(input, markers), [input, markers]);
+    const index = clips.findIndex((clip) => clip.id === selectedItem.id);
+    if (index < 0) return null;
+    return {
+      id: clips[index].id,
+      index,
+      number: index + 1,
+    };
+  }, [clips, selectedItem]);
+  const selectedMarkerContext = useMemo(() => {
+    if (!selectedItem || selectedItem.type !== 'marker') return null;
+    return markers.find((marker) => marker.id === selectedItem.id) ?? null;
+  }, [markers, selectedItem]);
+  const composerSelectionToken = useMemo(() => {
+    if (selectedClipContext) return formatClipReferenceToken(selectedClipContext.number);
+    if (selectedMarkerContext) return formatMarkerReferenceToken(selectedMarkerContext.number);
+    return null;
+  }, [selectedClipContext, selectedMarkerContext]);
   const markerSuggestions = useMemo(() => {
     if (!activeMarkerMention) return [];
-    const query = activeMarkerMention.query.trim().toLowerCase();
+    const query = activeMarkerMention.query.trim().toLowerCase().replace(/^marker\s+/, '');
     return [...markers]
       .sort((a, b) => a.number - b.number)
       .filter((marker) => {
@@ -2928,45 +2930,6 @@ export default function ChatSidebar() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isChatLoading]);
-
-  useEffect(() => {
-    if (areStringArraysEqual(previousTaggedMarkerIdsRef.current, taggedMarkerIds)) return;
-    previousTaggedMarkerIdsRef.current = taggedMarkerIds;
-
-    const nextTaggedMarkers = resolveMarkersById(taggedMarkerIds, markers);
-    const currentTaggedMarkers = extractTaggedMarkers(input, markers);
-    const currentIds = currentTaggedMarkers.map((marker) => marker.id);
-
-    let nextInput = input;
-    for (const marker of currentTaggedMarkers) {
-      if (!taggedMarkerIds.includes(marker.id)) {
-        nextInput = removeMarkerReference(nextInput, marker.number);
-      }
-    }
-    for (const marker of nextTaggedMarkers) {
-      if (!currentIds.includes(marker.id)) {
-        nextInput = appendMarkerReference(nextInput, marker.number);
-      }
-    }
-
-    if (nextInput !== input) {
-      syncingTaggedMarkersRef.current = true;
-      setInput(nextInput);
-      setActiveMarkerMention(null);
-    }
-  }, [input, markers, taggedMarkerIds]);
-
-  useEffect(() => {
-    if (syncingTaggedMarkersRef.current) {
-      syncingTaggedMarkersRef.current = false;
-      return;
-    }
-    const nextTaggedIds = inputTaggedMarkers.map((marker) => marker.id);
-    if (!areStringArraysEqual(nextTaggedIds, taggedMarkerIds)) {
-      previousTaggedMarkerIdsRef.current = nextTaggedIds;
-      setTaggedMarkerIds(nextTaggedIds);
-    }
-  }, [inputTaggedMarkers, setTaggedMarkerIds, taggedMarkerIds]);
 
   useEffect(() => {
     setHighlightedMarkerIndex(0);
@@ -3454,22 +3417,13 @@ export default function ChatSidebar() {
           videoDuration: getTimelineDuration(currentClips),
           clipCount: currentClips.length,
           clips: currentClips.map((c, i) => ({
+            id: c.id,
             index: i,
             sourceId: c.sourceId,
             sourceStart: c.sourceStart,
             sourceDuration: c.sourceDuration,
             speed: c.speed,
           })),
-          selectedClip: selectedClipContext,
-          selectedClips: taggedClips.map((clip) => ({
-            index: clip.index,
-            duration: clip.duration,
-          })),
-          selectedMarker: selectedMarkerContext ? {
-            number: selectedMarkerContext.number,
-            timelineTime: selectedMarkerContext.timelineTime,
-            label: selectedMarkerContext.label ?? null,
-          } : null,
           markers: freshState.markers.map((marker) => ({
             id: marker.id,
             number: marker.number,
@@ -3478,16 +3432,6 @@ export default function ChatSidebar() {
             status: marker.status,
             linkedRange: marker.linkedRange ?? null,
             note: marker.note ?? null,
-          })),
-          taggedMarkers: taggedMarkers.map((marker) => ({
-            id: marker.id,
-            number: marker.number,
-            timelineTime: marker.timelineTime,
-            label: marker.label ?? null,
-          })),
-          taggedClips: taggedClips.map((clip) => ({
-            index: clip.index,
-            duration: clip.duration,
           })),
           textOverlayCount: freshState.textOverlays.length,
           transcript: currentTranscript,
@@ -3632,7 +3576,7 @@ export default function ChatSidebar() {
         requestChainId,
       });
     }
-  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, requestSeek, selectedClipContext, selectedMarkerContext, setVisualSearchSession, taggedClips, taggedMarkers, updateRequestChainState, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, requestSeek, setVisualSearchSession, updateRequestChainState, useServerSourceIndex]);
 
   const continueRequestChain = useCallback(async (
     requestChainId: string,
@@ -3694,9 +3638,6 @@ export default function ChatSidebar() {
     };
 
     setInput('');
-    previousTaggedMarkerIdsRef.current = [];
-    clearTaggedMarkers();
-    clearTaggedClips();
     setActiveMarkerMention(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
@@ -3724,7 +3665,7 @@ export default function ChatSidebar() {
       setLoadingStatus('');
       setLoadingPhaseId(null);
     }
-  }, [addMessage, clearTaggedClips, clearTaggedMarkers, initialIndexingReady, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, initialIndexingReady, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
     if (!initialIndexingReady) return;
@@ -3803,11 +3744,8 @@ export default function ChatSidebar() {
     setInput('');
     setActiveMarkerMention(null);
     setHighlightedMarkerIndex(0);
-    previousTaggedMarkerIdsRef.current = [];
-    clearTaggedMarkers();
-    clearTaggedClips();
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
-  }, [clearChatHistory, clearTaggedClips, clearTaggedMarkers, isChatLoading, messages.length, reviewLocked]);
+  }, [clearChatHistory, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = availableSources.length > 0;
   const overviewFramesForUi = displayOverviewFrames ?? analysisOverviewFrames;
@@ -3941,34 +3879,24 @@ export default function ChatSidebar() {
     });
   }, [resizeComposer]);
 
+  useEffect(() => {
+    if (!composerSelectionToken) return;
+    setInput((current) => {
+      const next = upsertInlineSelectionReference(current, composerSelectionToken);
+      return next === current ? current : next;
+    });
+    setActiveMarkerMention(null);
+    focusComposer();
+  }, [composerSelectionToken, focusComposer, selectedItem]);
+
   const applyMarkerSuggestion = useCallback((marker: MarkerEntry) => {
     if (!activeMarkerMention) return;
     const nextValue = replaceMarkerMention(input, activeMarkerMention, marker.number);
-    const nextCaret = activeMarkerMention.start + `@${marker.number} `.length;
+    const nextCaret = activeMarkerMention.start + `@marker ${marker.number} `.length;
     setInput(nextValue);
     setActiveMarkerMention(null);
     focusComposer(nextCaret);
   }, [activeMarkerMention, focusComposer, input]);
-
-  const untagMarker = useCallback((marker: MarkerEntry) => {
-    const nextTaggedIds = taggedMarkerIds.filter((id) => id !== marker.id);
-    previousTaggedMarkerIdsRef.current = nextTaggedIds;
-    setTaggedMarkerIds(nextTaggedIds);
-    const nextValue = removeMarkerReference(input, marker.number);
-    syncingTaggedMarkersRef.current = true;
-    setInput(nextValue);
-    setActiveMarkerMention(null);
-    focusComposer(nextValue.length);
-  }, [focusComposer, input, setTaggedMarkerIds, taggedMarkerIds]);
-
-  const untagClip = useCallback((clipId: string) => {
-    const nextTaggedIds = taggedClipIds.filter((id) => id !== clipId);
-    setTaggedClipIds(nextTaggedIds);
-    if (selectedItem?.type === 'clip' && selectedItem.id === clipId) {
-      setSelectedItem(null);
-    }
-    focusComposer();
-  }, [focusComposer, selectedItem, setSelectedItem, setTaggedClipIds, taggedClipIds]);
 
   useEffect(() => {
     if (framesReady) {
@@ -4129,78 +4057,6 @@ export default function ChatSidebar() {
           transition: 'border-color 0.2s ease, opacity 0.2s ease',
           opacity: composerMuted ? 0.82 : 1,
         }}>
-          {taggedClips.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-              {taggedClips.map((clip) => (
-                <button
-                  key={clip.id}
-                  onClick={() => untagClip(clip.id)}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '2px 7px',
-                    background: 'rgba(56,189,248,0.12)',
-                    border: '1px solid rgba(56,189,248,0.28)',
-                    borderRadius: 999,
-                    fontSize: 11,
-                    color: '#7dd3fc',
-                    fontFamily: 'var(--font-serif)',
-                    cursor: 'pointer',
-                  }}
-                  title="Remove this clip tag from the message"
-                >
-                  <span>{getClipPrimaryLabel(clip.index)}</span>
-                  <span style={{ color: 'rgba(125,211,252,0.72)' }}>{formatChatTime(clip.duration)}</span>
-                  <span style={{ color: 'rgba(125,211,252,0.72)' }}>×</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {!taggedClips.length && selectedClipContext && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-              <div style={{
-                display: 'inline-flex', alignItems: 'center', gap: 5,
-                padding: '2px 7px',
-                background: 'rgba(56,189,248,0.08)',
-                border: '1px solid rgba(56,189,248,0.22)',
-                borderRadius: 999,
-                fontSize: 11,
-                color: '#7dd3fc',
-                fontFamily: 'var(--font-serif)',
-              }}>
-                {getClipPrimaryLabel(selectedClipContext.index)}
-              </div>
-            </div>
-          )}
-          {taggedMarkers.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-              {taggedMarkers.map((marker) => (
-                <button
-                  key={marker.id}
-                  onClick={() => untagMarker(marker)}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '2px 7px',
-                    background: 'rgba(250,204,21,0.12)',
-                    border: '1px solid rgba(250,204,21,0.28)',
-                    borderRadius: 999,
-                    fontSize: 11,
-                    color: '#fde68a',
-                    fontFamily: 'var(--font-serif)',
-                    cursor: 'pointer',
-                  }}
-                  title="Remove this marker tag from the message"
-                >
-                  <span>{getMarkerPrimaryLabel(marker)}</span>
-                  <span>{getMarkerSecondaryLabel(marker)}</span>
-                  <span style={{ color: 'rgba(253,230,138,0.72)' }}>×</span>
-                </button>
-              ))}
-            </div>
-          )}
           {activeMarkerMention && markerSuggestions.length > 0 && (
             <div style={{
               display: 'flex',

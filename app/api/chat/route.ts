@@ -307,7 +307,7 @@ function mergeSettings(patch?: Partial<AIEditingSettings>): AIEditingSettings {
   };
 }
 
-type ClipSummary = { index: number; sourceId?: string; sourceStart: number; sourceDuration: number; speed?: number };
+type ClipSummary = { id?: string; index: number; sourceId?: string; sourceStart: number; sourceDuration: number; speed?: number };
 type ChatTurn = { role: string; content: string };
 type RichChatTurn = ChatTurn & {
   rawAction?: unknown;
@@ -1130,6 +1130,84 @@ function formatActionTime(seconds: number): string {
   return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
 }
 
+function isReviewGatedAction(action: EditAction | null | undefined): action is EditAction {
+  if (!action) return false;
+  return action.type !== 'none'
+    && action.type !== 'transcribe_request'
+    && action.type !== 'request_frames'
+    && action.type !== 'update_ai_settings'
+    && action.type !== 'add_marker'
+    && action.type !== 'add_markers'
+    && action.type !== 'update_marker'
+    && action.type !== 'remove_marker';
+}
+
+function buildReviewProposalMessage(action: EditAction): string {
+  switch (action.type) {
+    case 'split_clip':
+      return action.splitTime !== undefined
+        ? `I can split this at ${formatActionTime(action.splitTime)}.`
+        : 'I can split this clip.';
+    case 'delete_clip':
+      return `I can remove clip ${(action.clipIndex ?? 0) + 1}.`;
+    case 'reorder_clip':
+      if (typeof action.newIndex === 'number' && action.newIndex <= 0) {
+        return `I can move clip ${(action.clipIndex ?? 0) + 1} to the front.`;
+      }
+      return typeof action.newIndex === 'number'
+        ? `I can move clip ${(action.clipIndex ?? 0) + 1} to position ${action.newIndex + 1}.`
+        : `I can move clip ${(action.clipIndex ?? 0) + 1}.`;
+    case 'delete_range':
+      if (action.deleteStartTime !== undefined && action.deleteEndTime !== undefined) {
+        return `I found a section to remove from ${formatActionTime(action.deleteStartTime)} to ${formatActionTime(action.deleteEndTime)}.`;
+      }
+      return 'I found a section to remove.';
+    case 'delete_ranges': {
+      const count = action.ranges?.length ?? 0;
+      const noun = /silent/i.test(action.message) ? 'silent section' : 'section';
+      return `I found ${count} ${noun}${count === 1 ? '' : 's'} to remove.`;
+    }
+    case 'set_clip_speed':
+      return `I can set clip ${(action.clipIndex ?? 0) + 1} to ${(action.speed ?? 1).toFixed(2).replace(/\.?0+$/, '')}x speed.`;
+    case 'set_clip_volume':
+      if ((action.volume ?? 1) === 0) {
+        return `I can mute clip ${(action.clipIndex ?? 0) + 1}.`;
+      }
+      if ((action.fadeIn ?? 0) > 0 || (action.fadeOut ?? 0) > 0) {
+        return `I can update clip ${(action.clipIndex ?? 0) + 1}'s volume and fades.`;
+      }
+      return `I can adjust clip ${(action.clipIndex ?? 0) + 1}'s volume.`;
+    case 'set_clip_filter': {
+      const filterType = action.filter?.type === 'bw' ? 'black and white' : (action.filter?.type ?? 'selected');
+      return `I can apply the ${filterType} filter to clip ${(action.clipIndex ?? 0) + 1}.`;
+    }
+    case 'add_captions':
+      return action.transcriptRange
+        ? 'I prepared captions for this section.'
+        : `I prepared ${action.captions?.length ?? 0} caption${(action.captions?.length ?? 0) === 1 ? '' : 's'} for review.`;
+    case 'add_transition': {
+      const count = action.transitions?.length ?? 0;
+      return count === 1 ? 'I found a transition to add.' : `I found ${count} transitions to add.`;
+    }
+    case 'add_text_overlay': {
+      const count = action.textOverlays?.length ?? 0;
+      return count === 1 ? 'I can add a text overlay.' : `I can add ${count} text overlays.`;
+    }
+    case 'replace_text_overlay':
+      return 'I can update the text overlay.';
+    default:
+      return action.message;
+  }
+}
+
+function normalizeActionForChat(action: EditAction | null): EditAction | null {
+  if (!action || !isReviewGatedAction(action)) return action;
+  return {
+    ...action,
+    message: buildReviewProposalMessage(action),
+  };
+}
+
 function parseAssistantTimeToken(token: string): number | null {
   const normalized = token.trim().toLowerCase();
   const mmss = normalized.match(/^(\d+):([0-5]\d)(?:\.(\d{1,3}))?$/);
@@ -1365,6 +1443,7 @@ function buildUserFacingAssistantMessage(message: string, action: EditAction | n
 function extractMentionedMarkers(
   message: string,
   markers: Array<{
+    id?: string;
     number?: number;
     timelineTime?: number;
     label?: string | null;
@@ -1373,13 +1452,15 @@ function extractMentionedMarkers(
 ) {
   const referencedNumbers = new Set<number>();
   const explicitMarkers: Array<{
+    id?: string;
+    token: string;
     number?: number;
     timelineTime?: number;
     label?: string | null;
     linkedRange?: { startTime?: number; endTime?: number } | null;
   }> = [];
   let match: RegExpExecArray | null;
-  const pattern = /(?:marker\s+|bookmark\s+|@)(\d+)/gi;
+  const pattern = /(?:@marker\s+|marker\s+|bookmark\s+|@)(\d+)/gi;
 
   while ((match = pattern.exec(message)) !== null) {
     const markerNumber = Number(match[1]);
@@ -1387,11 +1468,43 @@ function extractMentionedMarkers(
     referencedNumbers.add(markerNumber);
     const marker = markers.find((entry) => entry.number === markerNumber);
     if (marker && typeof marker.timelineTime === 'number') {
-      explicitMarkers.push(marker);
+      explicitMarkers.push({
+        ...marker,
+        token: `@marker ${markerNumber}`,
+      });
     }
   }
 
   return explicitMarkers;
+}
+
+function extractMentionedClips(message: string, clips: ClipSummary[]) {
+  const referencedNumbers = new Set<number>();
+  const explicitClips: Array<{
+    token: string;
+    clipNumber: number;
+    clipIndex: number;
+    clipId: string | null;
+  }> = [];
+  let match: RegExpExecArray | null;
+  const pattern = /(?:@clip\s+|clip\s+)(\d+)/gi;
+
+  while ((match = pattern.exec(message)) !== null) {
+    const clipNumber = Number(match[1]);
+    const clipIndex = clipNumber - 1;
+    if (!Number.isFinite(clipNumber) || referencedNumbers.has(clipNumber)) continue;
+    const clip = clips.find((entry) => entry.index === clipIndex);
+    if (!clip) continue;
+    referencedNumbers.add(clipNumber);
+    explicitClips.push({
+      token: `@clip ${clipNumber}`,
+      clipNumber,
+      clipIndex,
+      clipId: clip.id ?? null,
+    });
+  }
+
+  return explicitClips;
 }
 
 function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (seconds: number) => string): string[] {

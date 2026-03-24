@@ -113,11 +113,7 @@ export default function Timeline({
   const liveMarkers = useEditorStore(s => s.markers);
   const liveTextOverlays = useEditorStore(s => s.textOverlays);
   const selectedItem = useEditorStore(s => s.selectedItem);
-  const taggedMarkerIds = useEditorStore(s => s.taggedMarkerIds);
-  const taggedClipIds = useEditorStore(s => s.taggedClipIds);
   const setSelectedItem = useEditorStore(s => s.setSelectedItem);
-  const toggleTaggedMarker = useEditorStore(s => s.toggleTaggedMarker);
-  const toggleTaggedClip = useEditorStore(s => s.toggleTaggedClip);
   const splitClipAtTime = useEditorStore(s => s.splitClipAtTime);
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
@@ -609,14 +605,12 @@ export default function Timeline({
             {markers.map((marker) => {
               const x = tPx(marker.timelineTime);
               const isSelected = selectedItem?.type === 'marker' && selectedItem.id === marker.id;
-              const isTagged = taggedMarkerIds.includes(marker.id);
               return (
                 <button
                   key={marker.id}
-                  title={`${isTagged ? 'Untag' : 'Tag'} Marker ${marker.number}${marker.label ? ` • ${marker.label}` : ''}`}
+                  title={`Marker ${marker.number}${marker.label ? ` • ${marker.label}` : ''}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    toggleTaggedMarker(marker.id);
                     setSelectedItem({ type: 'marker', id: marker.id });
                     requestDisplaySeek(marker.timelineTime);
                   }}
@@ -630,7 +624,7 @@ export default function Timeline({
                     padding: 0,
                     border: 'none',
                     background: 'transparent',
-                    color: isSelected || isTagged ? '#fef08a' : '#fde68a',
+                    color: isSelected ? '#fef08a' : '#fde68a',
                     cursor: 'pointer',
                     zIndex: 2,
                   }}
@@ -643,13 +637,8 @@ export default function Timeline({
                       alignItems: 'center',
                       justifyContent: 'center',
                       clipPath: 'polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%)',
-                      border: isSelected || isTagged ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
-                      background: isTagged
-                        ? 'rgba(250,204,21,0.34)'
-                        : isSelected
-                          ? 'rgba(250,204,21,0.2)'
-                          : 'rgba(250,204,21,0.12)',
-                      boxShadow: isTagged ? '0 0 0 1px rgba(250,204,21,0.22)' : 'none',
+                      border: isSelected ? '1px solid #fef08a' : '1px solid rgba(250,204,21,0.32)',
+                      background: isSelected ? 'rgba(250,204,21,0.2)' : 'rgba(250,204,21,0.12)',
                       fontSize: 9,
                       fontWeight: 700,
                       fontFamily: 'var(--font-serif)',
@@ -739,12 +728,11 @@ export default function Timeline({
                   top={6 + layout.lane * CLIP_LANE_STEP}
                   height={BASE_TRACK_HEIGHT - 12}
                   isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
-                  isTagged={taggedClipIds.includes(clip.id)}
+                  isTagged={false}
                   index={index}
                   title={`Clip ${index + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onSelect={e => {
                     e.stopPropagation();
-                    toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
                     requestDisplaySeek(entry.timelineStart);
                   }}
@@ -821,8 +809,8 @@ export default function Timeline({
                     height: BASE_TRACK_HEIGHT - 12,
                     borderRadius: 4,
                     overflow: 'hidden',
-                    background: isClipSelected ? 'rgba(96,165,250,0.18)' : taggedClipIds.includes(clip.id) ? 'rgba(125,211,252,0.14)' : undefined,
-                    border: isClipSelected ? '2px solid var(--accent)' : taggedClipIds.includes(clip.id) ? '1.5px solid rgba(125,211,252,0.85)' : '1px solid rgba(255,255,255,0.06)',
+                    background: isClipSelected ? 'rgba(96,165,250,0.18)' : undefined,
+                    border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(255,255,255,0.06)',
                     cursor: 'pointer',
                     boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
                     opacity: isClipSelected ? 1 : 0.92,
@@ -830,7 +818,6 @@ export default function Timeline({
                   title={`Clip ${schedule.findIndex((item) => item.clipId === clip.id) + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onClick={e => {
                     e.stopPropagation();
-                    toggleTaggedClip(clip.id);
                     setSelectedItem({ type: 'clip', id: clip.id });
                     requestDisplaySeek(entry.timelineStart);
                   }}
