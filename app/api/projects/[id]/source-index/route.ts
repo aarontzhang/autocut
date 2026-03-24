@@ -224,24 +224,32 @@ function buildVisualTaskState(input: {
     checkpoint.plannedWindowCount + Math.max(checkpoint.plannedSceneCount, input.sceneCount),
     input.visualRowCount,
   );
+  const totalWorkUnits = Math.max(1, totalSelections * 2);
   const activeProgress = input.job?.progress?.stage === 'choosing_representative_frames'
     || input.job?.progress?.stage === 'describing_representative_frames'
     ? input.job.progress
     : null;
+  const completedSelections = activeProgress?.stage === 'choosing_representative_frames'
+    ? Math.min(totalSelections, Math.max(0, activeProgress.completed))
+    : Math.min(totalSelections, Math.max(input.visualRowCount, input.describedVisualRowCount));
+  const completedDescriptions = activeProgress?.stage === 'describing_representative_frames'
+    ? Math.min(totalSelections, Math.max(0, activeProgress.completed))
+    : Math.min(totalSelections, Math.max(0, input.describedVisualRowCount));
+  const overallCompleted = Math.min(totalWorkUnits, completedSelections + completedDescriptions);
 
   if (!input.job) {
     return buildTaskState({
       status: input.describedVisualRowCount >= totalSelections ? 'completed' : 'queued',
-      completed: input.describedVisualRowCount,
-      total: totalSelections,
+      completed: input.describedVisualRowCount >= totalSelections ? totalWorkUnits : overallCompleted,
+      total: totalWorkUnits,
     });
   }
 
   if (input.job.status === 'failed' && input.describedVisualRowCount < totalSelections) {
     return buildTaskState({
       status: 'failed',
-      completed: input.describedVisualRowCount,
-      total: totalSelections,
+      completed: overallCompleted,
+      total: totalWorkUnits,
       reason: input.job.error,
     });
   }
@@ -249,32 +257,32 @@ function buildVisualTaskState(input: {
   if (input.describedVisualRowCount >= totalSelections && totalSelections > 0) {
     return buildTaskState({
       status: 'completed',
-      completed: totalSelections,
-      total: totalSelections,
+      completed: totalWorkUnits,
+      total: totalWorkUnits,
     });
   }
 
   if (input.job.status === 'paused') {
     return buildTaskState({
       status: 'paused',
-      completed: activeProgress?.completed ?? input.describedVisualRowCount,
-      total: activeProgress?.total ?? totalSelections,
+      completed: overallCompleted,
+      total: totalWorkUnits,
     });
   }
 
   if (input.job.status === 'queued') {
     return buildTaskState({
       status: 'queued',
-      completed: input.describedVisualRowCount,
-      total: totalSelections,
+      completed: overallCompleted,
+      total: totalWorkUnits,
     });
   }
 
   if (input.job.status === 'running') {
     return buildTaskState({
       status: 'running',
-      completed: activeProgress?.completed ?? input.describedVisualRowCount,
-      total: activeProgress?.total ?? totalSelections,
+      completed: overallCompleted,
+      total: totalWorkUnits,
       etaSeconds: activeProgress?.etaSeconds ?? null,
       reason: input.job.pause_requested ? 'Pausing after the current visual batch.' : null,
     });
@@ -283,15 +291,15 @@ function buildVisualTaskState(input: {
   if (input.job.status === 'completed') {
     return buildTaskState({
       status: 'completed',
-      completed: Math.max(input.describedVisualRowCount, totalSelections),
-      total: totalSelections,
+      completed: totalWorkUnits,
+      total: totalWorkUnits,
     });
   }
 
   return buildTaskState({
     status: 'queued',
-    completed: input.describedVisualRowCount,
-    total: totalSelections,
+    completed: overallCompleted,
+    total: totalWorkUnits,
   });
 }
 

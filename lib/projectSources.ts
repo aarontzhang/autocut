@@ -121,6 +121,85 @@ export function buildProjectSources(input: {
   return [...baseSources, ...synthesizedSources];
 }
 
+function chooseMergedStatus(
+  existing: ProjectSource['status'],
+  incoming: ProjectSource['status'],
+  hasResolvedStorage: boolean,
+): ProjectSource['status'] {
+  if (incoming === 'error' || incoming === 'missing') return incoming;
+  if (existing === 'error' || existing === 'missing') return existing;
+  if (incoming === 'ready' || existing === 'ready') {
+    return hasResolvedStorage ? 'ready' : (incoming === 'ready' ? incoming : existing);
+  }
+  if (incoming === 'indexing' || existing === 'indexing') {
+    return hasResolvedStorage ? 'indexing' : (incoming === 'indexing' ? incoming : existing);
+  }
+  return incoming;
+}
+
+export function mergeProjectSources(input: {
+  existingSources?: unknown[];
+  incomingSources?: unknown[];
+  projectStoragePath?: string | null;
+  projectVideoFilename?: string | null;
+  projectDuration?: number;
+  referencedSourceIds?: Iterable<string>;
+}): ProjectSource[] {
+  const existingSources = buildProjectSources({
+    persistedSources: input.existingSources,
+    projectStoragePath: input.projectStoragePath,
+    projectVideoFilename: input.projectVideoFilename,
+    projectDuration: input.projectDuration,
+    referencedSourceIds: input.referencedSourceIds,
+  });
+  const incomingSources = buildProjectSources({
+    persistedSources: input.incomingSources,
+    projectStoragePath: input.projectStoragePath,
+    projectVideoFilename: input.projectVideoFilename,
+    projectDuration: input.projectDuration,
+    referencedSourceIds: input.referencedSourceIds,
+  });
+
+  const mergedById = new Map<string, ProjectSource>();
+  for (const source of existingSources) {
+    mergedById.set(source.id, source);
+  }
+
+  for (const source of incomingSources) {
+    const existing = mergedById.get(source.id);
+    if (!existing) {
+      mergedById.set(source.id, source);
+      continue;
+    }
+
+    const storagePath = source.storagePath ?? existing.storagePath ?? null;
+    const assetId = normalizeSourceId(source.assetId) ?? normalizeSourceId(existing.assetId) ?? null;
+    const hasResolvedStorage = Boolean(storagePath || assetId);
+    mergedById.set(source.id, {
+      ...existing,
+      ...source,
+      id: source.id,
+      fileName: source.fileName.trim() || existing.fileName,
+      storagePath,
+      assetId,
+      duration: source.duration > 0 ? source.duration : existing.duration,
+      status: chooseMergedStatus(existing.status, source.status, hasResolvedStorage),
+      isPrimary: source.isPrimary || existing.isPrimary,
+    });
+  }
+
+  const mergedSources = Array.from(mergedById.values());
+  const primarySource = mergedSources.find((source) => source.id === MAIN_SOURCE_ID)
+    ?? mergedSources.find((source) => source.isPrimary)
+    ?? null;
+
+  return mergedSources.map((source) => ({
+    ...source,
+    id: source === primarySource ? MAIN_SOURCE_ID : source.id,
+    isPrimary: source === primarySource,
+  }));
+}
+
 export function upsertProjectSource(
   sources: ProjectSource[],
   sourceId: string,

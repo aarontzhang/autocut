@@ -139,15 +139,25 @@ export async function POST(request: NextRequest) {
 
   let assetId: string | null = null;
   if (kind === 'project-main' || kind === 'main') {
+    const { data: latestProject, error: latestProjectError } = await supabase
+      .from('projects')
+      .select('video_path, video_filename, edit_state')
+      .eq('id', projectId)
+      .eq('user_id', user.id)
+      .single();
+    if (latestProjectError || !latestProject) {
+      return NextResponse.json({ error: latestProjectError?.message ?? 'Project not found' }, { status: 404 });
+    }
+
     const nextSources = upsertProjectSource(
       buildProjectSources({
-        persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state.sources : [],
-        projectStoragePath: project.video_path,
-        projectVideoFilename: project.video_filename,
+        persistedSources: Array.isArray(latestProject.edit_state?.sources) ? latestProject.edit_state.sources : [],
+        projectStoragePath: latestProject.video_path,
+        projectVideoFilename: latestProject.video_filename,
       }),
       MAIN_SOURCE_ID,
       {
-        fileName: fileName?.trim() || project.video_filename?.trim() || 'Main video',
+        fileName: fileName?.trim() || latestProject.video_filename?.trim() || 'Main video',
         storagePath,
         assetId: null,
         duration: effectiveDurationSeconds,
@@ -162,7 +172,7 @@ export async function POST(request: NextRequest) {
         video_filename: fileName,
         video_size: uploadedSize,
         edit_state: {
-          ...(project.edit_state ?? {}),
+          ...(latestProject.edit_state ?? {}),
           sources: nextSources,
         },
       })
@@ -193,11 +203,21 @@ export async function POST(request: NextRequest) {
       console.error('[uploads.finalize] failed to initialize source media asset record', assetError);
     }
 
+    const { data: latestProject, error: latestProjectError } = await supabase
+      .from('projects')
+      .select('video_path, video_filename, edit_state')
+      .eq('id', projectId)
+      .eq('user_id', user.id)
+      .single();
+    if (latestProjectError || !latestProject) {
+      return NextResponse.json({ error: latestProjectError?.message ?? 'Project not found' }, { status: 404 });
+    }
+
     const nextSources = upsertProjectSource(
       buildProjectSources({
-        persistedSources: Array.isArray(project.edit_state?.sources) ? project.edit_state.sources : [],
-        projectStoragePath: project.video_path,
-        projectVideoFilename: project.video_filename,
+        persistedSources: Array.isArray(latestProject.edit_state?.sources) ? latestProject.edit_state.sources : [],
+        projectStoragePath: latestProject.video_path,
+        projectVideoFilename: latestProject.video_filename,
       }),
       requestedSourceId!,
       {
@@ -213,7 +233,7 @@ export async function POST(request: NextRequest) {
       .from('projects')
       .update({
         edit_state: {
-          ...(project.edit_state ?? {}),
+          ...(latestProject.edit_state ?? {}),
           sources: nextSources,
         },
       })

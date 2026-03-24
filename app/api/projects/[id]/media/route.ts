@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { buildProjectSources } from '@/lib/projectSources';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import type { ProjectSource } from '@/lib/types';
 
 const FORWARDED_RESPONSE_HEADERS = [
   'accept-ranges',
@@ -27,7 +27,7 @@ async function proxyProjectMedia(request: NextRequest, params: Promise<{ id: str
 
   const { data: project, error } = await supabase
     .from('projects')
-    .select('video_path, edit_state')
+    .select('video_path, video_filename, edit_state')
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle();
@@ -36,9 +36,11 @@ async function proxyProjectMedia(request: NextRequest, params: Promise<{ id: str
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const persistedSources = Array.isArray(project?.edit_state?.sources)
-    ? project.edit_state.sources as ProjectSource[]
-    : [];
+  const persistedSources = buildProjectSources({
+    persistedSources: Array.isArray(project?.edit_state?.sources) ? project.edit_state.sources : [],
+    projectStoragePath: project?.video_path ?? null,
+    projectVideoFilename: project?.video_filename ?? null,
+  });
   const requestedSource = persistedSources.find((source) => source.id === requestedSourceId) ?? null;
   if (requestedSourceId !== MAIN_SOURCE_ID && !requestedSource) {
     return NextResponse.json({ error: 'Requested source not found' }, { status: 404 });

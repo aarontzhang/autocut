@@ -5,7 +5,7 @@ import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { buildProjectSources } from '@/lib/projectSources';
+import { buildProjectSources, mergeProjectSources } from '@/lib/projectSources';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -61,6 +61,19 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (rateLimitError) return rateLimitError;
 
   const body = await request.json().catch(() => ({}));
+  const { data: currentProject, error: currentProjectError } = await supabase
+    .from('projects')
+    .select('id, user_id, video_path, video_filename, edit_state')
+    .eq('id', id)
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (currentProjectError) {
+    return NextResponse.json({ error: currentProjectError.message }, { status: 500 });
+  }
+  if (!currentProject) {
+    return NextResponse.json({ error: 'Project not found or access denied' }, { status: 404 });
+  }
+
   if (typeof body.video_path === 'string' && body.video_path.trim().length > 0) {
     const clientDurationSeconds = typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
       ? Math.max(0, body.durationSeconds)
@@ -80,11 +93,29 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
 
   const patch: Record<string, unknown> = {};
-  if (body.edit_state !== undefined) patch.edit_state = body.edit_state;
   if (body.name !== undefined) patch.name = body.name;
   if (body.video_path !== undefined) patch.video_path = body.video_path;
   if (body.video_filename !== undefined) patch.video_filename = body.video_filename;
   if (body.video_size !== undefined) patch.video_size = body.video_size;
+  if (body.edit_state !== undefined) {
+    const existingEditState = currentProject.edit_state && typeof currentProject.edit_state === 'object'
+      ? currentProject.edit_state
+      : {};
+    const incomingEditState = body.edit_state && typeof body.edit_state === 'object'
+      ? body.edit_state as Record<string, unknown>
+      : {};
+    patch.edit_state = {
+      ...existingEditState,
+      ...incomingEditState,
+      sources: mergeProjectSources({
+        existingSources: Array.isArray(existingEditState.sources) ? existingEditState.sources : [],
+        incomingSources: Array.isArray(incomingEditState.sources) ? incomingEditState.sources : [],
+        projectStoragePath: typeof body.video_path === 'string' ? body.video_path : currentProject.video_path,
+        projectVideoFilename: typeof body.video_filename === 'string' ? body.video_filename : currentProject.video_filename,
+        projectDuration: Number.isFinite(incomingEditState.videoDuration) ? Number(incomingEditState.videoDuration) : undefined,
+      }),
+    };
+  }
 
   const { data: updated, error } = await supabase.from('projects').update(patch).eq('id', id).eq('user_id', user.id).select('id').single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

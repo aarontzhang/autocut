@@ -47,6 +47,11 @@ const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const DEFAULT_DENSE_MAX_SPACING_SECONDS = 1;
+const LOCAL_VISUAL_PROGRESS_SEGMENTS: Record<'extracting_frames' | 'choosing_representative_frames' | 'describing_frames', { start: number; end: number }> = {
+  extracting_frames: { start: 0, end: 0.35 },
+  choosing_representative_frames: { start: 0.35, end: 0.5 },
+  describing_frames: { start: 0.5, end: 1 },
+};
 
 type FrameDescriptionResponse = {
   descriptions?: Array<{ index: number; description: string }>;
@@ -490,6 +495,35 @@ function estimateRemainingSecondsFromObservedRate(
   }
 
   return remaining / unitsPerSecond;
+}
+
+function buildOverallVisualProgress(progress: IndexingProgress): IndexingProgress {
+  if (progress.stage === 'dense_refinement') {
+    return {
+      ...progress,
+      label: 'Analyzing visuals',
+    };
+  }
+
+  const segment = progress.stage === 'extracting_frames'
+    ? LOCAL_VISUAL_PROGRESS_SEGMENTS.extracting_frames
+    : progress.stage === 'choosing_representative_frames'
+      ? LOCAL_VISUAL_PROGRESS_SEGMENTS.choosing_representative_frames
+      : progress.stage === 'describing_frames'
+        ? LOCAL_VISUAL_PROGRESS_SEGMENTS.describing_frames
+        : null;
+  if (!segment) return progress;
+
+  const stageFraction = progress.total > 0
+    ? clampProgress(progress.completed / progress.total)
+    : 0;
+  const overallFraction = segment.start + (segment.end - segment.start) * stageFraction;
+  return {
+    ...progress,
+    completed: Math.round(overallFraction * 1000),
+    total: 1000,
+    label: 'Analyzing visuals',
+  };
 }
 
 async function measureFrameHeuristics(imageBase64: string): Promise<{
@@ -2704,22 +2738,7 @@ function LiveProgressSummary({
   detail?: string | null;
   secondaryLabel?: string | null;
 }) {
-  const [targetMs] = useState<number | null>(() => {
-    const etaSeconds = progress?.etaSeconds ?? null;
-    if (!etaSeconds || !Number.isFinite(etaSeconds) || etaSeconds <= 0 || isCompleted) {
-      return null;
-    }
-    return Date.now() + etaSeconds * 1000;
-  });
-  const [countdownNow, setCountdownNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (targetMs === null || isCompleted) return;
-    const intervalId = window.setInterval(() => {
-      setCountdownNow(Date.now());
-    }, 1000);
-    return () => window.clearInterval(intervalId);
-  }, [isCompleted, targetMs]);
+  const etaSeconds = progress?.etaSeconds ?? null;
 
   let label = 'Starting…';
   if (isCompleted) {
@@ -2728,9 +2747,8 @@ function LiveProgressSummary({
     label = 'Needs attention';
   } else if (secondaryLabel === 'Paused' || /paused/i.test(progress?.label ?? '')) {
     label = 'Paused';
-  } else if (targetMs !== null) {
-    const remainingSeconds = Math.ceil((targetMs - countdownNow) / 1000);
-    label = remainingSeconds <= 0 ? 'Finishing up…' : formatCountdownLabel(remainingSeconds);
+  } else if (etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0) {
+    label = formatCountdownLabel(etaSeconds);
   } else if (targetProgress !== null && targetProgress > 0) {
     label = `${Math.round(targetProgress * 100)}% complete`;
   }
@@ -2984,20 +3002,22 @@ export default function ChatSidebar() {
         const extractionStartedAt = performance.now();
         const extractionFallbackPerFrame = estimateFrameExtractionSeconds(frameCount) / Math.max(frameCount, 1);
         let lastProgressPaintAt = 0;
-        setFrameIndexingProgress({
-          stage: 'extracting_frames',
-          completed: 0,
-          total: Math.max(frameCount, 1),
-          label: formatSourceScopedProgressLabel({
-            sourceIndex: sourceOffset + 1,
-            totalSources: sourcesToIndex.length,
-            fileName: entry.fileName,
-            actionLabel: 'Sampling frames',
+        setFrameIndexingProgress(
+          buildOverallVisualProgress({
+            stage: 'extracting_frames',
             completed: 0,
             total: Math.max(frameCount, 1),
+            label: formatSourceScopedProgressLabel({
+              sourceIndex: sourceOffset + 1,
+              totalSources: sourcesToIndex.length,
+              fileName: entry.fileName,
+              actionLabel: 'Sampling frames',
+              completed: 0,
+              total: Math.max(frameCount, 1),
+            }),
+            etaSeconds: estimateFrameExtractionSeconds(frameCount),
           }),
-          etaSeconds: estimateFrameExtractionSeconds(frameCount),
-        });
+        );
 
         const frames = await extractSourceOverviewFrames({
           sourceId: entry.sourceId,
@@ -3010,23 +3030,25 @@ export default function ChatSidebar() {
             if (completed < total && now - lastProgressPaintAt < 120) return;
             lastProgressPaintAt = now;
             setFrameIndexingProgress({
-              stage,
-              completed,
-              total: Math.max(total, 1),
-              label: formatSourceScopedProgressLabel({
-                sourceIndex: sourceOffset + 1,
-                totalSources: sourcesToIndex.length,
-                fileName: entry.fileName,
-                actionLabel: stage === 'extracting_frames' ? 'Sampling frames' : 'Preparing visuals',
+              ...buildOverallVisualProgress({
+                stage,
                 completed,
-                total,
+                total: Math.max(total, 1),
+                label: formatSourceScopedProgressLabel({
+                  sourceIndex: sourceOffset + 1,
+                  totalSources: sourcesToIndex.length,
+                  fileName: entry.fileName,
+                  actionLabel: stage === 'extracting_frames' ? 'Sampling frames' : 'Preparing visuals',
+                  completed,
+                  total,
+                }),
+                etaSeconds: estimateRemainingSecondsFromObservedRate(
+                  extractionStartedAt,
+                  completed,
+                  Math.max(total, 1),
+                  extractionFallbackPerFrame,
+                ),
               }),
-              etaSeconds: estimateRemainingSecondsFromObservedRate(
-                extractionStartedAt,
-                completed,
-                Math.max(total, 1),
-                extractionFallbackPerFrame,
-              ),
             });
           },
         });
@@ -3180,59 +3202,63 @@ export default function ChatSidebar() {
       let completedBatchCount = 0;
       let activeBatchCount = 0;
       const totalBatches = batches.length;
-      setFrameIndexingProgress({
-        stage: 'describing_frames',
-        completed: initialCompleted,
-        total: Math.max(totalOverviewFrames, 1),
-        label: sourceContext
-          ? formatSourceScopedProgressLabel({
-              sourceIndex: sourceContext.sourceIndex,
-              totalSources: sourceContext.totalSources,
-              fileName: sourceContext.fileName,
-              actionLabel: 'Analyzing visuals',
-              completed: initialCompleted,
-              total: totalOverviewFrames,
-            })
-          : formatFrameDescriptionProgressLabel({
-              completedFrames: initialCompleted,
-              totalFrames: totalOverviewFrames,
-              completedBatches: 0,
-              totalBatches: Math.max(totalBatches, 1),
-              activeBatches: 0,
-            }),
-        etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
-      });
+      setFrameIndexingProgress(
+        buildOverallVisualProgress({
+          stage: 'describing_frames',
+          completed: initialCompleted,
+          total: Math.max(totalOverviewFrames, 1),
+          label: sourceContext
+            ? formatSourceScopedProgressLabel({
+                sourceIndex: sourceContext.sourceIndex,
+                totalSources: sourceContext.totalSources,
+                fileName: sourceContext.fileName,
+                actionLabel: 'Analyzing visuals',
+                completed: initialCompleted,
+                total: totalOverviewFrames,
+              })
+            : formatFrameDescriptionProgressLabel({
+                completedFrames: initialCompleted,
+                totalFrames: totalOverviewFrames,
+                completedBatches: 0,
+                totalBatches: Math.max(totalBatches, 1),
+                activeBatches: 0,
+              }),
+          etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
+        }),
+      );
 
       const errors = await runFrameDescriptionBatches(batches, {
         onBatchStart: () => {
           activeBatchCount += 1;
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
-                  completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: estimateRemainingSecondsFromObservedRate(
-              descriptionStartedAt,
+            ...buildOverallVisualProgress({
+              stage: 'describing_frames',
               completed,
-              totalOverviewFrames,
-              descriptionFallbackPerFrame,
-            ),
+              total: Math.max(totalOverviewFrames, 1),
+              label: sourceContext
+                ? formatSourceScopedProgressLabel({
+                    sourceIndex: sourceContext.sourceIndex,
+                    totalSources: sourceContext.totalSources,
+                    fileName: sourceContext.fileName,
+                    actionLabel: 'Analyzing visuals',
+                    completed,
+                    total: totalOverviewFrames,
+                  })
+                : formatFrameDescriptionProgressLabel({
+                    completedFrames: completed,
+                    totalFrames: totalOverviewFrames,
+                    completedBatches: completedBatchCount,
+                    totalBatches: Math.max(totalBatches, 1),
+                    activeBatches: activeBatchCount,
+                  }),
+              etaSeconds: estimateRemainingSecondsFromObservedRate(
+                descriptionStartedAt,
+                completed,
+                totalOverviewFrames,
+                descriptionFallbackPerFrame,
+              ),
+            }),
           });
         },
         onBatchComplete: (result) => {
@@ -3257,66 +3283,70 @@ export default function ChatSidebar() {
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           const remaining = Math.max(totalOverviewFrames - completed, 0);
           setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
+            ...buildOverallVisualProgress({
+              stage: 'describing_frames',
+              completed,
+              total: Math.max(totalOverviewFrames, 1),
+              label: sourceContext
+                ? formatSourceScopedProgressLabel({
+                    sourceIndex: sourceContext.sourceIndex,
+                    totalSources: sourceContext.totalSources,
+                    fileName: sourceContext.fileName,
+                    actionLabel: 'Analyzing visuals',
+                    completed,
+                    total: totalOverviewFrames,
+                  })
+                : formatFrameDescriptionProgressLabel({
+                    completedFrames: completed,
+                    totalFrames: totalOverviewFrames,
+                    completedBatches: completedBatchCount,
+                    totalBatches: Math.max(totalBatches, 1),
+                    activeBatches: activeBatchCount,
+                  }),
+              etaSeconds: remaining > 0
+                ? estimateRemainingSecondsFromObservedRate(
+                  descriptionStartedAt,
                   completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: remaining > 0
-              ? estimateRemainingSecondsFromObservedRate(
-                descriptionStartedAt,
-                completed,
-                totalOverviewFrames,
-                descriptionFallbackPerFrame,
-              )
-              : 0,
+                  totalOverviewFrames,
+                  descriptionFallbackPerFrame,
+                )
+                : 0,
+            }),
           });
         },
         onBatchSettled: () => {
           activeBatchCount = Math.max(0, activeBatchCount - 1);
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
-                  completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: completed >= totalOverviewFrames
-              ? 0
-              : estimateRemainingSecondsFromObservedRate(
-                descriptionStartedAt,
-                Math.max(completed, completedBeforeRequests),
-                totalOverviewFrames,
-                descriptionFallbackPerFrame,
-              ),
+            ...buildOverallVisualProgress({
+              stage: 'describing_frames',
+              completed,
+              total: Math.max(totalOverviewFrames, 1),
+              label: sourceContext
+                ? formatSourceScopedProgressLabel({
+                    sourceIndex: sourceContext.sourceIndex,
+                    totalSources: sourceContext.totalSources,
+                    fileName: sourceContext.fileName,
+                    actionLabel: 'Analyzing visuals',
+                    completed,
+                    total: totalOverviewFrames,
+                  })
+                : formatFrameDescriptionProgressLabel({
+                    completedFrames: completed,
+                    totalFrames: totalOverviewFrames,
+                    completedBatches: completedBatchCount,
+                    totalBatches: Math.max(totalBatches, 1),
+                    activeBatches: activeBatchCount,
+                  }),
+              etaSeconds: completed >= totalOverviewFrames
+                ? 0
+                : estimateRemainingSecondsFromObservedRate(
+                  descriptionStartedAt,
+                  Math.max(completed, completedBeforeRequests),
+                  totalOverviewFrames,
+                  descriptionFallbackPerFrame,
+                ),
+            }),
           });
         },
       });
