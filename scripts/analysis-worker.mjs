@@ -468,6 +468,20 @@ async function claimNextJob(lockerId) {
   if (!queuedJobs?.length) return null;
 
   for (const job of queuedJobs) {
+    if (job.asset_id) {
+      const { data: activeSibling, error: activeSiblingError } = await supabase
+        .from('analysis_jobs')
+        .select('id')
+        .eq('asset_id', job.asset_id)
+        .eq('job_type', 'index_asset')
+        .eq('status', 'running')
+        .neq('id', job.id)
+        .limit(1)
+        .maybeSingle();
+      if (activeSiblingError) throw activeSiblingError;
+      if (activeSibling) continue;
+    }
+
     const { data: claimed, error: claimError } = await supabase
       .from('analysis_jobs')
       .update({
@@ -500,7 +514,7 @@ async function claimNextJob(lockerId) {
 async function getAssetForJob(job) {
   const { data: asset, error } = await supabase
     .from('media_assets')
-    .select('id, project_id, storage_path, duration_seconds, fps, width, height')
+    .select('id, project_id, storage_path, duration_seconds, fps, width, height, status, indexed_at')
     .eq('id', job.asset_id)
     .maybeSingle();
   if (error) throw error;
@@ -990,6 +1004,23 @@ async function writeRepresentativeDescriptions(inputPath, scratchDir, selections
 
 async function processIndexAssetJob(job) {
   const asset = await getAssetForJob(job);
+  if (asset.indexed_at) {
+    await setAssetStatus(asset.id, { status: 'ready' });
+    await updateJob(job.id, {
+      status: 'completed',
+      locked_at: null,
+      locked_by: null,
+      pause_requested: false,
+      progress: {
+        stage: 'describing_representative_frames',
+        completed: 1,
+        total: 1,
+        label: 'Completed',
+        etaSeconds: 0,
+      },
+    });
+    return;
+  }
   const { tempDir, inputPath } = await downloadAssetToTemp(asset.storage_path);
   const scratchDir = await fs.mkdtemp(path.join(tempDir, 'frames-'));
 

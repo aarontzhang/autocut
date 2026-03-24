@@ -7,6 +7,11 @@ function isMissingRelationError(error: unknown): boolean {
   return code === '42P01' || /relation .* does not exist/i.test(message);
 }
 
+function isUniqueViolationError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code) : '';
+  return code === '23505';
+}
+
 function mapAsset(row: Record<string, unknown>): MediaAsset {
   return {
     id: String(row.id),
@@ -177,26 +182,47 @@ export async function ensureAssetIndexingJob(
     if (existingActiveError) throw existingActiveError;
     if (existingActive) return mapAnalysis(existingActive);
 
-    const { data: inserted, error: insertError } = await supabase
-      .from('analysis_jobs')
-      .insert({
-        project_id: projectId,
-        asset_id: assetId,
-        job_type: 'index_asset',
-        status: 'queued',
-        pause_requested: false,
-        progress: {
-          stage: 'queued',
-          completed: 0,
-          total: 1,
-          label: 'Queued',
-          etaSeconds: null,
-        },
-      })
-      .select('id, status, error, progress')
-      .single();
+    let inserted: Record<string, unknown> | null = null;
+    try {
+      const insertResult = await supabase
+        .from('analysis_jobs')
+        .insert({
+          project_id: projectId,
+          asset_id: assetId,
+          job_type: 'index_asset',
+          status: 'queued',
+          pause_requested: false,
+          progress: {
+            stage: 'queued',
+            completed: 0,
+            total: 1,
+            label: 'Queued',
+            etaSeconds: null,
+          },
+        })
+        .select('id, status, error, progress, pause_requested')
+        .single();
 
-    if (insertError) throw insertError;
+      if (insertResult.error) throw insertResult.error;
+      inserted = insertResult.data as Record<string, unknown> | null;
+    } catch (error) {
+      if (!isUniqueViolationError(error)) throw error;
+
+      const { data: concurrentJob, error: concurrentJobError } = await supabase
+        .from('analysis_jobs')
+        .select('id, status, error, progress, pause_requested')
+        .eq('project_id', projectId)
+        .eq('asset_id', assetId)
+        .eq('job_type', 'index_asset')
+        .in('status', ['queued', 'running', 'paused'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (concurrentJobError) throw concurrentJobError;
+      if (concurrentJob) return mapAnalysis(concurrentJob);
+      throw error;
+    }
 
     await supabase
       .from('media_assets')
