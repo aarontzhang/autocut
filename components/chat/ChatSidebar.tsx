@@ -47,9 +47,11 @@ const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
 const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
 const DEFAULT_DENSE_MAX_SPACING_SECONDS = 1;
-const LOCAL_VISUAL_PROGRESS_SEGMENTS: Record<'extracting_frames' | 'choosing_representative_frames' | 'describing_frames', { start: number; end: number }> = {
+const UNIFIED_VISUAL_PROGRESS_SEGMENTS: Partial<Record<IndexingProgress['stage'], { start: number; end: number }>> = {
   extracting_frames: { start: 0, end: 0.35 },
+  detecting_scenes: { start: 0, end: 0.35 },
   choosing_representative_frames: { start: 0.35, end: 0.5 },
+  describing_representative_frames: { start: 0.5, end: 1 },
   describing_frames: { start: 0.5, end: 1 },
 };
 
@@ -457,6 +459,23 @@ function buildCompletedProgress(stage: IndexingProgress['stage']): IndexingProgr
   };
 }
 
+function isServerAudioReady(
+  analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
+  freshness: { transcript?: boolean; overview?: boolean } | null | undefined,
+) {
+  return freshness?.transcript === true
+    || analysis?.audio?.status === 'completed'
+    || analysis?.audio?.status === 'unavailable';
+}
+
+function isServerVisualReady(
+  analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
+  freshness: { transcript?: boolean; overview?: boolean } | null | undefined,
+) {
+  return freshness?.overview === true
+    || analysis?.visual?.status === 'completed';
+}
+
 function estimateTranscriptSeconds(duration: number): number {
   return Math.max(12, Math.min(600, duration * 0.16));
 }
@@ -497,7 +516,7 @@ function estimateRemainingSecondsFromObservedRate(
   return remaining / unitsPerSecond;
 }
 
-function buildOverallVisualProgress(progress: IndexingProgress): IndexingProgress {
+function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingProgress {
   if (progress.stage === 'dense_refinement') {
     return {
       ...progress,
@@ -505,24 +524,76 @@ function buildOverallVisualProgress(progress: IndexingProgress): IndexingProgres
     };
   }
 
-  const segment = progress.stage === 'extracting_frames'
-    ? LOCAL_VISUAL_PROGRESS_SEGMENTS.extracting_frames
-    : progress.stage === 'choosing_representative_frames'
-      ? LOCAL_VISUAL_PROGRESS_SEGMENTS.choosing_representative_frames
-      : progress.stage === 'describing_frames'
-        ? LOCAL_VISUAL_PROGRESS_SEGMENTS.describing_frames
-        : null;
+  const segment = UNIFIED_VISUAL_PROGRESS_SEGMENTS[progress.stage] ?? null;
   if (!segment) return progress;
 
   const stageFraction = progress.total > 0
     ? clampProgress(progress.completed / progress.total)
     : 0;
-  const overallFraction = segment.start + (segment.end - segment.start) * stageFraction;
+  const overallFraction = progress.total > 0 && progress.completed >= progress.total
+    ? 1
+    : segment.start + (segment.end - segment.start) * stageFraction;
   return {
     ...progress,
     completed: Math.round(overallFraction * 1000),
     total: 1000,
     label: 'Analyzing visuals',
+  };
+}
+
+function formatProgressSummary(params: {
+  progress: IndexingProgress | null;
+  targetProgress: number | null;
+  isCompleted: boolean;
+  detail?: string | null;
+  secondaryLabel?: string | null;
+}) {
+  const { progress, targetProgress, isCompleted, detail, secondaryLabel } = params;
+  const etaSeconds = progress?.etaSeconds ?? null;
+  const percentLabel = targetProgress !== null
+    ? `${Math.round(targetProgress * 100)}%`
+    : null;
+
+  if (isCompleted) {
+    return {
+      summary: 'Completed',
+      secondary: secondaryLabel ?? null,
+    };
+  }
+
+  if (detail) {
+    return {
+      summary: `Issue: ${detail}`,
+      secondary: secondaryLabel && secondaryLabel !== detail ? secondaryLabel : null,
+    };
+  }
+
+  if (secondaryLabel === 'Paused' || /paused/i.test(progress?.label ?? '')) {
+    return {
+      summary: percentLabel ? `${percentLabel} paused` : 'Paused',
+      secondary: secondaryLabel,
+    };
+  }
+
+  if (percentLabel) {
+    return {
+      summary: etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0
+        ? `${percentLabel} complete • ${formatCountdownLabel(etaSeconds)}`
+        : `${percentLabel} complete`,
+      secondary: secondaryLabel ?? null,
+    };
+  }
+
+  if (etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0) {
+    return {
+      summary: `Starting • ${formatCountdownLabel(etaSeconds)}`,
+      secondary: secondaryLabel ?? null,
+    };
+  }
+
+  return {
+    summary: 'Starting…',
+    secondary: secondaryLabel ?? null,
   };
 }
 
@@ -998,6 +1069,7 @@ function buildServerAnalysisStatusCards(params: {
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
       const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
       return {
+        analysis,
         task,
         stage: getTaskProgressStage(kind, analysis),
       };
@@ -1022,7 +1094,9 @@ function buildServerAnalysisStatusCards(params: {
       return {
         key: `${kind}-analysis`,
         title,
-        progress: buildCompletedProgress(completedStage),
+        progress: kind === 'visual'
+          ? normalizeVisualAnalysisProgress(buildCompletedProgress(completedStage))
+          : buildCompletedProgress(completedStage),
         tone: 'completed',
       };
     }
@@ -1030,6 +1104,11 @@ function buildServerAnalysisStatusCards(params: {
     const progressFraction = taskEntries.reduce((sum, entry) => {
       if (entry.task.status === 'completed' || (kind === 'audio' && entry.task.status === 'unavailable')) {
         return sum + 1;
+      }
+      if (kind === 'visual' && entry.analysis?.progress) {
+        return sum + (
+          getProgressValue(normalizeVisualAnalysisProgress(entry.analysis.progress)) ?? 0
+        );
       }
       return sum + clampProgress(entry.task.completed / Math.max(entry.task.total, 1));
     }, 0) / Math.max(total, 1);
@@ -1046,32 +1125,38 @@ function buildServerAnalysisStatusCards(params: {
     return {
       key: `${kind}-analysis`,
       title,
-      progress: {
-        stage: activeStage,
-        completed: Math.round(progressFraction * 1000),
-        total: 1000,
-        label: aggregateStatus === 'running'
-          ? `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'} ${Math.round(progressFraction * 100)}%`
-          : aggregateStatus === 'paused'
-            ? `${kind === 'audio' ? 'Audio analysis paused' : 'Visual analysis paused'} ${Math.round(progressFraction * 100)}%`
-            : aggregateStatus === 'failed'
-              ? `${kind === 'audio' ? 'Audio analysis needs attention' : 'Visual analysis needs attention'}`
-              : `${kind === 'audio' ? 'Preparing audio analysis' : 'Preparing visual analysis'}`,
-        etaSeconds: averageEtaSeconds,
-      },
-      secondaryLabel: aggregateStatus === 'running'
-        ? getIndexingStageTitle({
+      progress: kind === 'visual'
+        ? {
             stage: activeStage,
-            completed: activeEntry?.task.completed ?? 0,
-            total: Math.max(activeEntry?.task.total ?? 1, 1),
-            label: null,
-            etaSeconds: activeEntry?.task.etaSeconds ?? null,
-          })
+            completed: Math.round(progressFraction * 1000),
+            total: 1000,
+            label: 'Analyzing visuals',
+            etaSeconds: averageEtaSeconds,
+          }
+        : {
+            stage: activeStage,
+            completed: Math.round(progressFraction * 1000),
+            total: 1000,
+            label: aggregateStatus === 'paused'
+              ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} paused`
+              : aggregateStatus === 'failed'
+                ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} issue`
+                : `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'}`,
+            etaSeconds: averageEtaSeconds,
+          },
+      secondaryLabel: aggregateStatus === 'failed'
+        ? 'Issue'
         : aggregateStatus === 'paused'
           ? 'Paused'
-          : aggregateStatus === 'failed'
-            ? firstReason ?? 'Analysis needs attention.'
-            : 'Waiting to start',
+          : aggregateStatus === 'queued'
+            ? 'Waiting to start'
+            : getIndexingStageTitle({
+                stage: activeStage,
+                completed: activeEntry?.task.completed ?? 0,
+                total: Math.max(activeEntry?.task.total ?? 1, 1),
+                label: null,
+                etaSeconds: activeEntry?.task.etaSeconds ?? null,
+              }),
       detail: aggregateStatus === 'failed' && firstReason ? firstReason : null,
     };
   };
@@ -2738,25 +2823,25 @@ function LiveProgressSummary({
   detail?: string | null;
   secondaryLabel?: string | null;
 }) {
-  const etaSeconds = progress?.etaSeconds ?? null;
-
-  let label = 'Starting…';
-  if (isCompleted) {
-    label = 'Completed';
-  } else if (detail || /needs attention|error/i.test(progress?.label ?? '')) {
-    label = 'Needs attention';
-  } else if (secondaryLabel === 'Paused' || /paused/i.test(progress?.label ?? '')) {
-    label = 'Paused';
-  } else if (etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0) {
-    label = formatCountdownLabel(etaSeconds);
-  } else if (targetProgress !== null && targetProgress > 0) {
-    label = `${Math.round(targetProgress * 100)}% complete`;
-  }
+  const { summary, secondary } = formatProgressSummary({
+    progress,
+    targetProgress,
+    isCompleted,
+    detail,
+    secondaryLabel,
+  });
 
   return (
-    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.42)', fontFamily: 'var(--font-serif)', whiteSpace: 'nowrap' }}>
-      {label}
-    </span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-serif)' }}>
+        {summary}
+      </span>
+      {secondary && (
+        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.34)', fontFamily: 'var(--font-serif)' }}>
+          {secondary}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -2895,6 +2980,12 @@ export default function ChatSidebar() {
       || Boolean(sourceIndexAnalysisBySourceId[source.id])
     )),
   );
+  const trackedServerSources = useMemo(() => (
+    availableSources.filter((source) => (
+      isServerBackedSource(source)
+      || Boolean(sourceIndexAnalysisBySourceId[source.sourceId])
+    ))
+  ), [availableSources, sourceIndexAnalysisBySourceId]);
   const initialIndexingReady = useMemo(
     () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId),
     [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sources],
@@ -3003,7 +3094,7 @@ export default function ChatSidebar() {
         const extractionFallbackPerFrame = estimateFrameExtractionSeconds(frameCount) / Math.max(frameCount, 1);
         let lastProgressPaintAt = 0;
         setFrameIndexingProgress(
-          buildOverallVisualProgress({
+          normalizeVisualAnalysisProgress({
             stage: 'extracting_frames',
             completed: 0,
             total: Math.max(frameCount, 1),
@@ -3030,7 +3121,7 @@ export default function ChatSidebar() {
             if (completed < total && now - lastProgressPaintAt < 120) return;
             lastProgressPaintAt = now;
             setFrameIndexingProgress({
-              ...buildOverallVisualProgress({
+              ...normalizeVisualAnalysisProgress({
                 stage,
                 completed,
                 total: Math.max(total, 1),
@@ -3064,13 +3155,13 @@ export default function ChatSidebar() {
       }
 
       const refreshedState = useEditorStore.getState();
-      setFrameIndexingProgress({
-        stage: 'extracting_frames',
+      setFrameIndexingProgress(normalizeVisualAnalysisProgress({
+        stage: 'describing_frames',
         completed: 1,
         total: 1,
-        label: `Representative frames ready`,
+        label: 'Analyzing visuals',
         etaSeconds: 0,
-      });
+      }));
       return refreshedState.analysisOverviewFrames ?? [];
     } catch (error) {
       setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
@@ -3203,7 +3294,7 @@ export default function ChatSidebar() {
       let activeBatchCount = 0;
       const totalBatches = batches.length;
       setFrameIndexingProgress(
-        buildOverallVisualProgress({
+        normalizeVisualAnalysisProgress({
           stage: 'describing_frames',
           completed: initialCompleted,
           total: Math.max(totalOverviewFrames, 1),
@@ -3232,7 +3323,7 @@ export default function ChatSidebar() {
           activeBatchCount += 1;
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           setFrameIndexingProgress({
-            ...buildOverallVisualProgress({
+            ...normalizeVisualAnalysisProgress({
               stage: 'describing_frames',
               completed,
               total: Math.max(totalOverviewFrames, 1),
@@ -3283,7 +3374,7 @@ export default function ChatSidebar() {
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           const remaining = Math.max(totalOverviewFrames - completed, 0);
           setFrameIndexingProgress({
-            ...buildOverallVisualProgress({
+            ...normalizeVisualAnalysisProgress({
               stage: 'describing_frames',
               completed,
               total: Math.max(totalOverviewFrames, 1),
@@ -3318,7 +3409,7 @@ export default function ChatSidebar() {
           activeBatchCount = Math.max(0, activeBatchCount - 1);
           const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
           setFrameIndexingProgress({
-            ...buildOverallVisualProgress({
+            ...normalizeVisualAnalysisProgress({
               stage: 'describing_frames',
               completed,
               total: Math.max(totalOverviewFrames, 1),
@@ -3810,9 +3901,8 @@ export default function ChatSidebar() {
   const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
     ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`
     : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
-      ? `${sourceIndexAnalysis.error} Retry the failed source analysis to finish initial indexing.`
+      ? `${sourceIndexAnalysis.error} Initial indexing is still incomplete.`
       : null;
-  const mediaPreparationBlockingSend = hasVideoSource && !initialIndexingReady;
   const secondaryIndexingProgress: IndexingProgress | null = (!usingServerSourceIndex && transcriptStatus === 'loading' && !framesReady && frameIndexingProgress)
     ? frameIndexingProgress
     : null;
@@ -3823,7 +3913,7 @@ export default function ChatSidebar() {
   if (hasVideoSource) {
     if (usingServerSourceIndex) {
       analysisStatusCards.push(...buildServerAnalysisStatusCards({
-        sources: availableSources,
+        sources: trackedServerSources,
         analysisBySourceId: sourceIndexAnalysisBySourceId,
         freshnessBySourceId: sourceIndexFreshBySourceId,
       }));
@@ -3841,6 +3931,22 @@ export default function ChatSidebar() {
           etaSeconds: estimatedTranscriptRemainingEta,
         },
         secondaryLabel: 'Transcribing audio…',
+      });
+    } else if (!usingServerSourceIndex && transcriptStatus === 'error') {
+      analysisStatusCards.push({
+        key: 'audio-analysis',
+        title: 'Audio analysis',
+        progress: transcriptProgress
+          ? {
+              stage: 'transcribing',
+              completed: transcriptProgress.completed,
+              total: Math.max(transcriptProgress.total, 1),
+              label: 'Audio analysis issue',
+              etaSeconds: null,
+            }
+          : null,
+        detail: transcriptError ?? 'Audio transcription did not finish.',
+        secondaryLabel: 'Issue',
       });
     } else if (!usingServerSourceIndex && transcriptStatus === 'done') {
       analysisStatusCards.push({
@@ -3870,19 +3976,46 @@ export default function ChatSidebar() {
       analysisStatusCards.push({
         key: 'frame-analysis',
         title: 'Visual analysis',
-        progress: buildCompletedProgress('describing_frames'),
+        progress: normalizeVisualAnalysisProgress(buildCompletedProgress('describing_frames')),
         tone: 'completed',
+      });
+    } else if (!usingServerSourceIndex && frameAnalysisError) {
+      analysisStatusCards.push({
+        key: 'frame-analysis',
+        title: 'Visual analysis',
+        progress: frameIndexingProgress,
+        detail: frameAnalysisError,
+        secondaryLabel: 'Issue',
       });
     }
   }
+  const audioAnalysisReady = !hasVideoSource
+    || (usingServerSourceIndex
+      ? trackedServerSources.every((source) => isServerAudioReady(
+        sourceIndexAnalysisBySourceId[source.sourceId],
+        sourceIndexFreshBySourceId[source.sourceId],
+      ))
+      : transcriptStatus === 'done');
+  const visualAnalysisReady = !hasVideoSource
+    || (usingServerSourceIndex
+      ? trackedServerSources.every((source) => isServerVisualReady(
+        sourceIndexAnalysisBySourceId[source.sourceId],
+        sourceIndexFreshBySourceId[source.sourceId],
+      ))
+      : frameAnalysisReady);
+  const mediaPreparationBlockingSend = hasVideoSource && (!audioAnalysisReady || !visualAnalysisReady);
   const visualAnalysisBlockingSend = analysisStatusCards.some((card) => (
     card.title === 'Visual analysis' && card.tone !== 'completed'
   ));
+  const audioAnalysisBlockingSend = analysisStatusCards.some((card) => (
+    card.title === 'Audio analysis' && card.tone !== 'completed'
+  ));
   const composerInputDisabled = isChatLoading || reviewLocked;
-  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend || visualAnalysisBlockingSend;
+  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend || audioAnalysisBlockingSend || visualAnalysisBlockingSend;
   const canSubmitMessage = input.trim().length > 0
     && !composerInputDisabled
     && !mediaPreparationBlockingSend
+    && !audioAnalysisBlockingSend
     && !visualAnalysisBlockingSend;
   const activeLoadingPhaseId = loadingPhaseId ?? (mediaPreparationBlockingSend ? 'initial_indexing_required' : null);
 
@@ -4057,7 +4190,7 @@ export default function ChatSidebar() {
             )}
             {frameAnalysisErrorNotice && (
               <StatusNoticeCard
-                title="Visual analysis error"
+                title="Visual analysis issue"
                 detail={frameAnalysisErrorNotice}
                 tone="error"
               />

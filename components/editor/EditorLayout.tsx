@@ -17,7 +17,7 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
+import { isServerBackedSource } from '@/lib/sourceIndexGate';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -117,12 +117,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
   const { user } = useAuth();
   const { quota, loading: quotaLoading, refresh: refreshQuota } = useStorageQuota(Boolean(user));
-  const initialIndexingReady = getInitialIndexingReady(
-    sources,
-    sourceIndexAnalysisBySourceId,
-    sourceIndexFreshBySourceId,
-  );
-
   const refreshSourceIndex = useCallback(async (targetProjectId: string) => {
     const sourceIndexRes = await fetch(`/api/projects/${targetProjectId}/source-index`, { cache: 'no-store' });
     if (!sourceIndexRes.ok) return null;
@@ -269,10 +263,13 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         || Boolean(sourceIndexAnalysisBySourceId[source.id])
       )),
     );
-    const sourcesToTranscribe = availableSources.filter((entry) => !sourceIndexFreshBySourceId[entry.sourceId]?.transcript);
+    const sourcesToTranscribe = availableSources.filter((entry) => (
+      !sourceIndexFreshBySourceId[entry.sourceId]?.transcript
+      && !isServerBackedSource(entry)
+      && !sourceIndexAnalysisBySourceId[entry.sourceId]?.audio
+    ));
     if (
-      !initialIndexingReady
-      || shouldUseServerIndex
+      shouldUseServerIndex
       || sourcesToTranscribe.length === 0
       || transcriptStatus === 'loading'
       || transcriptStatus === 'error'
@@ -326,7 +323,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, currentProjectId, initialIndexingReady, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [aiSettings.captions.wordsPerCaption, currentProjectId, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;
