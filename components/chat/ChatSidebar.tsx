@@ -484,18 +484,27 @@ function isServerVisualReady(
 }
 
 function estimateTranscriptSeconds(duration: number): number {
-  return Math.max(12, Math.min(600, duration * 0.16));
+  return Math.max(25, Math.min(900, 12 + duration * 0.2));
 }
 
 function estimateFrameExtractionSeconds(frameCount: number): number {
   return Math.max(8, Math.min(240, frameCount * 0.12));
 }
 
-function estimateFrameDescriptionSeconds(frameCount: number): number {
+function estimateFrameDescriptionSeconds(frameCount: number, durationSeconds = 0): number {
   const parallelRequests = getFrameDescriptionParallelRequestLimit(frameCount);
   const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
   const waves = Math.ceil(batches / Math.max(parallelRequests, 1));
-  return Math.max(6, waves * 5);
+  const durationComponent = Math.max(0, durationSeconds) * 0.08;
+  return Math.max(20, Math.min(420, Math.round(durationComponent + waves * 9)));
+}
+
+function estimateVisualAnalysisSeconds(duration: number, totalWorkUnits: number): number {
+  const selectionCount = Math.max(Math.ceil(totalWorkUnits / 2), 1);
+  const sceneDetectionSeconds = Math.max(10, Math.min(75, 6 + duration * 0.03));
+  const selectionSeconds = Math.max(12, Math.min(240, 8 + duration * 0.04 + selectionCount * 1.25));
+  const descriptionSeconds = estimateFrameDescriptionSeconds(selectionCount, duration);
+  return sceneDetectionSeconds + selectionSeconds + descriptionSeconds;
 }
 
 function normalizeKnownSourceId(sourceId?: string | null): string {
@@ -521,6 +530,34 @@ function estimateRemainingSecondsFromObservedRate(
   }
 
   return remaining / unitsPerSecond;
+}
+
+function stabilizeEtaEstimate(params: {
+  reportedEtaSeconds?: number | null;
+  fallbackEtaSeconds?: number | null;
+  completed: number;
+  total: number;
+}): number | null {
+  const reportedEtaSeconds = Number.isFinite(params.reportedEtaSeconds)
+    ? Math.max(0, Math.round(Number(params.reportedEtaSeconds)))
+    : null;
+  const fallbackEtaSeconds = Number.isFinite(params.fallbackEtaSeconds)
+    ? Math.max(0, Math.round(Number(params.fallbackEtaSeconds)))
+    : null;
+
+  if (reportedEtaSeconds === null) return fallbackEtaSeconds;
+  if (fallbackEtaSeconds === null) return reportedEtaSeconds;
+
+  const progressFraction = params.total > 0
+    ? clampProgress(params.completed / params.total)
+    : 0;
+  const anchoredEtaSeconds = Math.max(reportedEtaSeconds, fallbackEtaSeconds);
+
+  if (progressFraction <= 0.12) return anchoredEtaSeconds;
+  if (progressFraction >= 0.55) return reportedEtaSeconds;
+
+  const blend = (progressFraction - 0.12) / 0.43;
+  return Math.max(1, Math.round((anchoredEtaSeconds * (1 - blend)) + (reportedEtaSeconds * blend)));
 }
 
 function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingProgress {
@@ -981,11 +1018,7 @@ function buildServerAnalysisStatusCards(params: {
       return Math.max(1, Math.round(estimateTranscriptSeconds(duration) * remainingFraction));
     }
 
-    const estimatedFrameCount = Math.max(Math.ceil(task.total / 2), 1);
-    const estimatedTotalSeconds = 8
-      + estimateFrameExtractionSeconds(estimatedFrameCount)
-      + estimateFrameDescriptionSeconds(estimatedFrameCount);
-    return Math.max(1, Math.round(estimatedTotalSeconds * remainingFraction));
+    return Math.max(1, Math.round(estimateVisualAnalysisSeconds(duration, task.total) * remainingFraction));
   };
 
   const buildFallbackTask = (
@@ -1156,10 +1189,14 @@ function buildServerAnalysisStatusCards(params: {
         )), 0) || null;
 
     const activeEtaSeconds = activeEntry
-      ? (activeEntry.progress?.etaSeconds
-        ?? activeEntry.task.etaSeconds
-        ?? activeEntry.fallbackEtaSeconds
-        ?? averageEtaSeconds)
+      ? stabilizeEtaEstimate({
+          reportedEtaSeconds: activeEntry.progress?.etaSeconds
+            ?? activeEntry.task.etaSeconds
+            ?? averageEtaSeconds,
+          fallbackEtaSeconds: activeEntry.fallbackEtaSeconds ?? averageEtaSeconds,
+          completed: activeEntry.progress?.completed ?? activeEntry.task.completed,
+          total: Math.max(activeEntry.progress?.total ?? activeEntry.task.total, 1),
+        })
       : null;
 
     return {
@@ -3907,7 +3944,7 @@ export default function ChatSidebar() {
     : frameAnalysisError !== null || frameAnalysisReady;
   const transcriptFailed = transcriptStatus === 'error';
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
-  const estimatedTranscriptRemainingEta =
+  const observedTranscriptRemainingEta =
     transcriptProgress && transcriptProgress.total > 0 && transcriptStartedAtRef.current !== null
       ? estimateRemainingSecondsFromObservedRate(
           transcriptStartedAtRef.current,
@@ -3915,7 +3952,13 @@ export default function ChatSidebar() {
           transcriptProgress.total,
           estimatedTranscriptEta / Math.max(transcriptProgress.total, 1),
         )
-      : estimatedTranscriptEta;
+      : null;
+  const estimatedTranscriptRemainingEta = stabilizeEtaEstimate({
+    reportedEtaSeconds: observedTranscriptRemainingEta,
+    fallbackEtaSeconds: estimatedTranscriptEta,
+    completed: transcriptProgress?.completed ?? 0,
+    total: Math.max(transcriptProgress?.total ?? 1, 1),
+  });
   const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
     ? formatTranscriptFailureNotice(transcriptError)
     : null;
@@ -3980,10 +4023,27 @@ export default function ChatSidebar() {
         secondaryLabel: 'Local follow-up only inside the narrowed range.',
       });
     } else if (!usingServerSourceIndex && frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
+      const visualFallbackEtaSeconds = Math.max(
+        1,
+        Math.round(
+          estimateFrameDescriptionSeconds(
+            Math.max(frameIndexingProgress.total, 1),
+            mainTimelineDuration || videoDuration,
+          ) * (1 - (getProgressValue(frameIndexingProgress) ?? 0)),
+        ),
+      );
       analysisStatusCards.push({
         key: 'frame-analysis',
         title: 'Visual analysis',
-        progress: frameIndexingProgress,
+        progress: {
+          ...frameIndexingProgress,
+          etaSeconds: stabilizeEtaEstimate({
+            reportedEtaSeconds: frameIndexingProgress.etaSeconds,
+            fallbackEtaSeconds: visualFallbackEtaSeconds,
+            completed: frameIndexingProgress.completed,
+            total: Math.max(frameIndexingProgress.total, 1),
+          }),
+        },
         secondaryLabel: getIndexingStageTitle(frameIndexingProgress, null),
       });
     } else if (!usingServerSourceIndex && frameAnalysisReady) {
