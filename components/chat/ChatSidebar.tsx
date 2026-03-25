@@ -319,6 +319,13 @@ function formatCountdownLabel(totalSeconds: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')} left`;
 }
 
+function formatRemainingLabel(totalSeconds: number | null | undefined): string {
+  if (Number.isFinite(totalSeconds) && (totalSeconds ?? 0) >= 0) {
+    return formatCountdownLabel(Number(totalSeconds));
+  }
+  return '--:-- left';
+}
+
 function evenlySampleFrameIndices(count: number, targetCount: number): number[] {
   if (count <= 0 || targetCount <= 0) return [];
   if (count <= targetCount) return Array.from({ length: count }, (_, index) => index);
@@ -530,9 +537,7 @@ function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingPr
   const stageFraction = progress.total > 0
     ? clampProgress(progress.completed / progress.total)
     : 0;
-  const overallFraction = progress.total > 0 && progress.completed >= progress.total
-    ? 1
-    : segment.start + (segment.end - segment.start) * stageFraction;
+  const overallFraction = segment.start + (segment.end - segment.start) * stageFraction;
   return {
     ...progress,
     completed: Math.round(overallFraction * 1000),
@@ -548,52 +553,27 @@ function formatProgressSummary(params: {
   detail?: string | null;
   secondaryLabel?: string | null;
 }) {
-  const { progress, targetProgress, isCompleted, detail, secondaryLabel } = params;
+  const { progress, targetProgress, isCompleted, detail } = params;
   const etaSeconds = progress?.etaSeconds ?? null;
-  const percentLabel = targetProgress !== null
-    ? `${Math.round(targetProgress * 100)}%`
-    : null;
+  const percentLabel = `${Math.round((targetProgress ?? 0) * 100)}%`;
 
   if (isCompleted) {
     return {
-      summary: 'Completed',
-      secondary: secondaryLabel ?? null,
+      summary: '100%',
+      secondary: null,
     };
   }
 
   if (detail) {
     return {
-      summary: `Issue: ${detail}`,
-      secondary: secondaryLabel && secondaryLabel !== detail ? secondaryLabel : null,
-    };
-  }
-
-  if (secondaryLabel === 'Paused' || /paused/i.test(progress?.label ?? '')) {
-    return {
-      summary: percentLabel ? `${percentLabel} paused` : 'Paused',
-      secondary: secondaryLabel,
-    };
-  }
-
-  if (percentLabel) {
-    return {
-      summary: etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0
-        ? `${percentLabel} complete • ${formatCountdownLabel(etaSeconds)}`
-        : `${percentLabel} complete`,
-      secondary: secondaryLabel ?? null,
-    };
-  }
-
-  if (etaSeconds && Number.isFinite(etaSeconds) && etaSeconds > 0) {
-    return {
-      summary: `Starting • ${formatCountdownLabel(etaSeconds)}`,
-      secondary: secondaryLabel ?? null,
+      summary: detail,
+      secondary: null,
     };
   }
 
   return {
-    summary: 'Starting…',
-    secondary: secondaryLabel ?? null,
+    summary: `${percentLabel} • ${formatRemainingLabel(etaSeconds)}`,
+    secondary: null,
   };
 }
 
