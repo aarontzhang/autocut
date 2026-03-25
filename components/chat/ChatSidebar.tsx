@@ -964,6 +964,31 @@ function buildServerAnalysisStatusCards(params: {
   analysisBySourceId: SourceIndexAnalysisStateMap;
   freshnessBySourceId: Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>;
 }): AnalysisStatusCard[] {
+  const estimateTaskEtaSeconds = (
+    kind: 'audio' | 'visual',
+    duration: number,
+    task: SourceIndexTaskState,
+    progress: IndexingProgress | null,
+  ) => {
+    if (task.status === 'completed' || task.status === 'unavailable') return 0;
+
+    const completedFraction = progress
+      ? (getProgressValue(progress) ?? 0)
+      : clampProgress(task.completed / Math.max(task.total, 1));
+    const remainingFraction = 1 - completedFraction;
+    if (remainingFraction <= 0) return 0;
+
+    if (kind === 'audio') {
+      return Math.max(1, Math.round(estimateTranscriptSeconds(duration) * remainingFraction));
+    }
+
+    const estimatedFrameCount = Math.max(Math.ceil(task.total / 2), 1);
+    const estimatedTotalSeconds = 8
+      + estimateFrameExtractionSeconds(estimatedFrameCount)
+      + estimateFrameDescriptionSeconds(estimatedFrameCount);
+    return Math.max(1, Math.round(estimatedTotalSeconds * remainingFraction));
+  };
+
   const buildFallbackTask = (
     kind: 'audio' | 'visual',
     source: { status: string },
@@ -1055,8 +1080,10 @@ function buildServerAnalysisStatusCards(params: {
             ? analysis.progress
             : null
         );
+      const fallbackEtaSeconds = estimateTaskEtaSeconds(kind, source.duration, task, progress);
       return {
         analysis,
+        fallbackEtaSeconds,
         progress,
         task,
         stage: getTaskProgressStage(kind, analysis),
@@ -1119,8 +1146,21 @@ function buildServerAnalysisStatusCards(params: {
     const activeStage = activeEntry?.progress?.stage
       ?? activeEntry?.stage
       ?? (kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames');
-    const averageEtaSeconds = aggregateStatus === 'running'
-      ? Math.max(...taskEntries.map((entry) => Math.max(entry.progress?.etaSeconds ?? entry.task.etaSeconds ?? 0, 0)), 0) || null
+    const averageEtaSeconds = aggregateStatus === 'failed'
+      ? null
+      : Math.max(...taskEntries.map((entry) => Math.max(
+          entry.progress?.etaSeconds
+            ?? entry.task.etaSeconds
+            ?? entry.fallbackEtaSeconds
+            ?? 0,
+          0,
+        )), 0) || null;
+
+    const activeEtaSeconds = activeEntry
+      ? (activeEntry.progress?.etaSeconds
+        ?? activeEntry.task.etaSeconds
+        ?? activeEntry.fallbackEtaSeconds
+        ?? averageEtaSeconds)
       : null;
 
     return {
@@ -1132,7 +1172,7 @@ function buildServerAnalysisStatusCards(params: {
             completed: Math.round(progressFraction * 1000),
             total: 1000,
             label: 'Analyzing visuals',
-            etaSeconds: averageEtaSeconds,
+            etaSeconds: activeEtaSeconds,
           }
         : {
             stage: activeStage,
@@ -1141,9 +1181,9 @@ function buildServerAnalysisStatusCards(params: {
             label: aggregateStatus === 'paused'
               ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} paused`
               : aggregateStatus === 'failed'
-                ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} issue`
+              ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} issue`
                 : `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'}`,
-            etaSeconds: averageEtaSeconds,
+            etaSeconds: activeEtaSeconds,
           },
       secondaryLabel: aggregateStatus === 'failed'
         ? 'Issue'

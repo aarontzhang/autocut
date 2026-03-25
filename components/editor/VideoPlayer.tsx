@@ -307,10 +307,22 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const getVideoElement = useCallback((layer: LayerId) => (
     layer === 'primary' ? primaryVideoElementRef.current : secondaryVideoRef.current
   ), []);
+  const doesVideoMatchAssignedSource = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
+    if (!video) return false;
+    const sourceId = layerSourceIdRef.current[layer];
+    if (!sourceId) return false;
+    const expectedUrl = normalizeVideoUrl(
+      getResolvedPlayableUrl(sourceId)
+      || pendingLayerSourceRef.current[layer].url,
+    );
+    if (!expectedUrl) return false;
+    const loadedUrl = normalizeVideoUrl(video.currentSrc || (video.readyState >= 2 ? video.src : ''));
+    return loadedUrl === expectedUrl;
+  }, [getResolvedPlayableUrl]);
   const isLayerReady = useCallback((layer: LayerId) => {
     const video = getVideoElement(layer);
-    return Boolean(video && video.readyState >= 2 && !video.error);
-  }, [getVideoElement]);
+    return Boolean(video && video.readyState >= 2 && !video.error && doesVideoMatchAssignedSource(layer, video));
+  }, [doesVideoMatchAssignedSource, getVideoElement]);
   const clearPendingLayerSource = useCallback((layer: LayerId) => {
     pendingLayerSourceRef.current[layer] = {
       token: 0,
@@ -363,13 +375,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setIsVideoReady(false);
       return;
     }
-    const ready = leadVideo.readyState >= 2 && !leadVideo.error;
+    const ready = leadVideo.readyState >= 2
+      && !leadVideo.error
+      && doesVideoMatchAssignedSource(leadLayerRef.current, leadVideo);
     setIsVideoReady(ready);
     if (ready) {
       setHasDisplayedFrame(true);
       setVideoLoadError(null);
     }
-  }, [getLeadVideo]);
+  }, [doesVideoMatchAssignedSource, getLeadVideo]);
 
   const setLeadLayerSafely = useCallback((nextLayer: LayerId) => {
     leadLayerRef.current = nextLayer;
@@ -953,6 +967,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
               reconcileLayerLoadSuccess('primary', el);
+              if (!doesVideoMatchAssignedSource('primary', el)) return;
               setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.primary;
               if (sourceId) {
@@ -970,6 +985,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
             onLoadedData={(event) => {
               reconcileLayerLoadSuccess('primary', event.currentTarget);
+              if (!doesVideoMatchAssignedSource('primary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
@@ -981,6 +997,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
             onCanPlay={(event) => {
               reconcileLayerLoadSuccess('primary', event.currentTarget);
+              if (!doesVideoMatchAssignedSource('primary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
@@ -1020,6 +1037,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             preload="auto"
             onLoadedMetadata={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
+              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.secondary;
               if (sourceId) {
@@ -1040,6 +1058,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
             onLoadedData={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
+              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
@@ -1051,6 +1070,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
             onCanPlay={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
+              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
