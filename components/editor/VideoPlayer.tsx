@@ -565,9 +565,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         activateMissingSourceState(primaryEntry.sourceId);
         return;
       }
-      if (leadHasReadyFrame && preparedPrimaryLayer.status === 'ready' && targetLayer !== currentLeadLayer) {
+      if (leadHasReadyFrame && targetLayer !== currentLeadLayer) {
         pauseVideo(currentLeadVideo);
-        setLeadLayerSafely(targetLayer);
+        if (preparedPrimaryLayer.status === 'ready') {
+          setLeadLayerSafely(targetLayer);
+        }
       }
     }
 
@@ -696,6 +698,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (!primaryVideo || renderTimeline.length === 0) return;
 
     const primaryEntry = findRenderEntriesAtTime(renderTimeline, currentTimeRef.current)[0] ?? renderTimeline[0];
+    if (layerSourceIdRef.current[leadLayerRef.current] !== primaryEntry.sourceId) {
+      syncLayers(currentTimeRef.current, { allowPlay: playbackIntentRef.current });
+      return;
+    }
     const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
     const nextEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const sourceTime = primaryVideo.currentTime;

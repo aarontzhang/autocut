@@ -1068,8 +1068,16 @@ function buildServerAnalysisStatusCards(params: {
       const analysis = params.analysisBySourceId[source.sourceId] ?? null;
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
       const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
+      const progress = kind === 'visual'
+        ? (analysis?.progress ? normalizeVisualAnalysisProgress(analysis.progress) : null)
+        : (
+          analysis?.progress?.stage === 'transcribing_audio' || analysis?.progress?.stage === 'transcribing'
+            ? analysis.progress
+            : null
+        );
       return {
         analysis,
+        progress,
         task,
         stage: getTaskProgressStage(kind, analysis),
       };
@@ -1082,7 +1090,14 @@ function buildServerAnalysisStatusCards(params: {
     const title = kind === 'audio' ? 'Audio analysis' : 'Visual analysis';
     const completedStage = kind === 'audio' ? 'transcribing' : 'describing_frames';
     const firstReason = tasks.find((task) => task.reason)?.reason ?? null;
+    const hasObservedProgress = taskEntries.some((entry) => {
+      const fraction = entry.progress
+        ? (getProgressValue(entry.progress) ?? 0)
+        : clampProgress(entry.task.completed / Math.max(entry.task.total, 1));
+      return fraction > 0 && fraction < 1;
+    });
     const aggregateStatus = tasks.some((task) => task.status === 'running')
+      || hasObservedProgress
       ? 'running'
       : tasks.some((task) => task.status === 'paused')
         ? 'paused'
@@ -1105,21 +1120,27 @@ function buildServerAnalysisStatusCards(params: {
       if (entry.task.status === 'completed' || (kind === 'audio' && entry.task.status === 'unavailable')) {
         return sum + 1;
       }
-      if (kind === 'visual' && entry.analysis?.progress) {
-        return sum + (
-          getProgressValue(normalizeVisualAnalysisProgress(entry.analysis.progress)) ?? 0
-        );
+      if (entry.progress) {
+        return sum + (getProgressValue(entry.progress) ?? 0);
       }
       return sum + clampProgress(entry.task.completed / Math.max(entry.task.total, 1));
     }, 0) / Math.max(total, 1);
 
     const activeEntry = taskEntries.find((entry) => entry.task.status === 'running')
       ?? taskEntries.find((entry) => entry.task.status === 'paused')
+      ?? taskEntries.find((entry) => {
+        const fraction = entry.progress
+          ? (getProgressValue(entry.progress) ?? 0)
+          : clampProgress(entry.task.completed / Math.max(entry.task.total, 1));
+        return fraction > 0 && fraction < 1;
+      })
       ?? taskEntries.find((entry) => entry.task.status === 'queued')
       ?? taskEntries[0];
-    const activeStage = activeEntry?.stage ?? (kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames');
+    const activeStage = activeEntry?.progress?.stage
+      ?? activeEntry?.stage
+      ?? (kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames');
     const averageEtaSeconds = aggregateStatus === 'running'
-      ? Math.max(...tasks.map((task) => Math.max(task.etaSeconds ?? 0, 0)), 0) || null
+      ? Math.max(...taskEntries.map((entry) => Math.max(entry.progress?.etaSeconds ?? entry.task.etaSeconds ?? 0, 0)), 0) || null
       : null;
 
     return {
