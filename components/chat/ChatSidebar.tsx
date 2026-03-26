@@ -562,11 +562,7 @@ function stabilizeEtaEstimate(params: {
 }
 
 function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingProgress {
-  if (
-    progress.stage === 'dense_refinement'
-    || progress.stage === 'describing_representative_frames'
-    || progress.stage === 'describing_frames'
-  ) {
+  if (progress.stage === 'dense_refinement') {
     return {
       ...progress,
       label: 'Analyzing visuals',
@@ -1015,7 +1011,6 @@ function buildServerAnalysisStatusCards(params: {
   const isVisualPreparationStage = (stage: IndexingProgress['stage']) => (
     stage === 'preparing_media'
     || stage === 'detecting_scenes'
-    || stage === 'choosing_representative_frames'
   );
 
   const estimateTaskEtaSeconds = (
