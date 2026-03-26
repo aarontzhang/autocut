@@ -33,7 +33,8 @@ const CSS_FILTERS: Record<string, string> = {
 const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
-const SAME_SOURCE_HANDOFF_PRELOAD_WINDOW = 0.75;
+const PRELOAD_SEEK_EPSILON = 1 / 12; // ≈83ms — wider than one frame at 24fps, prevents re-seek loop
+const SAME_SOURCE_HANDOFF_PRELOAD_WINDOW = 2.0;
 
 type VideoFrameRequestCallback = (now: number, metadata: unknown) => void;
 type VideoWithFrameCallback = HTMLVideoElement & {
@@ -630,7 +631,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       if (upcomingSourceUrl) {
         ensureLayerSource(spareLayerId, upcomingEntry.sourceId, upcomingSourceUrl, upcomingEntry.clipId);
         const upcomingSourceTime = getEntrySourceTime(upcomingEntry, timelineTime);
-        if (Math.abs(secondaryVideo.currentTime - upcomingSourceTime) > DRIFT_EPSILON) {
+        if (Math.abs(secondaryVideo.currentTime - upcomingSourceTime) > PRELOAD_SEEK_EPSILON) {
           secondaryVideo.currentTime = Math.max(0, upcomingSourceTime);
         }
         pauseVideo(secondaryVideo);
