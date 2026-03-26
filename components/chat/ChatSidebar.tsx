@@ -8,16 +8,13 @@ import {
   ChatMessage as ChatMessageType,
   CaptionEntry,
   EditAction,
-  IndexedVideoFrame,
   MarkerEntry,
   SilenceCandidate,
   SourceIndexAnalysisStateMap,
   SourceIndexTaskState,
-  SourceIndexedFrame,
   VisualSearchSession,
 } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, sourceTimeToTimelineOccurrences } from '@/lib/timelineUtils';
-import { extractVideoFrames } from '@/lib/ffmpegClient';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction } from '@/lib/timelineUtils';
 import {
   buildReviewGroupWithUpdatedItems,
   buildReviewPreviewSnapshot,
@@ -27,11 +24,9 @@ import {
 } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
-import { buildCoarseRepresentativeWindows, buildDenseTimelineTimestamps, buildRepresentativeCandidateTimes } from '@/lib/indexer/representativeFrames';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
-import { FRAME_DESCRIPTION_BATCH_SIZE, getFrameDescriptionParallelRequestLimit } from '@/lib/frameDescriptionConfig';
 import {
   actionsMatch,
   buildRequestChainContinuationMessage,
@@ -42,33 +37,7 @@ import {
 import AutocutMark from '@/components/branding/AutocutMark';
 import { capture } from '@/lib/analytics';
 
-const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
-const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
-const MAX_FRAME_DESCRIPTION_REQUEST_RETRIES = 2;
-const FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS = 1500;
 const REVIEW_PREROLL_SECONDS = 2.5;
-const DEFAULT_DENSE_MAX_SPACING_SECONDS = 1;
-const UNIFIED_VISUAL_PROGRESS_SEGMENTS: Partial<Record<IndexingProgress['stage'], { start: number; end: number }>> = {
-  extracting_frames: { start: 0, end: 0.35 },
-  detecting_scenes: { start: 0, end: 0.35 },
-  choosing_representative_frames: { start: 0.35, end: 0.5 },
-  describing_representative_frames: { start: 0.5, end: 1 },
-  describing_frames: { start: 0.5, end: 1 },
-};
-
-type FrameDescriptionResponse = {
-  descriptions?: Array<{ index: number; description: string }>;
-  error?: string;
-};
-
-type FrameDescriptionBatch = {
-  start: number;
-  batchFrames: Array<{
-    image: string;
-    timelineTime: number;
-    sourceTime: number;
-  }>;
-};
 
 type ChatResponse = {
   message?: string;
@@ -119,7 +88,6 @@ const CHAT_REQUEST_TIMEOUT_MS = 45000;
 const MAX_CHAT_REQUEST_RETRIES = 2;
 const CHAT_RETRY_BASE_DELAY_MS = 1500;
 const MAX_CHAIN_CHAT_ROUNDS = 4;
-const MAX_CHAT_OVERVIEW_FRAMES = 96;
 const INLINE_REFERENCE_PATTERN = /@(?:clip|marker)\s+\d+\b/gi;
 
 type RequestChainState = {
@@ -261,75 +229,6 @@ async function postChatRequest(
   }
 }
 
-async function requestFrameDescriptions(batchFrames: Array<{
-  image: string;
-  timelineTime: number;
-  sourceTime: number;
-}>): Promise<FrameDescriptionResponse> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= MAX_FRAME_DESCRIPTION_REQUEST_RETRIES; attempt += 1) {
-    const ctrl = new AbortController();
-    const timeoutId = window.setTimeout(() => {
-      try {
-        ctrl.abort(new DOMException('The frame description request timed out.', 'AbortError'));
-      } catch {
-        ctrl.abort();
-      }
-    }, FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS);
-
-    try {
-      const res = await fetch('/api/frame-descriptions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          batchSize: FRAME_DESCRIPTION_BATCH_SIZE,
-          frames: batchFrames,
-        }),
-      });
-      const data = await parseJsonResponse<FrameDescriptionResponse>(res);
-      if (!res.ok) {
-        const retryAfterSeconds = Number(res.headers.get('Retry-After'));
-        const error = new Error(data?.error ?? 'Failed to describe video frames.');
-        if (
-          attempt < MAX_FRAME_DESCRIPTION_REQUEST_RETRIES
-          && (res.status >= 500 || res.status === 429)
-        ) {
-          const retryDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-            ? retryAfterSeconds * 1000
-            : FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS * (attempt + 1);
-          lastError = error;
-          await sleep(retryDelay);
-          continue;
-        }
-        throw error;
-      }
-      return data ?? {};
-    } catch (error) {
-      const nextError = error instanceof Error ? error : new Error('Failed to describe video frames.');
-      lastError = nextError;
-      const isAbort = nextError.name === 'AbortError';
-      if (attempt >= MAX_FRAME_DESCRIPTION_REQUEST_RETRIES) {
-        break;
-      }
-      await sleep((isAbort ? FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS * 2 : FRAME_DESCRIPTION_RETRY_BASE_DELAY_MS) * (attempt + 1));
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-  }
-
-  throw lastError ?? new Error('Failed to describe video frames.');
-}
-
-const FRAME_DESCRIPTION_UNAVAILABLE = 'Visual summary unavailable.';
-
-function hasUsableFrameDescription(description?: string | null): boolean {
-  if (typeof description !== 'string') return false;
-  const normalized = description.trim();
-  return normalized.length > 0 && normalized !== FRAME_DESCRIPTION_UNAVAILABLE;
-}
-
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) {
     const message = error.message.trim();
@@ -368,61 +267,6 @@ function formatRemainingLabel(totalSeconds: number | null | undefined): string {
     return formatCountdownLabel(Number(totalSeconds));
   }
   return '--:-- left';
-}
-
-function evenlySampleFrameIndices(count: number, targetCount: number): number[] {
-  if (count <= 0 || targetCount <= 0) return [];
-  if (count <= targetCount) return Array.from({ length: count }, (_, index) => index);
-
-  const selected: number[] = [];
-  for (let index = 0; index < targetCount; index += 1) {
-    const sampleIndex = Math.min(count - 1, Math.round(index * (count - 1) / Math.max(targetCount - 1, 1)));
-    if (selected[selected.length - 1] !== sampleIndex) {
-      selected.push(sampleIndex);
-    }
-  }
-  return selected;
-}
-
-function selectEvenlySampledFrames(frames: IndexedVideoFrame[], targetCount: number): IndexedVideoFrame[] {
-  return evenlySampleFrameIndices(frames.length, targetCount)
-    .map((index) => frames[index] ?? null)
-    .filter((frame): frame is IndexedVideoFrame => !!frame);
-}
-
-type FrameCoverageSummary = {
-  totalOverviewFrames: number;
-  coveredSourceCount: number;
-  averageGapSeconds: number | null;
-};
-
-function summarizeFrameCoverage(frames: IndexedVideoFrame[]): FrameCoverageSummary {
-  const overviewFrames = frames
-    .filter((frame) => frame.kind === 'overview')
-    .sort((a, b) => a.timelineTime - b.timelineTime);
-  const coveredSourceCount = new Set(
-    overviewFrames
-      .map((frame) => normalizeKnownSourceId(frame.sourceId))
-      .filter((sourceId) => sourceId.length > 0),
-  ).size;
-  if (overviewFrames.length < 2) {
-    return {
-      totalOverviewFrames: overviewFrames.length,
-      coveredSourceCount,
-      averageGapSeconds: null,
-    };
-  }
-
-  const totalGap = overviewFrames.reduce((sum, frame, index) => {
-    if (index === 0) return sum;
-    return sum + Math.max(0, frame.timelineTime - overviewFrames[index - 1].timelineTime);
-  }, 0);
-
-  return {
-    totalOverviewFrames: overviewFrames.length,
-    coveredSourceCount,
-    averageGapSeconds: totalGap / Math.max(overviewFrames.length - 1, 1),
-  };
 }
 
 function getActiveMarkerMention(text: string, caret: number | null): ActiveMarkerMention | null {
@@ -531,26 +375,6 @@ function estimateTranscriptSeconds(duration: number): number {
   return Math.max(25, Math.min(900, 12 + duration * 0.2));
 }
 
-function estimateFrameExtractionSeconds(frameCount: number): number {
-  return Math.max(8, Math.min(240, frameCount * 0.12));
-}
-
-function estimateFrameDescriptionSeconds(frameCount: number, durationSeconds = 0): number {
-  const parallelRequests = getFrameDescriptionParallelRequestLimit(frameCount);
-  const batches = Math.ceil(frameCount / FRAME_DESCRIPTION_BATCH_SIZE);
-  const waves = Math.ceil(batches / Math.max(parallelRequests, 1));
-  const durationComponent = Math.max(0, durationSeconds) * 0.08;
-  return Math.max(20, Math.min(420, Math.round(durationComponent + waves * 9)));
-}
-
-function estimateVisualAnalysisSeconds(duration: number, totalWorkUnits: number): number {
-  const selectionCount = Math.max(Math.ceil(totalWorkUnits / 2), 1);
-  const sceneDetectionSeconds = Math.max(10, Math.min(75, 6 + duration * 0.03));
-  const selectionSeconds = Math.max(12, Math.min(240, 8 + duration * 0.04 + selectionCount * 1.25));
-  const descriptionSeconds = estimateFrameDescriptionSeconds(selectionCount, duration);
-  return sceneDetectionSeconds + selectionSeconds + descriptionSeconds;
-}
-
 function normalizeKnownSourceId(sourceId?: string | null): string {
   return sourceId && sourceId.trim().length > 0 ? sourceId : MAIN_SOURCE_ID;
 }
@@ -604,29 +428,6 @@ function stabilizeEtaEstimate(params: {
   return Math.max(1, Math.round((anchoredEtaSeconds * (1 - blend)) + (reportedEtaSeconds * blend)));
 }
 
-function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingProgress {
-  if (progress.stage === 'dense_refinement') {
-    return {
-      ...progress,
-      label: 'Analyzing visuals',
-    };
-  }
-
-  const segment = UNIFIED_VISUAL_PROGRESS_SEGMENTS[progress.stage] ?? null;
-  if (!segment) return progress;
-
-  const stageFraction = progress.total > 0
-    ? clampProgress(progress.completed / progress.total)
-    : 0;
-  const overallFraction = segment.start + (segment.end - segment.start) * stageFraction;
-  return {
-    ...progress,
-    completed: Math.round(overallFraction * 1000),
-    total: 1000,
-    label: 'Analyzing visuals',
-  };
-}
-
 function formatProgressSummary(params: {
   targetProgress: number | null;
   isCompleted: boolean;
@@ -662,105 +463,6 @@ function formatProgressSummary(params: {
     summary: `${percentLabel} • ${formatRemainingLabel(etaSeconds)}`,
     secondary: null,
   };
-}
-
-async function measureFrameHeuristics(imageBase64: string): Promise<{
-  brightness: number;
-  contrast: number;
-  edgeDensity: number;
-  sharpness: number;
-  darknessScore: number;
-  textUiScore: number;
-}> {
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const nextImage = new Image();
-    nextImage.onload = () => resolve(nextImage);
-    nextImage.onerror = () => reject(new Error('Failed to load extracted frame.'));
-    nextImage.src = `data:image/jpeg;base64,${imageBase64}`;
-  });
-
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, image.naturalWidth || image.width || 320);
-  canvas.height = Math.max(1, image.naturalHeight || image.height || 180);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) {
-    throw new Error('Canvas context unavailable for frame scoring.');
-  }
-  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const pixelCount = Math.max(1, width * height);
-  const gray = new Float32Array(pixelCount);
-  let brightnessSum = 0;
-  let brightnessSqSum = 0;
-
-  for (let index = 0; index < pixelCount; index += 1) {
-    const offset = index * 4;
-    const luma = (0.2126 * data[offset] + 0.7152 * data[offset + 1] + 0.0722 * data[offset + 2]) / 255;
-    gray[index] = luma;
-    brightnessSum += luma;
-    brightnessSqSum += luma * luma;
-  }
-
-  const brightness = brightnessSum / pixelCount;
-  const variance = Math.max(0, brightnessSqSum / pixelCount - brightness * brightness);
-  const contrast = Math.min(1, Math.sqrt(variance) / 0.5);
-
-  let edgeSum = 0;
-  let strongEdges = 0;
-  let horizontalLineEvidence = 0;
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = y * width + x;
-      const gx = Math.abs(gray[index + 1] - gray[index - 1]);
-      const gy = Math.abs(gray[index + width] - gray[index - width]);
-      const laplacian = Math.abs((4 * gray[index]) - gray[index - 1] - gray[index + 1] - gray[index - width] - gray[index + width]);
-      edgeSum += laplacian;
-      if (gx + gy > 0.18) strongEdges += 1;
-      if (gx > 0.12 && gy < 0.08) horizontalLineEvidence += 1;
-    }
-  }
-
-  const edgeDensity = Math.min(1, strongEdges / pixelCount * 8);
-  const sharpness = Math.min(1, edgeSum / pixelCount * 3.5);
-  const darknessScore = brightness < 0.16 ? (0.16 - brightness) / 0.16 : 0;
-  const textUiScore = Math.min(1, horizontalLineEvidence / pixelCount * 18 + edgeDensity * 0.35);
-
-  return {
-    brightness,
-    contrast,
-    edgeDensity,
-    sharpness,
-    darknessScore,
-    textUiScore,
-  };
-}
-
-function scoreFrameHeuristics(
-  metrics: {
-    brightness: number;
-    contrast: number;
-    edgeDensity: number;
-    sharpness: number;
-    darknessScore: number;
-    textUiScore: number;
-  },
-  sceneBoundaryDistanceSeconds: number,
-): number {
-  const exposureScore = 1 - Math.min(1, Math.abs(metrics.brightness - 0.52) / 0.52);
-  const washedOutPenalty = metrics.contrast < 0.16 ? (0.16 - metrics.contrast) / 0.16 : 0;
-  const transitionPenalty = sceneBoundaryDistanceSeconds < 0.18
-    ? 1 - sceneBoundaryDistanceSeconds / 0.18
-    : 0;
-  return (
-    metrics.sharpness * 0.36 +
-    metrics.edgeDensity * 0.22 +
-    metrics.textUiScore * 0.16 +
-    exposureScore * 0.18 +
-    metrics.contrast * 0.08 -
-    metrics.darknessScore * 0.18 -
-    washedOutPenalty * 0.12 -
-    transitionPenalty * 0.45
-  );
 }
 
 function getLiveMessageActionState(
@@ -886,124 +588,6 @@ function buildSilenceCandidatePayload(): SilenceCandidate[] {
   return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
 }
 
-function mergeFrameDescriptions(
-  frames: IndexedVideoFrame[],
-  startIndex: number,
-  descriptions: Array<{ index: number; description: string }>,
-): IndexedVideoFrame[] {
-  const nextFrames = [...frames];
-  for (const item of descriptions) {
-    const targetIndex = startIndex + item.index;
-    if (!nextFrames[targetIndex]) continue;
-    nextFrames[targetIndex] = {
-      ...nextFrames[targetIndex],
-      description: item.description.trim(),
-    };
-  }
-  return nextFrames;
-}
-
-async function describeIndexedFrames(
-  frames: IndexedVideoFrame[],
-  onProgress?: (progress: { completed: number; total: number }) => void,
-): Promise<IndexedVideoFrame[]> {
-  if (frames.length === 0) return frames;
-
-  let nextFrames = [...frames];
-  const batches: FrameDescriptionBatch[] = [];
-  for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
-    const batchFrames = nextFrames
-      .slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE)
-      .filter((frame): frame is IndexedVideoFrame & { image: string } => typeof frame.image === 'string' && frame.image.length > 0)
-      .map((frame) => ({
-        image: frame.image,
-        timelineTime: frame.timelineTime,
-        sourceTime: frame.sourceTime,
-      }));
-    if (batchFrames.length === 0) continue;
-    batches.push({ start, batchFrames });
-  }
-
-  let completed = 0;
-  const total = nextFrames.length;
-  onProgress?.({ completed, total });
-  const errors = await runFrameDescriptionBatches(batches, {
-    onBatchComplete: (result) => {
-      nextFrames = mergeFrameDescriptions(nextFrames, result.start, result.data.descriptions ?? []);
-      completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-      onProgress?.({ completed, total });
-    },
-  });
-  if (errors.length > 0) {
-    throw errors[0];
-  }
-  return nextFrames;
-}
-
-async function runFrameDescriptionBatches(
-  batches: FrameDescriptionBatch[],
-  callbacks: {
-    onBatchStart?: (batch: FrameDescriptionBatch) => void;
-    onBatchComplete: (result: { start: number; data: FrameDescriptionResponse }) => void;
-    onBatchSettled?: (batch: FrameDescriptionBatch) => void;
-  },
-): Promise<Error[]> {
-  if (batches.length === 0) return [];
-
-  let nextBatchIndex = 0;
-  const totalFrames = batches.reduce((sum, batch) => sum + batch.batchFrames.length, 0);
-  const workerCount = Math.min(
-    getFrameDescriptionParallelRequestLimit(totalFrames),
-    batches.length,
-  );
-  const errors: Error[] = [];
-
-  const runWorker = async () => {
-    while (nextBatchIndex < batches.length) {
-      const batchIndex = nextBatchIndex;
-      nextBatchIndex += 1;
-      const batch = batches[batchIndex];
-      callbacks.onBatchStart?.(batch);
-      try {
-        const data = await requestFrameDescriptions(batch.batchFrames);
-        callbacks.onBatchComplete({ start: batch.start, data });
-      } catch (error) {
-        const nextError = error instanceof Error ? error : new Error('Failed to describe video frames.');
-        console.warn('Failed to describe a frame batch.', nextError);
-        errors.push(nextError);
-      } finally {
-        callbacks.onBatchSettled?.(batch);
-      }
-    }
-  };
-
-  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
-  return errors;
-}
-
-function buildFrameContextPayload(frames: IndexedVideoFrame[], clips: ReturnType<typeof useEditorStore.getState>['clips']): IndexedVideoFrame[] {
-  return frames
-    .filter((frame) => hasUsableFrameDescription(frame.description))
-    .map((frame) => {
-      if (frame.projectedTimelineTime !== undefined || frame.visibleOnTimeline !== undefined) {
-        return {
-          ...frame,
-          image: undefined,
-          projectedTimelineTime: frame.projectedTimelineTime ?? frame.timelineTime,
-          visibleOnTimeline: frame.visibleOnTimeline ?? true,
-        };
-      }
-
-      const timelineOccurrences = sourceTimeToTimelineOccurrences(clips, frame.sourceTime, frame.sourceId);
-      return {
-        ...frame,
-        image: undefined,
-        projectedTimelineTime: timelineOccurrences[0] ?? null,
-        visibleOnTimeline: timelineOccurrences.length > 0,
-      };
-    });
-}
-
 function getAssistantFallbackMessage(action?: EditAction | null): string {
   switch (action?.type) {
     case 'transcribe_request':
@@ -1014,17 +598,6 @@ function getAssistantFallbackMessage(action?: EditAction | null): string {
     default:
       return 'I checked that section, but I need a clearer target before making an edit.';
   }
-}
-
-function formatFrameDescriptionProgressLabel(params: {
-  completedFrames: number;
-  totalFrames: number;
-  completedBatches: number;
-  totalBatches: number;
-  activeBatches: number;
-}): string {
-  const { completedFrames, totalFrames } = params;
-  return `Analyzing visuals ${completedFrames}/${totalFrames}`;
 }
 
 function formatSourceScopedProgressLabel(params: {
@@ -1070,11 +643,7 @@ function buildServerAnalysisStatusCards(params: {
     const remainingFraction = 1 - completedFraction;
     if (remainingFraction <= 0) return 0;
 
-    if (kind === 'audio') {
-      return Math.max(1, Math.round(estimateTranscriptSeconds(duration) * remainingFraction));
-    }
-
-    return Math.max(1, Math.round(estimateVisualAnalysisSeconds(duration, task.total) * remainingFraction));
+    return Math.max(1, Math.round(estimateTranscriptSeconds(duration) * remainingFraction));
   };
 
   const buildFallbackTask = (
@@ -1161,17 +730,9 @@ function buildServerAnalysisStatusCards(params: {
       const analysis = params.analysisBySourceId[source.sourceId] ?? null;
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
       const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
-      const progress = kind === 'visual'
-        ? (
-          analysis?.progress && !isVisualPreparationStage(analysis.progress.stage)
-            ? normalizeVisualAnalysisProgress(analysis.progress)
-            : null
-        )
-        : (
-          analysis?.progress?.stage === 'transcribing_audio' || analysis?.progress?.stage === 'transcribing'
-            ? analysis.progress
-            : null
-        );
+      const progress = analysis?.progress?.stage === 'transcribing_audio' || analysis?.progress?.stage === 'transcribing'
+        ? analysis.progress
+        : null;
       const fallbackEtaSeconds = estimateTaskEtaSeconds(kind, source.duration, task, progress);
       return {
         analysis,
@@ -1186,7 +747,7 @@ function buildServerAnalysisStatusCards(params: {
     const completed = tasks.filter((task) => (
       task.status === 'completed' || (kind === 'audio' && task.status === 'unavailable')
     )).length;
-    const title = kind === 'audio' ? 'Audio analysis' : 'Visual analysis';
+    const title = kind === 'audio' ? 'Video analysis' : 'Visual analysis';
     const completedStage = kind === 'audio' ? 'transcribing' : 'describing_frames';
     const firstReason = tasks.find((task) => task.reason)?.reason ?? null;
     const hasObservedProgress = taskEntries.some((entry) => {
@@ -1208,9 +769,7 @@ function buildServerAnalysisStatusCards(params: {
       return {
         key: `${kind}-analysis`,
         title,
-        progress: kind === 'visual'
-          ? normalizeVisualAnalysisProgress(buildCompletedProgress(completedStage))
-          : buildCompletedProgress(completedStage),
+        progress: buildCompletedProgress(completedStage),
         tone: 'completed',
       };
     }
@@ -1248,16 +807,6 @@ function buildServerAnalysisStatusCards(params: {
           0,
         )), 0) || null;
 
-    if (kind === 'visual' && aggregateStatus === 'running' && isVisualPreparationStage(activeStage)) {
-      return {
-        key: `${kind}-analysis`,
-        title,
-        progress: null,
-        secondaryLabel: 'Extracting frames…',
-        showProgressBar: false,
-      };
-    }
-
     const activeEtaSeconds = activeEntry
       ? stabilizeEtaEstimate({
           reportedEtaSeconds: activeEntry.progress?.etaSeconds
@@ -1272,25 +821,17 @@ function buildServerAnalysisStatusCards(params: {
     return {
       key: `${kind}-analysis`,
       title,
-      progress: kind === 'visual'
-        ? {
-            stage: activeStage,
-            completed: Math.round(progressFraction * 1000),
-            total: 1000,
-            label: 'Analyzing visuals',
-            etaSeconds: activeEtaSeconds,
-          }
-        : {
-            stage: activeStage,
-            completed: Math.round(progressFraction * 1000),
-            total: 1000,
-            label: aggregateStatus === 'paused'
-              ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} paused`
-              : aggregateStatus === 'failed'
-              ? `${kind === 'audio' ? 'Audio analysis' : 'Visual analysis'} issue`
-                : `${kind === 'audio' ? 'Transcribing audio' : 'Analyzing visuals'}`,
-            etaSeconds: activeEtaSeconds,
-          },
+      progress: {
+          stage: activeStage,
+          completed: Math.round(progressFraction * 1000),
+          total: 1000,
+          label: aggregateStatus === 'paused'
+            ? 'Video analysis paused'
+            : aggregateStatus === 'failed'
+            ? 'Video analysis issue'
+              : 'Transcribing audio',
+          etaSeconds: activeEtaSeconds,
+        },
       secondaryLabel: aggregateStatus === 'failed'
         ? 'Issue'
         : aggregateStatus === 'paused'
@@ -1310,82 +851,7 @@ function buildServerAnalysisStatusCards(params: {
 
   return [
     buildAggregateCard('audio'),
-    buildAggregateCard('visual'),
   ];
-}
-
-function packFramesForChat(
-  frames: IndexedVideoFrame[],
-  availableSources: Array<{ sourceId: string; duration: number }>,
-): IndexedVideoFrame[] {
-  const overviewFrames = frames
-    .filter((frame) => frame.kind === 'overview' && hasUsableFrameDescription(frame.description))
-    .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
-  if (overviewFrames.length <= MAX_CHAT_OVERVIEW_FRAMES) return overviewFrames;
-
-  const framesBySource = new Map<string, IndexedVideoFrame[]>();
-  overviewFrames.forEach((frame) => {
-    const sourceId = normalizeKnownSourceId(frame.sourceId);
-    const existing = framesBySource.get(sourceId) ?? [];
-    framesBySource.set(sourceId, [...existing, frame]);
-  });
-
-  const orderedSourceIds = availableSources
-    .map((source) => source.sourceId)
-    .filter((sourceId) => framesBySource.has(sourceId));
-  const fallbackSourceIds = [...framesBySource.keys()].filter((sourceId) => !orderedSourceIds.includes(sourceId));
-  const sourceIds = [...orderedSourceIds, ...fallbackSourceIds];
-
-  const reservedSelections = new Map<string, IndexedVideoFrame[]>();
-  const reservedKeys = new Set<string>();
-  sourceIds.forEach((sourceId) => {
-    const selected = selectEvenlySampledFrames(framesBySource.get(sourceId) ?? [], 4);
-    reservedSelections.set(sourceId, selected);
-    selected.forEach((frame) => {
-      reservedKeys.add(`${sourceId}:${frame.timelineTime}:${frame.sourceTime}`);
-    });
-  });
-
-  let packed = sourceIds.flatMap((sourceId) => reservedSelections.get(sourceId) ?? []);
-  if (packed.length >= MAX_CHAT_OVERVIEW_FRAMES) {
-    return selectEvenlySampledFrames(packed, MAX_CHAT_OVERVIEW_FRAMES)
-      .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
-  }
-
-  const remainingSlots = MAX_CHAT_OVERVIEW_FRAMES - packed.length;
-  const sourceDurationById = new Map(availableSources.map((source) => [source.sourceId, Math.max(source.duration, 0)]));
-  const remainingPools = sourceIds.map((sourceId) => {
-    const pool = (framesBySource.get(sourceId) ?? []).filter((frame) => !reservedKeys.has(`${sourceId}:${frame.timelineTime}:${frame.sourceTime}`));
-    return {
-      sourceId,
-      pool,
-      duration: sourceDurationById.get(sourceId) ?? pool.length,
-    };
-  });
-  const totalDuration = remainingPools.reduce((sum, entry) => sum + entry.duration, 0);
-  let leftoverSlots = remainingSlots;
-
-  remainingPools.forEach((entry, index) => {
-    if (leftoverSlots <= 0 || entry.pool.length === 0) return;
-    const proportionalTarget = totalDuration > 0
-      ? Math.round((entry.duration / totalDuration) * remainingSlots)
-      : Math.floor(remainingSlots / Math.max(remainingPools.length - index, 1));
-    const target = Math.min(entry.pool.length, Math.max(0, proportionalTarget));
-    const selected = selectEvenlySampledFrames(entry.pool, target);
-    packed = [...packed, ...selected];
-    leftoverSlots -= selected.length;
-  });
-
-  if (leftoverSlots > 0) {
-    const spillover = remainingPools.flatMap((entry) => entry.pool)
-      .filter((frame) => !packed.includes(frame))
-      .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime);
-    packed = [...packed, ...selectEvenlySampledFrames(spillover, leftoverSlots)];
-  }
-
-  return packed
-    .sort((a, b) => a.timelineTime - b.timelineTime || a.sourceTime - b.sourceTime)
-    .slice(0, MAX_CHAT_OVERVIEW_FRAMES);
 }
 
 function isMarkerMutationAction(action?: EditAction | null): action is EditAction {
@@ -1933,167 +1399,6 @@ function ActionDetails({ action }: { action: EditAction }) {
   }
 
   return null;
-}
-
-type TimelineFrameSample = {
-  index: number;
-  timelineTime: number;
-  sourceTime: number;
-  sourceId: string;
-};
-
-async function extractSourceOverviewFrames(
-  input: {
-    sourceId: string;
-    source: Uint8Array | File | string;
-    duration: number;
-    overviewIntervalSeconds: number;
-    maxOverviewFrames: number;
-    onProgress?: (progress: {
-      stage: 'extracting_frames' | 'choosing_representative_frames';
-      completed: number;
-      total: number;
-      label: string;
-    }) => void;
-  },
-): Promise<SourceIndexedFrame[]> {
-  if (input.duration <= 0) return [];
-
-  const preferredInterval = Math.max(0.1, input.overviewIntervalSeconds);
-  const windows = buildCoarseRepresentativeWindows(input.duration, preferredInterval, input.maxOverviewFrames);
-  if (windows.length === 0) return [];
-
-  const candidateSamples = windows.flatMap((window) => (
-    buildRepresentativeCandidateTimes(window).map((sourceTime) => ({
-      windowIndex: window.index,
-      sourceTime,
-      windowStart: window.startTime,
-      windowEnd: window.endTime,
-    }))
-  ));
-  if (candidateSamples.length === 0) return [];
-
-  const images = await extractVideoFrames(
-    input.source,
-    candidateSamples.map((sample) => sample.sourceTime),
-    {
-      concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
-      onProgress: ({ completed, total }) => {
-        input.onProgress?.({
-          stage: 'extracting_frames',
-          completed,
-          total,
-          label: `Sampling video frames ${completed}/${total}`,
-        });
-      },
-    },
-  );
-
-  const scoredCandidates: Array<(typeof candidateSamples)[number] & { image: string; score: number }> = [];
-  for (let index = 0; index < candidateSamples.length; index += 1) {
-    const sample = candidateSamples[index];
-    const image = images[index];
-    const metrics = await measureFrameHeuristics(image);
-    const score = scoreFrameHeuristics(metrics, Number.POSITIVE_INFINITY);
-    scoredCandidates.push({
-      ...sample,
-      image,
-      score,
-    });
-    input.onProgress?.({
-      stage: 'choosing_representative_frames',
-      completed: index + 1,
-      total: candidateSamples.length,
-      label: `Scoring frame candidates ${index + 1}/${candidateSamples.length}`,
-    });
-  }
-
-  const bestByWindow = new Map<number, (typeof scoredCandidates)[number]>();
-  for (const candidate of scoredCandidates) {
-    const currentBest = bestByWindow.get(candidate.windowIndex);
-    if (!currentBest || candidate.score > currentBest.score) {
-      bestByWindow.set(candidate.windowIndex, candidate);
-    }
-  }
-
-  return [...bestByWindow.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, candidate]) => ({
-      sourceId: input.sourceId,
-      sourceTime: candidate.sourceTime,
-      image: candidate.image,
-      sampleKind: 'coarse_window_rep',
-      score: Number(candidate.score.toFixed(4)),
-    }));
-}
-
-async function extractTimelineFramesFromSources(
-  input: {
-    clips: ReturnType<typeof useEditorStore.getState>['clips'];
-    availableSources: Array<ReturnType<typeof resolveProjectSources>[number]>;
-    timelineTimestamps: number[];
-    kind: IndexedVideoFrame['kind'];
-    onProgress?: (progress: { completed: number; total: number }) => void;
-  },
-): Promise<IndexedVideoFrame[]> {
-  if (input.timelineTimestamps.length === 0) return [];
-
-  const schedule = buildClipSchedule(input.clips);
-  const samples = input.timelineTimestamps
-    .map((timelineTime, index) => {
-      const resolved = timelineTimeToSource(schedule, timelineTime);
-      if (!resolved) return null;
-      return {
-        index,
-        timelineTime,
-        sourceTime: resolved.sourceTime,
-        sourceId: resolved.entry.sourceId ?? MAIN_SOURCE_ID,
-      } satisfies TimelineFrameSample;
-    })
-    .filter((sample): sample is TimelineFrameSample => !!sample);
-
-  if (samples.length === 0) return [];
-  const availableSourceById = new Map(input.availableSources.map((entry) => [entry.sourceId, entry]));
-
-  const frames = new Array<IndexedVideoFrame | null>(samples.length).fill(null);
-  input.onProgress?.({ completed: 0, total: samples.length });
-  let completedAcrossSources = 0;
-  const samplesBySource = new Map<string, TimelineFrameSample[]>();
-  for (const sample of samples) {
-    const existing = samplesBySource.get(sample.sourceId) ?? [];
-    samplesBySource.set(sample.sourceId, [...existing, sample]);
-  }
-
-  for (const [sourceId, sourceSamples] of samplesBySource) {
-    const sourceEntry = availableSourceById.get(sourceId);
-    if (!sourceEntry?.source) {
-      throw new Error(`Missing source video for frame extraction (${sourceId}).`);
-    }
-
-    const images = await extractVideoFrames(
-      sourceEntry.source,
-      sourceSamples.map((sample) => sample.sourceTime),
-      {
-        concurrency: OVERVIEW_FRAME_EXTRACTION_CONCURRENCY,
-        onProgress: ({ completed }) => {
-          input.onProgress?.({ completed: completedAcrossSources + completed, total: samples.length });
-        },
-      },
-    );
-
-    sourceSamples.forEach((sample, imageIndex) => {
-      frames[sample.index] = {
-        image: images[imageIndex],
-        timelineTime: sample.timelineTime,
-        sourceTime: sample.sourceTime,
-        sourceId,
-        kind: input.kind,
-      };
-    });
-    completedAcrossSources += sourceSamples.length;
-  }
-
-  return frames.filter((frame): frame is IndexedVideoFrame => !!frame);
 }
 
 // ─── Markdown renderer ─────────────────────────────────────────────────────────
@@ -3113,8 +2418,6 @@ export default function ChatSidebar() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
-  const frameDescriptionPromiseRef = useRef<Promise<SourceIndexedFrame[]> | null>(null);
-  const extractionPromiseRef = useRef<Promise<IndexedVideoFrame[]> | null>(null);
   const requestChainStateRef = useRef<Record<string, RequestChainState>>({});
 
   const messages = useEditorStore(s => s.messages);
@@ -3130,8 +2433,6 @@ export default function ChatSidebar() {
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);
-  const [frameIndexingProgress, setFrameIndexingProgress] = useState<IndexingProgress | null>(null);
-  const [frameAnalysisError, setFrameAnalysisError] = useState<string | null>(null);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoData = useEditorStore(s => s.videoData);
@@ -3142,14 +2443,9 @@ export default function ChatSidebar() {
   const transcriptError = useEditorStore(s => s.transcriptError);
   const transcriptProgress = useEditorStore(s => s.transcriptProgress);
   const transcriptStartedAtRef = useRef<number | null>(null);
-  const analysisOverviewFrames = useEditorStore(s => s.analysisOverviewFrames);
-  const displayOverviewFrames = useEditorStore(s => s.displayOverviewFrames);
-  const sourceOverviewFrames = useEditorStore(s => s.sourceOverviewFrames);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
-  const setSourceOverviewFrames = useEditorStore(s => s.setSourceOverviewFrames);
-  const playbackActive = useEditorStore(s => s.playbackActive);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
   const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
@@ -3189,17 +2485,7 @@ export default function ChatSidebar() {
     () => getInitialIndexingReady(sources, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId),
     [sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sources],
   );
-  const overviewReadySourceIds = useMemo(() => new Set(
-    (sourceOverviewFrames ?? []).map((frame) => normalizeKnownSourceId(frame.sourceId)),
-  ), [sourceOverviewFrames]);
-  const missingOverviewSources = useMemo(() => (
-    availableSources.filter((entry) => (
-      !sourceIndexFreshBySourceId[entry.sourceId]?.overview
-      && !overviewReadySourceIds.has(entry.sourceId)
-    ))
-  ), [availableSources, overviewReadySourceIds, sourceIndexFreshBySourceId]);
   useEffect(() => {
-    setFrameAnalysisError(null);
     requestChainStateRef.current = {};
   }, [currentProjectId]);
 
@@ -3251,373 +2537,6 @@ export default function ChatSidebar() {
     setHighlightedMarkerIndex(0);
   }, [activeMarkerMention?.query, markerSuggestions.length]);
 
-  // Source overview indexing runs only when a source is missing canonical frame data.
-  useEffect(() => {
-    if (!initialIndexingReady || useServerSourceIndex) return;
-    if (availableSources.length === 0) return;
-    if (document.hidden || playbackActive || missingOverviewSources.length === 0) return;
-    void (async () => {
-      try {
-        await ensureFramesExtracted();
-      } catch {
-        // Keep the editor usable even if background indexing fails.
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [availableSources.length, initialIndexingReady, missingOverviewSources, playbackActive, useServerSourceIndex]);
-
-  const ensureFramesExtracted = useCallback(async (force = false): Promise<IndexedVideoFrame[]> => {
-    if (!initialIndexingReady) {
-      return useEditorStore.getState().analysisOverviewFrames ?? [];
-    }
-    if (!force && extractionPromiseRef.current) return extractionPromiseRef.current;
-    const promise = (async () => {
-    const state = useEditorStore.getState();
-    const sourcesToIndex = availableSources.filter(
-      (entry) => force || !state.sourceIndexFreshBySourceId[entry.sourceId]?.overview
-    );
-    if (sourcesToIndex.length === 0) {
-      return state.analysisOverviewFrames ?? [];
-    }
-    if (document.hidden || state.playbackActive) {
-      return state.analysisOverviewFrames ?? [];
-    }
-    try {
-      setFrameAnalysisError(null);
-      const { overviewIntervalSeconds, maxOverviewFrames } = state.aiSettings.frameInspection;
-
-      for (let sourceOffset = 0; sourceOffset < sourcesToIndex.length; sourceOffset += 1) {
-        const entry = sourcesToIndex[sourceOffset];
-        const frames = await extractSourceOverviewFrames({
-          sourceId: entry.sourceId,
-          source: entry.source!,
-          duration: entry.duration,
-          overviewIntervalSeconds,
-          maxOverviewFrames,
-        });
-
-        const describedFrames = await ensureFrameDescriptions(frames, true, {
-          sourceIndex: sourceOffset + 1,
-          totalSources: sourcesToIndex.length,
-          fileName: entry.fileName,
-        });
-        setSourceOverviewFrames(entry.sourceId, describedFrames, {
-          fresh: describedFrames.every((frame) => hasUsableFrameDescription(frame.description)),
-        });
-      }
-
-      const refreshedState = useEditorStore.getState();
-      return refreshedState.analysisOverviewFrames ?? [];
-    } catch (error) {
-      setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
-      setFrameIndexingProgress(null);
-      return useEditorStore.getState().analysisOverviewFrames ?? [];
-    }
-    })();
-    extractionPromiseRef.current = promise;
-    try {
-      return await promise;
-    } finally {
-      if (extractionPromiseRef.current === promise) {
-        extractionPromiseRef.current = null;
-      }
-    }
-  }, [availableSources, initialIndexingReady, setSourceOverviewFrames]);
-
-  const extractDenseFramesForRange = useCallback(async (
-    frameRequest: { startTime: number; endTime: number; count?: number },
-  ): Promise<IndexedVideoFrame[]> => {
-    const requestedDuration = Math.max(0, frameRequest.endTime - frameRequest.startTime);
-    const timelineTimestamps = buildDenseTimelineTimestamps(
-      frameRequest.startTime,
-      frameRequest.endTime,
-      Math.max(
-        frameRequest.count ?? useEditorStore.getState().aiSettings.frameInspection.defaultFrameCount,
-        Math.ceil(requestedDuration / DEFAULT_DENSE_MAX_SPACING_SECONDS) + 1,
-      ),
-      DEFAULT_DENSE_MAX_SPACING_SECONDS,
-    );
-    if (timelineTimestamps.length === 0) return [];
-
-    const extractionStartedAt = performance.now();
-    setFrameIndexingProgress({
-      stage: 'dense_refinement',
-      completed: 0,
-      total: timelineTimestamps.length,
-      label: `Dense local refinement 0/${timelineTimestamps.length}`,
-      etaSeconds: estimateFrameExtractionSeconds(timelineTimestamps.length),
-    });
-
-    const denseFrames = await extractTimelineFramesFromSources({
-      clips: useEditorStore.getState().clips,
-      availableSources,
-      timelineTimestamps,
-      kind: 'dense',
-      onProgress: ({ completed, total }) => {
-        setFrameIndexingProgress({
-          stage: 'dense_refinement',
-          completed,
-          total,
-          label: `Dense local refinement ${completed}/${total}`,
-          etaSeconds: estimateRemainingSecondsFromObservedRate(
-            extractionStartedAt,
-            completed,
-            total,
-            estimateFrameExtractionSeconds(total) / Math.max(total, 1),
-          ),
-        });
-      },
-    });
-
-    const describedDenseFrames = await describeIndexedFrames(denseFrames, ({ completed, total }) => {
-      setFrameIndexingProgress({
-        stage: 'dense_refinement',
-        completed,
-        total,
-        label: `Dense local refinement ${completed}/${total}`,
-        etaSeconds: estimateRemainingSecondsFromObservedRate(
-          extractionStartedAt,
-          completed,
-          total,
-          estimateFrameDescriptionSeconds(total) / Math.max(total, 1),
-        ),
-      });
-    });
-
-    setFrameIndexingProgress(null);
-    return describedDenseFrames.map((frame) => ({
-      ...frame,
-      rangeStart: frameRequest.startTime,
-      rangeEnd: frameRequest.endTime,
-    }));
-  }, [availableSources]);
-
-  async function ensureFrameDescriptions(
-    frames: SourceIndexedFrame[],
-    force = false,
-    sourceContext?: {
-      sourceIndex: number;
-      totalSources: number;
-      fileName: string;
-    },
-  ): Promise<SourceIndexedFrame[]> {
-    if (frames.length === 0) return frames;
-    if (!force && frames.every((frame) => hasUsableFrameDescription(frame.description))) {
-      return frames;
-    }
-    if (frameDescriptionPromiseRef.current && !force) {
-      return frameDescriptionPromiseRef.current;
-    }
-
-    const promise = (async () => {
-      let nextFrames = [...frames];
-      const totalOverviewFrames = nextFrames.length;
-      const initialCompleted = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-      const completedBeforeRequests = initialCompleted;
-      const descriptionStartedAt = performance.now();
-      capture('frame_descriptions_started', { frame_count: totalOverviewFrames });
-      const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
-      const batches: FrameDescriptionBatch[] = [];
-      for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
-        const batch = nextFrames.slice(start, start + FRAME_DESCRIPTION_BATCH_SIZE);
-        const shouldDescribeBatch = force || batch.some((frame) => !hasUsableFrameDescription(frame.description));
-        if (!shouldDescribeBatch) continue;
-
-        const batchFrames = batch
-          .filter((frame): frame is SourceIndexedFrame & { image: string } => (
-            typeof frame.image === 'string' && frame.image.length > 0
-          ))
-          .map((frame) => ({
-            image: frame.image,
-            timelineTime: frame.sourceTime,
-            sourceTime: frame.sourceTime,
-        }));
-        if (batchFrames.length === 0) continue;
-        batches.push({ start, batchFrames });
-      }
-
-      let completedBatchCount = 0;
-      let activeBatchCount = 0;
-      const totalBatches = batches.length;
-      setFrameIndexingProgress(
-        {
-          stage: 'describing_frames',
-          completed: initialCompleted,
-          total: Math.max(totalOverviewFrames, 1),
-          label: sourceContext
-            ? formatSourceScopedProgressLabel({
-                sourceIndex: sourceContext.sourceIndex,
-                totalSources: sourceContext.totalSources,
-                fileName: sourceContext.fileName,
-                actionLabel: 'Analyzing visuals',
-                completed: initialCompleted,
-                total: totalOverviewFrames,
-              })
-            : formatFrameDescriptionProgressLabel({
-                completedFrames: initialCompleted,
-                totalFrames: totalOverviewFrames,
-                completedBatches: 0,
-                totalBatches: Math.max(totalBatches, 1),
-                activeBatches: 0,
-              }),
-          etaSeconds: estimateFrameDescriptionSeconds(Math.max(totalOverviewFrames - initialCompleted, 0)),
-        },
-      );
-
-      const errors = await runFrameDescriptionBatches(batches, {
-        onBatchStart: () => {
-          activeBatchCount += 1;
-          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-          setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
-                  completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: estimateRemainingSecondsFromObservedRate(
-              descriptionStartedAt,
-              completed,
-              totalOverviewFrames,
-              descriptionFallbackPerFrame,
-            ),
-          });
-        },
-        onBatchComplete: (result) => {
-          nextFrames = mergeFrameDescriptions(
-            nextFrames.map((frame) => ({
-              timelineTime: frame.sourceTime,
-              sourceTime: frame.sourceTime,
-              sourceId: frame.sourceId,
-              kind: 'overview' as const,
-              image: frame.image,
-              description: frame.description,
-            })),
-            result.start,
-            result.data.descriptions ?? [],
-          ).map((frame) => ({
-            sourceId: frame.sourceId ?? MAIN_SOURCE_ID,
-            sourceTime: frame.sourceTime,
-            image: frame.image,
-            description: frame.description,
-          }));
-          completedBatchCount += 1;
-          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-          const remaining = Math.max(totalOverviewFrames - completed, 0);
-          setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
-                  completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: remaining > 0
-              ? estimateRemainingSecondsFromObservedRate(
-                descriptionStartedAt,
-                completed,
-                totalOverviewFrames,
-                descriptionFallbackPerFrame,
-              )
-              : 0,
-          });
-        },
-        onBatchSettled: () => {
-          activeBatchCount = Math.max(0, activeBatchCount - 1);
-          const completed = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-          setFrameIndexingProgress({
-            stage: 'describing_frames',
-            completed,
-            total: Math.max(totalOverviewFrames, 1),
-            label: sourceContext
-              ? formatSourceScopedProgressLabel({
-                  sourceIndex: sourceContext.sourceIndex,
-                  totalSources: sourceContext.totalSources,
-                  fileName: sourceContext.fileName,
-                  actionLabel: 'Analyzing visuals',
-                  completed,
-                  total: totalOverviewFrames,
-                })
-              : formatFrameDescriptionProgressLabel({
-                  completedFrames: completed,
-                  totalFrames: totalOverviewFrames,
-                  completedBatches: completedBatchCount,
-                  totalBatches: Math.max(totalBatches, 1),
-                  activeBatches: activeBatchCount,
-                }),
-            etaSeconds: completed >= totalOverviewFrames
-              ? 0
-              : estimateRemainingSecondsFromObservedRate(
-                descriptionStartedAt,
-                Math.max(completed, completedBeforeRequests),
-                totalOverviewFrames,
-                descriptionFallbackPerFrame,
-              ),
-          });
-        },
-      });
-      if (errors.length > 0) {
-        const firstError = getErrorMessage(errors[0], 'Failed to analyze sampled video frames.');
-        setFrameAnalysisError(
-          errors.length === 1
-            ? firstError
-            : `${firstError} (${errors.length} frame-description requests failed.)`
-        );
-      } else {
-        setFrameAnalysisError(null);
-      }
-      const completedFrameCount = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
-      capture('frame_descriptions_completed', {
-        frame_count: completedFrameCount,
-        duration_ms: Math.round(performance.now() - descriptionStartedAt),
-      });
-      return nextFrames;
-    })();
-
-    frameDescriptionPromiseRef.current = promise;
-    try {
-      return await promise;
-    } catch (error) {
-      setFrameAnalysisError(getErrorMessage(error, 'Failed to analyze sampled video frames.'));
-      setFrameIndexingProgress(null);
-      return frames;
-    } finally {
-      if (frameDescriptionPromiseRef.current === promise) {
-        frameDescriptionPromiseRef.current = null;
-      }
-    }
-  }
-
-  const frameDescriptionsReady = useMemo(() => {
-    if (analysisOverviewFrames === null) return false;
-    return analysisOverviewFrames.every((frame) => hasUsableFrameDescription(frame.description));
-  }, [analysisOverviewFrames]);
-
   const buildCurrentTranscript = useCallback(() => {
     const freshState = useEditorStore.getState();
     const rawCaptions = freshState.sourceTranscriptCaptions;
@@ -3660,10 +2579,6 @@ export default function ChatSidebar() {
   ) => {
     if (!initialIndexingReady) return;
     const latestUserInput = [...history].reverse().find((entry) => entry.role === 'user')?.content ?? '';
-    const baseFrames = useServerSourceIndex
-      ? (useEditorStore.getState().analysisOverviewFrames ?? [])
-      : await ensureFramesExtracted();
-    let currentFrames = [...baseFrames];
     let nextHistory = [...history];
     let producedVisibleResponse = false;
     let streamingMessageId: string | null = null;
@@ -3680,8 +2595,6 @@ export default function ChatSidebar() {
       const currentClips = freshState.clips;
       const currentTranscript = buildCurrentTranscript();
       const silenceCandidates = buildSilenceCandidatePayload();
-      const packedFrames = packFramesForChat(currentFrames, availableSources);
-      const frameCoverage = summarizeFrameCoverage(currentFrames);
       const transcriptAvailability = chainState?.transcript ?? {
         canonicalAvailable: Boolean((freshState.sourceTranscriptCaptions ?? []).length),
         requestedDuringChain: false,
@@ -3732,38 +2645,8 @@ export default function ChatSidebar() {
           silenceCandidates,
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
-          frameCoverage,
-          frames: buildFrameContextPayload([...packedFrames, ...currentFrames.filter((frame) => frame.kind === 'dense')], currentClips),
         },
       }, ctrl, onChunk);
-
-      if (action?.type === 'request_frames' && action.frameRequest && round < 2) {
-        if (streamingMessageId) { removeMessage(streamingMessageId); streamingMessageId = null; }
-        if (!initialIndexingReady) break;
-        setLoadingStatus('Dense local refinement…');
-        setLoadingPhaseId('continuing_remaining_step');
-        const denseFrames = await extractDenseFramesForRange(action.frameRequest);
-        currentFrames = [...baseFrames, ...denseFrames];
-        nextHistory = [
-          ...nextHistory,
-          {
-            role: 'assistant',
-            content: action.message,
-            requestChainId,
-            action,
-            actionType: action.type,
-            actionMessage: action.message,
-            actionStatus: 'completed',
-            actionResult: 'Dense local frame refinement ready.',
-          },
-          {
-            role: 'user',
-            content: `[${denseFrames.length} dense frames extracted from ${formatTime(action.frameRequest.startTime)} to ${formatTime(action.frameRequest.endTime)}, now answer with these frames.]`,
-            requestChainId,
-          },
-        ];
-        continue;
-      }
 
       setVisualSearchSession(visualSearch ?? null);
       if (visualSearch) {
@@ -3890,7 +2773,7 @@ export default function ChatSidebar() {
         });
       }
     }
-  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, removeMessage, requestSeek, setVisualSearchSession, updateMessage, updateRequestChainState, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, removeMessage, requestSeek, setVisualSearchSession, updateMessage, updateRequestChainState]);
 
   const continueRequestChain = useCallback(async (
     requestChainId: string,
@@ -4065,13 +2948,7 @@ export default function ChatSidebar() {
   }, [clearChatHistory, isChatLoading, messages.length, reviewLocked]);
 
   const hasVideoSource = availableSources.length > 0;
-  const overviewFramesForUi = displayOverviewFrames ?? analysisOverviewFrames;
   const usingServerSourceIndex = useServerSourceIndex;
-  const coarseFramesAvailable = (overviewFramesForUi ?? []).some((frame) => hasUsableFrameDescription(frame.description));
-  const frameAnalysisReady = analysisOverviewFrames !== null && frameDescriptionsReady;
-  const framesReady = usingServerSourceIndex
-    ? frameAnalysisError !== null || frameAnalysisReady || coarseFramesAvailable
-    : frameAnalysisError !== null || frameAnalysisReady;
   const transcriptFailed = transcriptStatus === 'error';
   const estimatedTranscriptEta = estimateTranscriptSeconds(mainTimelineDuration || videoDuration);
   const observedTranscriptRemainingEta =
@@ -4089,14 +2966,12 @@ export default function ChatSidebar() {
     completed: transcriptProgress?.completed ?? 0,
     total: Math.max(transcriptProgress?.total ?? 1, 1),
   });
-  const transcriptUnavailableNotice = hasVideoSource && framesReady && transcriptFailed
+  const transcriptUnavailableNotice = hasVideoSource && transcriptFailed
     ? formatTranscriptFailureNotice(transcriptError)
     : null;
-  const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
-    ? `${frameAnalysisError} Initial indexing is incomplete.`
-    : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
-      ? `${sourceIndexAnalysis.error} Initial indexing is still incomplete.`
-      : null;
+  const frameAnalysisErrorNotice = hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
+    ? `${sourceIndexAnalysis.error} Initial indexing is still incomplete.`
+    : null;
   const analysisStatusCards: AnalysisStatusCard[] = [];
   if (hasVideoSource) {
     if (usingServerSourceIndex) {
@@ -4108,7 +2983,7 @@ export default function ChatSidebar() {
     } else if (transcriptStatus === 'loading') {
       analysisStatusCards.push({
         key: 'audio-analysis',
-        title: 'Audio analysis',
+        title: 'Video analysis',
         progress: {
           stage: 'transcribing',
           completed: transcriptProgress?.completed ?? 0,
@@ -4123,73 +2998,25 @@ export default function ChatSidebar() {
     } else if (!usingServerSourceIndex && transcriptStatus === 'error') {
       analysisStatusCards.push({
         key: 'audio-analysis',
-        title: 'Audio analysis',
+        title: 'Video analysis',
         progress: transcriptProgress
           ? {
               stage: 'transcribing',
               completed: transcriptProgress.completed,
               total: Math.max(transcriptProgress.total, 1),
-              label: 'Audio analysis issue',
+              label: 'Video analysis issue',
               etaSeconds: null,
             }
           : null,
-        detail: transcriptError ?? 'Audio transcription did not finish.',
+        detail: transcriptError ?? 'Video analysis did not finish.',
         secondaryLabel: 'Issue',
       });
     } else if (!usingServerSourceIndex && transcriptStatus === 'done') {
       analysisStatusCards.push({
         key: 'audio-analysis',
-        title: 'Audio analysis',
+        title: 'Video analysis',
         progress: buildCompletedProgress('transcribing'),
         tone: 'completed',
-      });
-    }
-
-    if (frameIndexingProgress && frameIndexingProgress.stage === 'dense_refinement' && frameAnalysisError === null) {
-      analysisStatusCards.push({
-        key: 'dense-refinement',
-        title: 'Visual analysis',
-        progress: frameIndexingProgress,
-        secondaryLabel: 'Local follow-up only inside the narrowed range.',
-      });
-    } else if (!usingServerSourceIndex && frameIndexingProgress && !frameAnalysisReady && frameAnalysisError === null) {
-      const visualFallbackEtaSeconds = Math.max(
-        1,
-        Math.round(
-          estimateFrameDescriptionSeconds(
-            Math.max(frameIndexingProgress.total, 1),
-            mainTimelineDuration || videoDuration,
-          ) * (1 - (getProgressValue(frameIndexingProgress) ?? 0)),
-        ),
-      );
-      analysisStatusCards.push({
-        key: 'frame-analysis',
-        title: 'Visual analysis',
-        progress: {
-          ...frameIndexingProgress,
-          etaSeconds: stabilizeEtaEstimate({
-            reportedEtaSeconds: frameIndexingProgress.etaSeconds,
-            fallbackEtaSeconds: visualFallbackEtaSeconds,
-            completed: frameIndexingProgress.completed,
-            total: Math.max(frameIndexingProgress.total, 1),
-          }),
-        },
-        secondaryLabel: getIndexingStageTitle(frameIndexingProgress, null),
-      });
-    } else if (!usingServerSourceIndex && frameAnalysisReady) {
-      analysisStatusCards.push({
-        key: 'frame-analysis',
-        title: 'Visual analysis',
-        progress: buildCompletedProgress('describing_frames'),
-        tone: 'completed',
-      });
-    } else if (!usingServerSourceIndex && frameAnalysisError) {
-      analysisStatusCards.push({
-        key: 'frame-analysis',
-        title: 'Visual analysis',
-        progress: frameIndexingProgress,
-        detail: frameAnalysisError,
-        secondaryLabel: 'Issue',
       });
     }
   }
@@ -4200,27 +3027,16 @@ export default function ChatSidebar() {
         sourceIndexFreshBySourceId[source.sourceId],
       ))
       : transcriptStatus === 'done');
-  const visualAnalysisReady = !hasVideoSource
-    || (usingServerSourceIndex
-      ? trackedServerSources.every((source) => isServerVisualReady(
-        sourceIndexAnalysisBySourceId[source.sourceId],
-        sourceIndexFreshBySourceId[source.sourceId],
-      ))
-      : frameAnalysisReady);
-  const mediaPreparationBlockingSend = hasVideoSource && (!audioAnalysisReady || !visualAnalysisReady);
-  const visualAnalysisBlockingSend = analysisStatusCards.some((card) => (
-    card.title === 'Visual analysis' && card.tone !== 'completed'
-  ));
+  const mediaPreparationBlockingSend = hasVideoSource && !audioAnalysisReady;
   const audioAnalysisBlockingSend = analysisStatusCards.some((card) => (
-    card.title === 'Audio analysis' && card.tone !== 'completed'
+    card.title === 'Video analysis' && card.tone !== 'completed'
   ));
   const composerInputDisabled = isChatLoading || reviewLocked;
-  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend || audioAnalysisBlockingSend || visualAnalysisBlockingSend;
+  const composerMuted = composerInputDisabled || mediaPreparationBlockingSend || audioAnalysisBlockingSend;
   const canSubmitMessage = input.trim().length > 0
     && !composerInputDisabled
     && !mediaPreparationBlockingSend
-    && !audioAnalysisBlockingSend
-    && !visualAnalysisBlockingSend;
+    && !audioAnalysisBlockingSend;
   const activeLoadingPhaseId = loadingPhaseId ?? (mediaPreparationBlockingSend ? 'initial_indexing_required' : null);
 
   const resizeComposer = useCallback(() => {
@@ -4272,12 +3088,6 @@ export default function ChatSidebar() {
     setActiveMarkerMention(null);
     focusComposer(nextCaret);
   }, [activeMarkerMention, focusComposer, input]);
-
-  useEffect(() => {
-    if (framesReady) {
-      setFrameIndexingProgress(null);
-    }
-  }, [framesReady]);
 
   const handleSend = useCallback(() => {
     if (!canSubmitMessage) return;
@@ -4495,8 +3305,6 @@ export default function ChatSidebar() {
                   ? 'Finish the active review…'
                   : isChatLoading
                     ? 'Autocut is working…'
-                    : visualAnalysisBlockingSend
-                      ? 'Visuals are loading. You can type…'
                     : mediaPreparationBlockingSend
                       ? 'Media is loading. You can type…'
                     : 'Ask about the video or review cuts…'
