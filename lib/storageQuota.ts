@@ -3,7 +3,7 @@ export const STORAGE_QUOTA_BYTES = 20_000_000_000;
 export const STORAGE_FILE_LIMIT_BYTES = 4_000_000_000;
 export const STORAGE_WARNING_RATIO = 0.8;
 export const STORAGE_CRITICAL_RATIO = 0.95;
-export const MAX_UPLOAD_VIDEO_DURATION_SECONDS = 30 * 60;
+export const MAX_UPLOAD_VIDEO_DURATION_SECONDS = 2 * 60 * 60;
 
 export type StorageQuotaWarningLevel = 'none' | 'warning' | 'critical' | 'limit';
 export type ManagedUploadKind = 'project-main' | 'main' | 'sources' | 'tracks';
@@ -80,7 +80,7 @@ export function getFileSizeErrorMessage(limitBytes = STORAGE_FILE_LIMIT_BYTES) {
 }
 
 export function getVideoDurationLimitErrorMessage() {
-  return 'Autocut currently supports up to 30 minutes per uploaded video.';
+  return 'Autocut currently supports up to 2 hours per uploaded video.';
 }
 
 export function getQuotaWarningMessage(snapshot: StorageQuotaSnapshot) {

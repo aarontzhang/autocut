@@ -4,9 +4,7 @@ import { getSupabaseServer } from '@/lib/supabase/server';
 import {
   AIEditingSettings,
   EditAction,
-  IndexedVideoFrame,
   SilenceCandidate,
-  VisualSearchSession,
 } from '@/lib/types';
 import { formatTimePrecise } from '@/lib/timelineUtils';
 import {
@@ -115,15 +113,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Use when user asks about what is said/spoken, needs content searched, or says "transcribe"
 - After transcription, the transcript is available in context for follow-up queries
 
-### 8. Request Dense Frames (request_frames)
-- Request denser local visual sampling for one narrowed timeline window
-- Use only after the transcript plus coarse representative frames suggest a promising range but you still need tighter visual evidence
-- frameRequest.startTime and frameRequest.endTime must describe a narrow window, not the full video
-- Prefer sub-second or about 1s spacing only inside the narrowed range
-- Never request dense frames across the whole upload
-- After dense frames arrive, continue the same user request and answer from those frames instead of asking again
-
-### 9. Transitions (add_transition)
+### 8. Transitions (add_transition)
 - Add a transition effect at a specific timeline time
 - Types: "fade_black"
 - Use when user says: "add a fade between clips", "transition at 0:30", etc.
@@ -247,22 +237,16 @@ No action:
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
 - CRITICAL: If the latest user message is even remotely asking you to do, find, tag, cut, mark, place, caption, move, or inspect something, prefer emitting a concrete action over returning type:none or prose-only analysis.
 - Use type:none only when you truly have no actionable target and no plausible marker, range, or tool request to advance the user's goal. Ordinary conversational replies can omit the action block entirely.
-- In every action block, include "final": true when this action fully satisfies the current request with no further steps needed, or "final": false when additional steps will follow (e.g. transcribe_request before add_captions, or a multi-step task with more edits remaining). transcribe_request and request_frames are always "final": false. Single-step requests are always "final": true.
+- In every action block, include "final": true when this action fully satisfies the current request with no further steps needed, or "final": false when additional steps will follow (e.g. transcribe_request before add_captions, or a multi-step task with more edits remaining). transcribe_request is always "final": false. Single-step requests are always "final": true.
 
-## Visual and audio context
-You may be provided with representative frames from the user's video as text summaries and/or a full audio transcript.
-- Representative frame summaries are a coarse pass, not exhaustive coverage. Use them along with the transcript to reason about content before editing.
-- Default retrieval flow: use transcript plus coarse representative frames to find candidate windows first, then request dense local frames only if confidence is mixed or the query is strongly visual.
-- For visually triggered edits, prioritize the visual evidence over the transcript when they disagree. Spoken words can lead or lag what appears on screen.
-- For visual events like gestures, objects, or on-screen actions, transcript mentions are only hints about where to look. Do not conclude the visual moment was already cut just because the spoken mention maps to removed source time.
-- If a transcript hint appears to point into removed footage but the user still wants a visual event found, keep searching in the remaining visible footage instead of asking whether you should continue.
-- If the user is scouting with markers only, place an approximate marker from the best available evidence and note the likely review window.
+## Audio and transcript context
+You are provided with a full audio transcript of the video.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
 - CRITICAL: For requests like "remove the section between X and Y" where X and Y are spoken moments, the delete span must start only after the first moment's speech fully ends and must stop before the second moment's speech begins. Do not cut at the coarse event timestamp if speech continues past it.
 - CRITICAL: Never set deleteStartTime or deleteEndTime in the middle of spoken speech. Before finalising any delete boundary, check the transcript to confirm no caption OVERLAPS that timestamp (a caption overlaps a time T if caption.startTime <= T < caption.endTime). If a caption overlaps your proposed deleteStartTime, push deleteStartTime to at least that caption's endTime. If a caption overlaps your proposed deleteEndTime, pull deleteEndTime back to at most that caption's startTime.
 - CRITICAL: The "Silence padding" setting shown in AI defaults is ONLY used by the automated silence-removal tool. Never apply it as a buffer when you are manually choosing deleteStartTime or deleteEndTime. Set boundaries at the exact transcript word edge. In particular, when the user asks to remove silence at the very start or end of the video, set deleteStartTime=0 or deleteEndTime=videoDuration exactly — do not leave any gap before the first word or after the last word.
-- If NEITHER frame summaries nor transcript are available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
-When the user asks about a timestamp or spoken content, cross-reference the frame sequence and transcript to give your best estimate.`;
+- If transcript is not yet available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
+When the user asks about a timestamp or spoken content, use the transcript to give your best estimate.`;
 
 const PROMPT_INJECTION_RULES = `
 
@@ -324,16 +308,6 @@ type RichChatTurn = ChatTurn & {
 };
 
 const MAX_TRANSCRIPT_LINES = 160;
-const MAX_PROMPT_OVERVIEW_FRAMES = 40;
-const MAX_PROMPT_DENSE_FRAMES = 24;
-
-function isVisualSearchSession(value: unknown): value is VisualSearchSession {
-  if (!value || typeof value !== 'object') return false;
-  const session = value as Partial<VisualSearchSession>;
-  return typeof session.projectId === 'string'
-    && typeof session.query === 'string'
-    && Array.isArray(session.candidates);
-}
 
 function tokenizeForRetrieval(text: string): string[] {
   return text
@@ -413,85 +387,6 @@ function selectRelevantTranscriptLines(
   };
 }
 
-function getFrameTimelinePosition(frame: IndexedVideoFrame): number {
-  return typeof frame.projectedTimelineTime === 'number'
-    ? frame.projectedTimelineTime
-    : frame.timelineTime;
-}
-
-function scoreFrameForPrompt(
-  frame: IndexedVideoFrame,
-  focusWindow: TranscriptWindow | null,
-  queryTokens: Set<string>,
-): number {
-  let score = 0;
-  const timelineTime = getFrameTimelinePosition(frame);
-
-  if (focusWindow) {
-    if (timelineTime >= focusWindow.startTime && timelineTime <= focusWindow.endTime) {
-      score += 10;
-    } else if (timelineTime >= focusWindow.startTime - 2 && timelineTime <= focusWindow.endTime + 2) {
-      score += 4;
-    }
-  }
-
-  if (frame.visibleOnTimeline !== false) score += 1;
-  if (frame.sampleKind === 'scene_rep') score += 0.75;
-  if (frame.kind === 'dense') score += 2;
-
-  const descriptionTokens = new Set(tokenizeForRetrieval(frame.description ?? ''));
-  for (const token of queryTokens) {
-    if (descriptionTokens.has(token)) {
-      score += 2;
-    }
-  }
-
-  return score;
-}
-
-function selectRelevantFramesForPrompt(params: {
-  frames: IndexedVideoFrame[];
-  latestUserMessage: string;
-  markers: Array<{
-    number?: number;
-    timelineTime?: number;
-    linkedRange?: { startTime?: number; endTime?: number } | null;
-  }>;
-}): IndexedVideoFrame[] {
-  const denseFrames = params.frames
-    .filter((frame) => frame.kind === 'dense')
-    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
-  const overviewFrames = params.frames
-    .filter((frame) => frame.kind === 'overview')
-    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
-
-  const focusWindow = resolveTranscriptWindow({
-    latestUserMessage: params.latestUserMessage,
-    frames: params.frames,
-    markers: params.markers,
-  });
-  const queryTokens = new Set(tokenizeForRetrieval(params.latestUserMessage));
-
-  const scoredOverview = overviewFrames
-    .map((frame, index) => ({
-      frame,
-      index,
-      score: scoreFrameForPrompt(frame, focusWindow, queryTokens),
-    }))
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, MAX_PROMPT_OVERVIEW_FRAMES)
-    .map((entry) => entry.frame)
-    .sort((a, b) => getFrameTimelinePosition(a) - getFrameTimelinePosition(b));
-
-  const selectedDense = denseFrames.length <= MAX_PROMPT_DENSE_FRAMES
-    ? denseFrames
-    : denseFrames
-        .filter((_, index) => index % Math.ceil(denseFrames.length / MAX_PROMPT_DENSE_FRAMES) === 0)
-        .slice(0, MAX_PROMPT_DENSE_FRAMES);
-
-  return [...scoredOverview, ...selectedDense];
-}
-
 type TranscriptTimelineLine = {
   raw: string;
   startTime: number;
@@ -559,30 +454,12 @@ type TranscriptWindow = {
 
 function resolveTranscriptWindow(params: {
   latestUserMessage: string;
-  frames: IndexedVideoFrame[];
   markers: Array<{
     number?: number;
     timelineTime?: number;
     linkedRange?: { startTime?: number; endTime?: number } | null;
   }>;
 }): TranscriptWindow | null {
-  const denseFrames = params.frames.filter((frame) => frame.kind === 'dense');
-  if (denseFrames.length > 0) {
-    const starts = denseFrames
-      .map((frame) => typeof frame.rangeStart === 'number' ? frame.rangeStart : frame.timelineTime)
-      .filter((value) => Number.isFinite(value));
-    const ends = denseFrames
-      .map((frame) => typeof frame.rangeEnd === 'number' ? frame.rangeEnd : frame.timelineTime)
-      .filter((value) => Number.isFinite(value));
-    if (starts.length > 0 && ends.length > 0) {
-      const startTime = Math.min(...starts);
-      const endTime = Math.max(...ends);
-      if (endTime > startTime) {
-        return { startTime, endTime, reason: 'dense-frame inspection window' };
-      }
-    }
-  }
-
   const explicitMarkers = extractMentionedMarkers(params.latestUserMessage, params.markers);
   if (explicitMarkers.length >= 2) {
     const times = explicitMarkers
@@ -1004,9 +881,6 @@ function summarizeActionForContext(action: EditAction): string {
   if (action.type === 'delete_ranges' && action.ranges) {
     return `delete_ranges ${action.ranges.length} range(s)`;
   }
-  if (action.type === 'request_frames' && action.frameRequest) {
-    return `request_frames ${formatActionTime(action.frameRequest.startTime)}-${formatActionTime(action.frameRequest.endTime)}`;
-  }
   if (action.type === 'add_marker' && action.marker?.timelineTime !== undefined) {
     return `add_marker at ${formatActionTime(action.marker.timelineTime)}`;
   }
@@ -1139,7 +1013,6 @@ function isReviewGatedAction(action: EditAction | null | undefined): action is E
   if (!action) return false;
   return action.type !== 'none'
     && action.type !== 'transcribe_request'
-    && action.type !== 'request_frames'
     && action.type !== 'update_ai_settings'
     && action.type !== 'add_marker'
     && action.type !== 'add_markers'
@@ -1277,23 +1150,6 @@ function reconcileNarratedSingleRangeAction(
     };
   }
 
-  if (action.type === 'request_frames' && action.frameRequest) {
-    const startDelta = Math.abs(action.frameRequest.startTime - narrated.start);
-    const endDelta = Math.abs(action.frameRequest.endTime - narrated.end);
-    if (startDelta <= 1 && endDelta <= 1) return action;
-
-    console.warn(
-      `[chat] Reconciled request_frames action from ${formatActionTime(action.frameRequest.startTime)}-${formatActionTime(action.frameRequest.endTime)} to narrated ${formatActionTime(narrated.start)}-${formatActionTime(narrated.end)}`,
-    );
-    return {
-      ...action,
-      frameRequest: {
-        ...action.frameRequest,
-        startTime: narrated.start,
-        endTime: narrated.end,
-      },
-    };
-  }
 
   return action;
 }
@@ -1516,35 +1372,6 @@ function extractMentionedClips(message: string, clips: ClipSummary[]) {
   return explicitClips;
 }
 
-function formatVisualSearchContext(session: VisualSearchSession, fmtSec: (seconds: number) => string): string[] {
-  const lines = [
-    `Latest source visual retrieval query (untrusted user request): "${sanitizeInlineUntrustedText(session.query, 180)}" (${session.confidenceBand} confidence)`,
-  ];
-
-  if (session.candidates.length > 0) {
-    lines.push(
-      `Latest retrieval candidates: ${session.candidates
-        .slice(0, 3)
-        .map((candidate, index) => `${index + 1}. source ${candidate.sourceStart.toFixed(2)}-${candidate.sourceEnd.toFixed(2)}s`)
-        .join(' | ')}`
-    );
-  }
-
-  if (session.proposal?.timelineRanges.length) {
-    lines.push(
-      `Latest mapped timeline ranges: ${session.proposal.timelineRanges
-        .map((range) => `${fmtSec(range.timelineStart)}-${fmtSec(range.timelineEnd)}`)
-        .join(' | ')}`
-    );
-  }
-
-  if (session.followUpPrompt) {
-    lines.push(`Latest source retrieval note: ${sanitizeInlineUntrustedText(session.followUpPrompt, 240)}`);
-  }
-
-  return lines;
-}
-
 function isMarkerPlacementRequest(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return false;
@@ -1683,7 +1510,6 @@ export async function POST(req: NextRequest) {
 - Silence removal: trim ${settings.silenceRemoval.paddingSeconds}s from each silent gap edge; skip any silent gap shorter than ${settings.silenceRemoval.minDurationSeconds}s after trimming
 - Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}
 - Require speaker absence before removing silence: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}
-- Coarse representative frames: long-video default target is about one frame every ${settings.frameInspection.overviewIntervalSeconds}s before adaptive taper, capped at ${settings.frameInspection.maxOverviewFrames} frames
 - Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s
 - Text overlay defaults: position ${settings.textOverlays.defaultPosition}, font size ${settings.textOverlays.defaultFontSize}px
 
@@ -1701,25 +1527,10 @@ Honor these defaults unless the user explicitly asks for something different in 
         }>)
           .filter((marker) => typeof marker.number === 'number' && typeof marker.timelineTime === 'number')
       : [];
-    const promptFrames = selectRelevantFramesForPrompt({
-      frames: ((context?.frames as IndexedVideoFrame[] | undefined) ?? []),
-      latestUserMessage: effectiveLatestUserMessage,
-      markers: availableMarkersForPrompt,
-    });
-    const frameCoverage = context?.frameCoverage && typeof context.frameCoverage === 'object'
-      ? context.frameCoverage as {
-          totalOverviewFrames?: unknown;
-          coveredSourceCount?: unknown;
-          averageGapSeconds?: unknown;
-        }
-      : null;
     const contextLines = [
       `Video duration: ${(context?.videoDuration ?? 0).toFixed(2)} seconds`,
       `Number of clips: ${clipSummaries.length || context?.clipCount || 1}`,
     ];
-    const priorVisualSearch = isVisualSearchSession(context?.visualSearchSession)
-      ? context.visualSearchSession
-      : null;
     const validationContext = buildActionValidationContext(
       (context && typeof context === 'object') ? context as Record<string, unknown> : null,
       clipSummaries.length,
@@ -1737,42 +1548,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       });
       contextLines.push(`Timeline: ${summaries.join(' | ')}`);
     }
-    if (frameCoverage) {
-      const totalOverviewFrames = Number(frameCoverage.totalOverviewFrames ?? 0);
-      const coveredSourceCount = Number(frameCoverage.coveredSourceCount ?? 0);
-      const averageGapSeconds = Number(frameCoverage.averageGapSeconds ?? NaN);
-      if (Number.isFinite(totalOverviewFrames) && totalOverviewFrames > 0) {
-        contextLines.push(
-          `Current representative-frame coverage: ${Math.floor(totalOverviewFrames)} coarse frames across ${Math.max(1, Math.floor(coveredSourceCount))} source clip${Math.floor(coveredSourceCount) === 1 ? '' : 's'}${Number.isFinite(averageGapSeconds) && averageGapSeconds > 0 ? `, average visible gap about ${fmtSec(averageGapSeconds)}` : ''}.`
-        );
-      }
-    }
-
-    if (priorVisualSearch && (!context?.projectId || priorVisualSearch.projectId === context.projectId)) {
-      contextLines.push(...formatVisualSearchContext(priorVisualSearch, fmtSec));
-      if (
-        priorVisualSearch.proposal?.intent.actionType === 'delete'
-        && priorVisualSearch.proposal.timelineRanges.length > 0
-      ) {
-        const visualDeleteAction = {
-          type: 'delete_ranges',
-          ranges: priorVisualSearch.proposal.timelineRanges.map((range: { timelineStart: number; timelineEnd: number }) => ({
-            start: range.timelineStart,
-            end: range.timelineEnd,
-          })),
-          message: priorVisualSearch.proposal.timelineRanges.length === 1
-            ? 'Removed the verified visual match.'
-            : `Removed ${priorVisualSearch.proposal.timelineRanges.length} verified visual matches.`,
-        };
-        contextLines.push(
-          `Latest visual delete proposal is still available as timeline ranges: ${priorVisualSearch.proposal.timelineRanges
-            .map((range: { timelineStart: number; timelineEnd: number }) => `${fmtSec(range.timelineStart)}-${fmtSec(range.timelineEnd)}`)
-            .join(' | ')}`
-        );
-        contextLines.push(`PENDING_VISUAL_DELETE_ACTION_JSON: ${JSON.stringify(visualDeleteAction)}`);
-      }
-    }
-
     if (taskState) {
       contextLines.push(...summarizeConversationTaskState(taskState));
     }
@@ -1854,7 +1629,6 @@ Honor these defaults unless the user explicitly asks for something different in 
     if (context?.transcript) {
       const transcriptWindow = resolveTranscriptWindow({
         latestUserMessage: effectiveLatestUserMessage,
-        frames: promptFrames,
         markers: availableMarkersForPrompt,
       });
       const transcriptExcerpt = transcriptWindow
@@ -1895,8 +1669,6 @@ Honor these defaults unless the user explicitly asks for something different in 
       `- Minimum silence duration after padding: ${settings.silenceRemoval.minDurationSeconds}s\n` +
       `- Preserve short pauses: ${settings.silenceRemoval.preserveShortPauses ? 'yes' : 'no'}\n` +
       `- Require speaker absence for silence removal: ${settings.silenceRemoval.requireSpeakerAbsence ? 'yes' : 'no'}\n` +
-      `- Long-video coarse frame spacing default target: ~${settings.frameInspection.overviewIntervalSeconds}s before adaptive taper\n` +
-      `- Max coarse representative frames: ${settings.frameInspection.maxOverviewFrames}\n` +
       `- Transition defaults: ${settings.transitions.defaultType}, ${settings.transitions.defaultDuration}s\n` +
       `- Text overlay defaults: ${settings.textOverlays.defaultPosition}, ${settings.textOverlays.defaultFontSize}px`
     );
@@ -1916,20 +1688,7 @@ Honor these defaults unless the user explicitly asks for something different in 
     const contextText = contextLines.join('\n');
 
     const contextContent: Anthropic.ContentBlockParam[] = [];
-
-    const frames = promptFrames;
-    const overviewFrames = frames.filter((frame) => frame.kind === 'overview');
-    const overviewFrameNote = overviewFrames.length > 0
-      ? `\n[Representative frame summaries: showing ${overviewFrames.length} coarse frames]\n` +
-        overviewFrames.map((frame, index) =>
-          `Representative frame ${index + 1}: timeline ${fmtSec(frame.timelineTime)}, source ${fmtSec(frame.sourceTime)}` +
-          (frame.sampleKind ? `, sample kind: ${frame.sampleKind}` : '') +
-          (typeof frame.score === 'number' ? `, score: ${frame.score.toFixed(3)}` : '') +
-          (frame.sceneId ? `, scene: ${sanitizeInlineUntrustedText(frame.sceneId, 60)}` : '') +
-          (frame.description ? `, summary: ${sanitizeInlineUntrustedText(frame.description, 240)}` : '')
-        ).join('\n')
-      : '';
-    contextContent.push({ type: 'text', text: contextText + overviewFrameNote });
+    contextContent.push({ type: 'text', text: contextText });
 
     const anthropicMessages: Anthropic.MessageParam[] = [
       { role: 'user', content: contextContent },
