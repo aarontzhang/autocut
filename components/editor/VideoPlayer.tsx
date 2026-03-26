@@ -32,6 +32,7 @@ const CSS_FILTERS: Record<string, string> = {
 const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
+
 type VideoFrameRequestCallback = (now: number, metadata: unknown) => void;
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number;
@@ -43,10 +44,6 @@ type PendingLayerSourceState = {
   sourceId: string | null;
   clipId: string | null;
   url: string | null;
-};
-type SourceUrlCandidateSet = {
-  preferredUrl: string;
-  fallbackUrl: string;
 };
 
 function fitVideoFrame(
@@ -135,13 +132,10 @@ function getOtherLayer(layer: LayerId): LayerId {
   return layer === 'primary' ? 'secondary' : 'primary';
 }
 
-function getPreviewUrlCandidates(source: { playerUrl?: string; processingUrl?: string } | null | undefined): SourceUrlCandidateSet {
-  const playerUrl = source?.playerUrl?.trim() ?? '';
-  const processingUrl = source?.processingUrl?.trim() ?? '';
-  return {
-    preferredUrl: playerUrl || processingUrl,
-    fallbackUrl: processingUrl && processingUrl !== playerUrl ? processingUrl : '',
-  };
+function getPlayableSourceUrl(source: { playerUrl?: string; processingUrl?: string } | null | undefined) {
+  const playerUrl = source?.playerUrl?.trim();
+  if (playerUrl) return playerUrl;
+  return source?.processingUrl?.trim() ?? '';
 }
 
 function normalizeVideoUrl(url: string | null | undefined) {
@@ -156,8 +150,9 @@ function normalizeVideoUrl(url: string | null | undefined) {
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
-  const [, setIsVideoReady] = useState(false);
+  const [isVideoReady, setIsVideoReady] = useState(false);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
+  const [hasDisplayedFrame, setHasDisplayedFrame] = useState(false);
   const [leadLayer, setLeadLayer] = useState<LayerId>('primary');
 
   const primaryVideoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -173,19 +168,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     primary: null,
     secondary: null,
   });
-  const layerAssignedUrlRef = useRef<Record<LayerId, string | null>>({
-    primary: null,
-    secondary: null,
-  });
-  const layerBlockedUrlRef = useRef<Record<LayerId, string | null>>({
-    primary: null,
-    secondary: null,
-  });
   const layerClipIdRef = useRef<Record<LayerId, string | null>>({
-    primary: null,
-    secondary: null,
-  });
-  const layerTargetSourceTimeRef = useRef<Record<LayerId, number | null>>({
     primary: null,
     secondary: null,
   });
@@ -312,14 +295,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       storagePath: source?.storagePath ?? resolvedSource?.storagePath,
     });
   }, [sourceById, sourceMetaById]);
-  const getSourcePreviewUrls = useCallback((sourceId: string | null) => {
-    if (!sourceId) {
-      return {
-        preferredUrl: '',
-        fallbackUrl: '',
-      };
-    }
-    return getPreviewUrlCandidates(sourceById.get(sourceId));
+  const getResolvedPlayableUrl = useCallback((sourceId: string | null) => {
+    if (!sourceId) return '';
+    return getPlayableSourceUrl(sourceById.get(sourceId));
   }, [sourceById]);
 
   useEffect(() => {
@@ -329,36 +307,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const getVideoElement = useCallback((layer: LayerId) => (
     layer === 'primary' ? primaryVideoElementRef.current : secondaryVideoRef.current
   ), []);
-  const doesVideoMatchAssignedSource = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
-    if (!video) return false;
-    const expectedUrl = normalizeVideoUrl(
-      layerAssignedUrlRef.current[layer]
-      || pendingLayerSourceRef.current[layer].url,
-    );
-    if (!expectedUrl) return false;
-    const loadedUrl = normalizeVideoUrl(video.currentSrc || (video.readyState >= 2 ? video.src : ''));
-    return loadedUrl === expectedUrl;
-  }, []);
-  const isLayerDisplayable = useCallback((layer: LayerId) => {
-    const video = getVideoElement(layer);
-    return Boolean(video && video.readyState >= 2 && !video.error && doesVideoMatchAssignedSource(layer, video));
-  }, [doesVideoMatchAssignedSource, getVideoElement]);
   const isLayerReady = useCallback((layer: LayerId) => {
     const video = getVideoElement(layer);
-    return Boolean(video && !video.seeking && isLayerDisplayable(layer));
-  }, [getVideoElement, isLayerDisplayable]);
-  const isLayerPreparedForEntry = useCallback((layer: LayerId, entry: RenderTimelineEntry, targetSourceTime: number) => {
-    const video = getVideoElement(layer);
-    if (
-      !video
-      || layerClipIdRef.current[layer] !== entry.clipId
-      || layerSourceIdRef.current[layer] !== entry.sourceId
-      || !isLayerReady(layer)
-    ) {
-      return false;
-    }
-    return Math.abs(video.currentTime - targetSourceTime) <= DRIFT_EPSILON;
-  }, [getVideoElement, isLayerReady]);
+    return Boolean(video && video.readyState >= 2 && !video.error);
+  }, [getVideoElement]);
   const clearPendingLayerSource = useCallback((layer: LayerId) => {
     pendingLayerSourceRef.current[layer] = {
       token: 0,
@@ -366,7 +318,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       clipId: null,
       url: null,
     };
-    layerTargetSourceTimeRef.current[layer] = null;
   }, []);
   const markPendingLayerSource = useCallback((layer: LayerId, nextState: Omit<PendingLayerSourceState, 'token'>) => {
     pendingLayerSourceRef.current[layer] = {
@@ -383,30 +334,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const pendingUrl = normalizeVideoUrl(pending.url);
     if (currentUrl && pendingUrl && currentUrl === pendingUrl) {
       clearPendingLayerSource(layer);
-      layerBlockedUrlRef.current[layer] = null;
     }
   }, [clearPendingLayerSource]);
-  const selectLayerSourceUrl = useCallback((layer: LayerId, sourceId: string, options?: {
-    allowUrlRefresh?: boolean;
-    retryAfterError?: boolean;
-  }) => {
-    const { preferredUrl, fallbackUrl } = getSourcePreviewUrls(sourceId);
-    const currentAssignedUrl = layerAssignedUrlRef.current[layer]?.trim() ?? '';
-    const sameSource = layerSourceIdRef.current[layer] === sourceId;
-    const video = getVideoElement(layer);
-    const layerIsIdle = !video || (!video.currentSrc && !video.src && !layerClipIdRef.current[layer] && !layerSourceIdRef.current[layer]);
-
-    if (sameSource && currentAssignedUrl && !options?.allowUrlRefresh && !options?.retryAfterError && !layerIsIdle) {
-      return currentAssignedUrl;
-    }
-
-    const blockedUrl = normalizeVideoUrl(layerBlockedUrlRef.current[layer]);
-    const candidates = [preferredUrl, fallbackUrl].filter((candidate, index, all) => (
-      candidate && all.indexOf(candidate) === index
-    ));
-    const nextCandidate = candidates.find((candidate) => normalizeVideoUrl(candidate) !== blockedUrl);
-    return nextCandidate ?? candidates[0] ?? currentAssignedUrl;
-  }, [getSourcePreviewUrls, getVideoElement]);
 
   const syncExternalVideoRef = useCallback((layer: LayerId) => {
     videoRef.current = getVideoElement(layer);
@@ -434,14 +363,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setIsVideoReady(false);
       return;
     }
-    const ready = leadVideo.readyState >= 2
-      && !leadVideo.error
-      && doesVideoMatchAssignedSource(leadLayerRef.current, leadVideo);
+    const ready = leadVideo.readyState >= 2 && !leadVideo.error;
     setIsVideoReady(ready);
     if (ready) {
+      setHasDisplayedFrame(true);
       setVideoLoadError(null);
     }
-  }, [doesVideoMatchAssignedSource, getLeadVideo]);
+  }, [getLeadVideo]);
 
   const setLeadLayerSafely = useCallback((nextLayer: LayerId) => {
     leadLayerRef.current = nextLayer;
@@ -501,18 +429,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const hasLoadedSource = Boolean(video?.currentSrc || video?.src);
     if (video && !hasAssignedSource && !hasLoadedSource) {
       video.volume = 0;
-      layerAssignedUrlRef.current[layer] = null;
-      layerBlockedUrlRef.current[layer] = null;
-      layerTargetSourceTimeRef.current[layer] = null;
       clearPendingLayerSource(layer);
       return;
     }
     clearVideoElementSource(video);
     layerClipIdRef.current[layer] = null;
     layerSourceIdRef.current[layer] = null;
-    layerAssignedUrlRef.current[layer] = null;
-    layerBlockedUrlRef.current[layer] = null;
-    layerTargetSourceTimeRef.current[layer] = null;
     clearPendingLayerSource(layer);
   }, [clearPendingLayerSource, getVideoElement]);
 
@@ -521,6 +443,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     clearLayer('primary');
     clearLayer('secondary');
     setIsVideoReady(false);
+    setHasDisplayedFrame(false);
     setVideoLoadError(getSourceErrorMessage(sourceId));
     setPlaybackActive(false);
   }, [clearLayer, getSourceErrorMessage, setPlaybackActive]);
@@ -543,6 +466,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       clearLayer('primary');
       clearLayer('secondary');
       setIsVideoReady(false);
+      setHasDisplayedFrame(false);
       setVideoLoadError(null);
     }
   }, [clearLayer, pauseVideo, renderTimeline]);
@@ -551,48 +475,37 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     pauseVideo(getSpareVideo());
   }, [getSpareVideo, pauseVideo]);
 
-  const ensureLayerSource = useCallback((layer: LayerId, sourceId: string, clipId?: string | null, options?: {
-    allowUrlRefresh?: boolean;
-    retryAfterError?: boolean;
-  }) => {
+  const ensureLayerSource = useCallback((layer: LayerId, sourceId: string, sourceUrl: string, clipId?: string | null) => {
     const video = getVideoElement(layer);
-    const sourceUrl = selectLayerSourceUrl(layer, sourceId, options);
     if (!video || !sourceUrl) return false;
-    const previousSourceId = layerSourceIdRef.current[layer];
-    const previousAssignedUrl = normalizeVideoUrl(layerAssignedUrlRef.current[layer]);
-    const nextAssignedUrl = normalizeVideoUrl(sourceUrl);
     const changed = ensureVideoElementSource(video, sourceUrl);
-    layerAssignedUrlRef.current[layer] = sourceUrl;
-    if (changed || previousSourceId !== sourceId) {
+    if (changed || layerSourceIdRef.current[layer] !== sourceId) {
       layerSourceIdRef.current[layer] = sourceId;
     }
     if (clipId !== undefined) {
       layerClipIdRef.current[layer] = clipId;
     }
-    if (changed || previousSourceId !== sourceId || previousAssignedUrl !== nextAssignedUrl) {
+    if (changed) {
       markPendingLayerSource(layer, {
         sourceId,
         clipId: clipId ?? null,
         url: sourceUrl,
       });
-      if (previousSourceId !== sourceId) {
-        layerBlockedUrlRef.current[layer] = null;
-      }
     } else if (isLayerReady(layer)) {
       clearPendingLayerSource(layer);
     }
     return changed;
-  }, [clearPendingLayerSource, getVideoElement, isLayerReady, markPendingLayerSource, selectLayerSourceUrl]);
+  }, [clearPendingLayerSource, getVideoElement, isLayerReady, markPendingLayerSource]);
 
   const prepareLayerForEntry = useCallback((layer: LayerId, entry: RenderTimelineEntry, sourceTime: number) => {
-    const sourceUrl = selectLayerSourceUrl(layer, entry.sourceId);
+    const sourceUrl = getResolvedPlayableUrl(entry.sourceId);
     if (!sourceUrl) {
       return {
         status: 'missing' as const,
         video: getVideoElement(layer),
       };
     }
-    ensureLayerSource(layer, entry.sourceId, entry.clipId);
+    ensureLayerSource(layer, entry.sourceId, sourceUrl, entry.clipId);
     const video = getVideoElement(layer);
     if (!video) {
       return {
@@ -600,65 +513,63 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         video: null,
       };
     }
-    layerTargetSourceTimeRef.current[layer] = sourceTime;
     if (Math.abs(video.currentTime - sourceTime) > DRIFT_EPSILON) {
       video.currentTime = Math.max(0, sourceTime);
     }
     return {
-      status: isLayerPreparedForEntry(layer, entry, sourceTime) ? 'ready' as const : 'loading' as const,
+      status: isLayerReady(layer) ? 'ready' as const : 'loading' as const,
       video,
     };
-  }, [ensureLayerSource, getVideoElement, isLayerPreparedForEntry, selectLayerSourceUrl]);
+  }, [ensureLayerSource, getResolvedPlayableUrl, getVideoElement, isLayerReady]);
 
   const maybePromotePreparedLayer = useCallback((entry: RenderTimelineEntry, targetSourceTime: number) => {
     const currentLeadLayer = leadLayerRef.current;
     if (layerClipIdRef.current[currentLeadLayer] === entry.clipId) return false;
     const spareLayer = getOtherLayer(currentLeadLayer);
-    if (!isLayerPreparedForEntry(spareLayer, entry, targetSourceTime)) {
+    const spareVideo = getVideoElement(spareLayer);
+    if (
+      !spareVideo
+      || spareVideo.readyState < 2
+      || layerClipIdRef.current[spareLayer] !== entry.clipId
+      || layerSourceIdRef.current[spareLayer] !== entry.sourceId
+    ) {
       return false;
     }
-    const spareVideo = getVideoElement(spareLayer);
-    if (!spareVideo) return false;
     if (Math.abs(spareVideo.currentTime - targetSourceTime) > DRIFT_EPSILON) {
       spareVideo.currentTime = Math.max(0, targetSourceTime);
     }
     setLeadLayerSafely(spareLayer);
     return true;
-  }, [getVideoElement, isLayerPreparedForEntry, setLeadLayerSafely]);
+  }, [getVideoElement, setLeadLayerSafely]);
 
   const syncLayers = useCallback((timelineTime: number, options?: { allowPlay?: boolean }) => {
     const activeEntries = findRenderEntriesAtTime(renderTimeline, timelineTime);
     const primaryEntry = activeEntries[0];
     if (!primaryEntry) return;
-    const { preferredUrl: primaryPreferredUrl, fallbackUrl: primaryFallbackUrl } = getSourcePreviewUrls(primaryEntry.sourceId);
-    if (!primaryPreferredUrl && !primaryFallbackUrl) {
+    const primarySourceUrl = getResolvedPlayableUrl(primaryEntry.sourceId);
+    if (!primarySourceUrl) {
       activateMissingSourceState(primaryEntry.sourceId);
       return;
     }
     const primarySourceTime = getEntrySourceTime(primaryEntry, timelineTime);
-    const previousLeadLayer = leadLayerRef.current;
-    const didPromotePreparedLayer = maybePromotePreparedLayer(primaryEntry, primarySourceTime);
-    if (didPromotePreparedLayer) {
-      pauseVideo(getVideoElement(previousLeadLayer));
-    }
+    maybePromotePreparedLayer(primaryEntry, primarySourceTime);
 
     const currentLeadLayer = leadLayerRef.current;
     const currentLeadVideo = getVideoElement(currentLeadLayer);
-    const leadHasDisplayableFrame = isLayerDisplayable(currentLeadLayer);
-    const leadMatchesSource = layerSourceIdRef.current[currentLeadLayer] === primaryEntry.sourceId;
-    const leadMatchesPrimary = isLayerPreparedForEntry(currentLeadLayer, primaryEntry, primarySourceTime);
+    const leadHasReadyFrame = Boolean(currentLeadVideo && currentLeadVideo.readyState >= 2 && !currentLeadVideo.error && hasDisplayedFrame);
+    const leadMatchesPrimary = layerSourceIdRef.current[currentLeadLayer] === primaryEntry.sourceId;
     if (!leadMatchesPrimary) {
-      const targetLayer = leadMatchesSource
-        ? currentLeadLayer
-        : (leadHasDisplayableFrame ? getOtherLayer(currentLeadLayer) : currentLeadLayer);
+      const targetLayer = leadHasReadyFrame ? getOtherLayer(currentLeadLayer) : currentLeadLayer;
       const preparedPrimaryLayer = prepareLayerForEntry(targetLayer, primaryEntry, primarySourceTime);
       if (preparedPrimaryLayer.status === 'missing') {
         activateMissingSourceState(primaryEntry.sourceId);
         return;
       }
-      if (leadHasDisplayableFrame && targetLayer !== currentLeadLayer && preparedPrimaryLayer.status === 'ready') {
+      if (leadHasReadyFrame && targetLayer !== currentLeadLayer) {
         pauseVideo(currentLeadVideo);
-        setLeadLayerSafely(targetLayer);
+        if (preparedPrimaryLayer.status === 'ready') {
+          setLeadLayerSafely(targetLayer);
+        }
       }
     }
 
@@ -671,12 +582,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
     const primaryClip = clipById.get(primaryEntry.clipId);
     if (!primaryClip) return;
-    ensureLayerSource(leadLayerId, primaryEntry.sourceId, primaryEntry.clipId);
+    ensureLayerSource(leadLayerId, primaryEntry.sourceId, primarySourceUrl, primaryEntry.clipId);
 
     if (Math.abs(primaryVideo.currentTime - primarySourceTime) > SEEK_EPSILON) {
       primaryVideo.currentTime = Math.max(0, primarySourceTime);
     }
-    layerTargetSourceTimeRef.current[leadLayerId] = primarySourceTime;
     layerClipIdRef.current[leadLayerId] = primaryEntry.clipId;
 
     const primaryIndex = renderTimeline.findIndex((entry) => entry.clipId === primaryEntry.clipId);
@@ -701,11 +611,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       && upcomingEntry
       && secondaryVideo
     ) {
-      const { preferredUrl: upcomingPreferredUrl, fallbackUrl: upcomingFallbackUrl } = getSourcePreviewUrls(upcomingEntry.sourceId);
-      if (upcomingPreferredUrl || upcomingFallbackUrl) {
-        ensureLayerSource(spareLayerId, upcomingEntry.sourceId, upcomingEntry.clipId);
+      const upcomingSourceUrl = getResolvedPlayableUrl(upcomingEntry.sourceId);
+      if (upcomingSourceUrl) {
+        ensureLayerSource(spareLayerId, upcomingEntry.sourceId, upcomingSourceUrl, upcomingEntry.clipId);
         const upcomingSourceTime = getEntrySourceTime(upcomingEntry, timelineTime);
-        layerTargetSourceTimeRef.current[spareLayerId] = upcomingSourceTime;
         if (Math.abs(secondaryVideo.currentTime - upcomingSourceTime) > DRIFT_EPSILON) {
           secondaryVideo.currentTime = Math.max(0, upcomingSourceTime);
         }
@@ -728,7 +637,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       primaryVideo.play().catch(() => {});
     }
     refreshLeadVideoState();
-  }, [activateMissingSourceState, applyClipEffects, clearLayer, clipById, ensureLayerSource, getSourcePreviewUrls, getVideoElement, isLayerDisplayable, isLayerPreparedForEntry, maybePromotePreparedLayer, pauseVideo, prepareLayerForEntry, refreshLeadVideoState, renderTimeline, setLeadLayerSafely]);
+  }, [activateMissingSourceState, applyClipEffects, clearLayer, clipById, ensureLayerSource, getResolvedPlayableUrl, getVideoElement, hasDisplayedFrame, maybePromotePreparedLayer, pauseVideo, prepareLayerForEntry, refreshLeadVideoState, renderTimeline, setLeadLayerSafely]);
 
   const syncAfterSourceLoad = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
     if (!video) return;
@@ -829,7 +738,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
       const spareLayerId = getOtherLayer(leadLayerRef.current);
       const spareVideo = getVideoElement(spareLayerId);
-      const spareIsReady = isLayerPreparedForEntry(spareLayerId, nextEntry, nextSourceTime);
+      const spareIsReady = Boolean(
+        spareVideo
+        && layerClipIdRef.current[spareLayerId] === nextEntry.clipId
+        && layerSourceIdRef.current[spareLayerId] === nextEntry.sourceId
+        && spareVideo.readyState >= 2,
+      );
 
       if (spareVideo && spareIsReady) {
         if (Math.abs(spareVideo.currentTime - nextSourceTime) > DRIFT_EPSILON) {
@@ -838,8 +752,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         pauseVideo(primaryVideo);
         setLeadLayerSafely(spareLayerId);
       } else {
-        const { preferredUrl: nextPreferredUrl, fallbackUrl: nextFallbackUrl } = getSourcePreviewUrls(nextEntry.sourceId);
-        if (!nextPreferredUrl && !nextFallbackUrl) {
+        if (!getResolvedPlayableUrl(nextEntry.sourceId)) {
           activateMissingSourceState(nextEntry.sourceId);
           return;
         }
@@ -860,7 +773,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       setCurrentTime(totalTimelineDuration);
       syncLayers(totalTimelineDuration, { allowPlay: false });
     }
-  }, [activateMissingSourceState, getLeadVideo, getSourcePreviewUrls, getVideoElement, isLayerPreparedForEntry, pauseInactiveVideo, pauseVideo, prepareLayerForEntry, renderTimeline, setCurrentTime, setLeadLayerSafely, syncLayers, totalTimelineDuration]);
+  }, [activateMissingSourceState, getLeadVideo, getResolvedPlayableUrl, getVideoElement, pauseInactiveVideo, pauseVideo, prepareLayerForEntry, renderTimeline, setCurrentTime, setLeadLayerSafely, syncLayers, totalTimelineDuration]);
 
   useEffect(() => {
     playbackTickRef.current = handlePlaybackTick;
@@ -945,45 +858,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       refreshLeadVideoState();
       return;
     }
-    const failedUrl = normalizeVideoUrl(
-      layerAssignedUrlRef.current[layer]
-      || currentUrl
-      || pending.url,
-    );
-    if (failedUrl) {
-      layerBlockedUrlRef.current[layer] = failedUrl;
-      layerAssignedUrlRef.current[layer] = null;
-    }
-    if (sourceId) {
-      const retryUrl = selectLayerSourceUrl(layer, sourceId, {
-        allowUrlRefresh: true,
-        retryAfterError: true,
-      });
-      if (retryUrl && normalizeVideoUrl(retryUrl) !== failedUrl) {
-        ensureLayerSource(layer, sourceId, layerClipIdRef.current[layer], {
-          allowUrlRefresh: true,
-          retryAfterError: true,
-        });
-        setVideoLoadError(null);
-        refreshLeadVideoState();
-        return;
-      }
-    }
-    const { preferredUrl, fallbackUrl } = getSourcePreviewUrls(sourceId);
-    if (!preferredUrl && !fallbackUrl && sourceId) {
-      activateMissingSourceState(sourceId);
-      return;
-    }
-    if (leadLayerRef.current !== layer) {
-      clearLayer(layer);
+    if (getResolvedPlayableUrl(sourceId)) {
       refreshLeadVideoState();
       return;
     }
-    setIsVideoReady(false);
-    if (!isLayerDisplayable(getOtherLayer(layer))) {
-      setVideoLoadError(sourceId ? getSourceErrorMessage(sourceId) : 'Could not load this video source.');
+    if (sourceId) {
+      activateMissingSourceState(sourceId);
+      return;
     }
-  }, [activateMissingSourceState, clearLayer, ensureLayerSource, getSourceErrorMessage, getSourcePreviewUrls, isLayerDisplayable, refreshLeadVideoState, selectLayerSourceUrl]);
+    if (leadLayerRef.current !== layer) return;
+    setIsVideoReady(false);
+    setHasDisplayedFrame(false);
+    setVideoLoadError('Could not load this video source.');
+  }, [activateMissingSourceState, getResolvedPlayableUrl, refreshLeadVideoState]);
 
   useEffect(() => {
     if (requestedSeekTime === null) return;
@@ -1033,8 +920,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const primaryLayerOpacity = leadLayer === 'primary' ? 1 : 0;
   const secondaryLayerOpacity = leadLayer === 'secondary' ? 1 : 0;
-  const hasAnyPlayableFrame = isLayerDisplayable('primary') || isLayerDisplayable('secondary');
-  const showLoadingMask = !videoLoadError && renderTimeline.length > 0 && !hasAnyPlayableFrame;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
@@ -1068,7 +953,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
               reconcileLayerLoadSuccess('primary', el);
-              if (!doesVideoMatchAssignedSource('primary', el)) return;
               setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.primary;
               if (sourceId) {
@@ -1077,25 +961,32 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               if (leadLayerRef.current === 'primary') {
                 setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
                 setIsVideoReady(el.readyState >= 2 && !el.error);
+                if (el.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
                 seekToTimelineTime(currentTimeRef.current);
               }
               syncAfterSourceLoad('primary', el);
             }}
             onLoadedData={(event) => {
               reconcileLayerLoadSuccess('primary', event.currentTarget);
-              if (!doesVideoMatchAssignedSource('primary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
             onCanPlay={(event) => {
               reconcileLayerLoadSuccess('primary', event.currentTarget);
-              if (!doesVideoMatchAssignedSource('primary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('primary', event.currentTarget);
             }}
@@ -1103,7 +994,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               if (!layerSourceIdRef.current.primary) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'primary') {
-                refreshLeadVideoState();
+                setIsVideoReady(false);
               }
             }}
             onError={(event) => {
@@ -1129,7 +1020,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             preload="auto"
             onLoadedMetadata={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
-              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               const sourceId = layerSourceIdRef.current.secondary;
               if (sourceId) {
@@ -1141,25 +1031,32 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                   height: event.currentTarget.videoHeight,
                 });
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
                 seekToTimelineTime(currentTimeRef.current);
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
             onLoadedData={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
-              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
             onCanPlay={(event) => {
               reconcileLayerLoadSuccess('secondary', event.currentTarget);
-              if (!doesVideoMatchAssignedSource('secondary', event.currentTarget)) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
                 setIsVideoReady(event.currentTarget.readyState >= 2 && !event.currentTarget.error);
+                if (event.currentTarget.readyState >= 2) {
+                  setHasDisplayedFrame(true);
+                }
               }
               syncAfterSourceLoad('secondary', event.currentTarget);
             }}
@@ -1167,7 +1064,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               if (!layerSourceIdRef.current.secondary) return;
               setVideoLoadError(null);
               if (leadLayerRef.current === 'secondary') {
-                refreshLeadVideoState();
+                setIsVideoReady(false);
               }
             }}
             onError={(event) => {
@@ -1187,7 +1084,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             />
           )}
 
-          {(videoLoadError || showLoadingMask) && (
+          {(videoLoadError || (!isVideoReady && !hasDisplayedFrame)) && (
             <div
               style={{
                 position: 'absolute',
