@@ -139,11 +139,11 @@ function getOtherLayer(layer: LayerId): LayerId {
 }
 
 function getPreviewUrlCandidates(source: { playerUrl?: string; processingUrl?: string } | null | undefined): SourceUrlCandidateSet {
-  const processingUrl = source?.processingUrl?.trim() ?? '';
   const playerUrl = source?.playerUrl?.trim() ?? '';
+  const processingUrl = source?.processingUrl?.trim() ?? '';
   return {
-    preferredUrl: processingUrl || playerUrl,
-    fallbackUrl: playerUrl && playerUrl !== processingUrl ? playerUrl : '',
+    preferredUrl: playerUrl || processingUrl,
+    fallbackUrl: processingUrl && processingUrl !== playerUrl ? processingUrl : '',
   };
 }
 
