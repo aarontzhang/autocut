@@ -17,7 +17,7 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { isServerBackedSource } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -89,8 +89,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     document.body.style.cursor = 'ew-resize';
   }, [mediaPanelWidth]);
 
-  const currentTime = useEditorStore(s => s.currentTime);
-  const setCurrentTime = useEditorStore(s => s.setCurrentTime);
   const videoFile = useEditorStore(s => s.videoFile);
   const videoData = useEditorStore(s => s.videoData);
   const sources = useEditorStore(s => s.sources);
@@ -218,31 +216,32 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         deleteSelectedItem();
         return;
       }
+      const state = useEditorStore.getState();
       if (e.code === 'Space') {
         e.preventDefault();
         playerRef.current?.togglePlay();
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
-        const t = Math.max(0, currentTime - (e.shiftKey ? 10 : 1));
+        const t = Math.max(0, state.currentTime - (e.shiftKey ? 10 : 1));
         playerRef.current?.seekTo(t);
         if (!playerRef.current) {
-          setCurrentTime(t);
+          state.setCurrentTime(t);
           if (videoRef.current) videoRef.current.currentTime = t;
         }
       } else if (e.code === 'ArrowRight') {
         e.preventDefault();
         const dur = videoRef.current?.duration ?? 0;
-        const t = Math.min(dur, currentTime + (e.shiftKey ? 10 : 1));
+        const t = Math.min(dur, state.currentTime + (e.shiftKey ? 10 : 1));
         playerRef.current?.seekTo(t);
         if (!playerRef.current) {
-          setCurrentTime(t);
+          state.setCurrentTime(t);
           if (videoRef.current) videoRef.current.currentTime = t;
         }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [currentTime, deleteSelectedItem, redo, setCurrentTime, undo]);
+  }, [deleteSelectedItem, redo, undo]);
 
   useEffect(() => {
     const availableSources = resolveProjectSources({
