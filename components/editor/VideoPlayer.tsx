@@ -5,6 +5,7 @@ import { useEditorStore } from '@/lib/useEditorStore';
 import {
   buildRenderTimeline,
   findRenderEntriesAtTime,
+  shouldUseSeparateVideoLayerForPlaybackHandoff,
 } from '@/lib/playbackEngine';
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
 import type { RenderTimelineEntry, VideoClip } from '@/lib/types';
@@ -593,17 +594,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const upcomingEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const spareLayerId = getOtherLayer(leadLayerId);
     const secondaryVideo = getVideoElement(spareLayerId);
-    const upcomingUsesDifferentSource = Boolean(
-      upcomingEntry && upcomingEntry.sourceId !== primaryEntry.sourceId,
-    );
     const shouldPreloadUpcomingLayer = Boolean(
       upcomingEntry
       && secondaryVideo
-      // Fade-to-black transitions do not need a second element when both clips
-      // come from the same source file. Reusing one element avoids duplicate
-      // loads on the same URL, which can blank the preview after transitions
-      // are added between split clips.
-      && upcomingUsesDifferentSource,
+      // Same-file clip boundaries still need the spare layer when playback has
+      // to jump to a non-contiguous source time. Without that warm-up the
+      // active element stalls while the browser seeks and decodes the next
+      // frame, which is the pause users were seeing between cuts.
+      && shouldUseSeparateVideoLayerForPlaybackHandoff(primaryEntry, upcomingEntry),
     );
 
     if (
@@ -722,7 +720,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       currentTimeRef.current = handoffTime;
       setCurrentTime(handoffTime);
       const nextSourceTime = getEntrySourceTime(nextEntry, handoffTime);
-      const shouldStayOnLeadLayer = nextEntry.sourceId === primaryEntry.sourceId;
+      const shouldStayOnLeadLayer = !shouldUseSeparateVideoLayerForPlaybackHandoff(primaryEntry, nextEntry);
 
       if (shouldStayOnLeadLayer) {
         if (Math.abs(primaryVideo.currentTime - nextSourceTime) > DRIFT_EPSILON) {

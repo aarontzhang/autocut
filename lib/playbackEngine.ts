@@ -6,6 +6,8 @@ import type {
   VideoClip,
 } from './types';
 
+const CONTINUOUS_SOURCE_SEQUENCE_EPSILON = 1 / 60;
+
 function getClipDuration(clip: Pick<VideoClip, 'sourceDuration' | 'speed'>): number {
   const speed = Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1;
   return Math.max(0, clip.sourceDuration / speed);
@@ -75,6 +77,17 @@ function buildPlainSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
   }
 
   return schedule;
+}
+
+export function shouldUseSeparateVideoLayerForPlaybackHandoff(
+  currentEntry: Pick<ClipScheduleEntry, 'sourceId' | 'sourceStart' | 'sourceDuration'> | null | undefined,
+  nextEntry: Pick<ClipScheduleEntry, 'sourceId' | 'sourceStart' | 'sourceDuration'> | null | undefined,
+): boolean {
+  if (!currentEntry || !nextEntry) return false;
+  if (currentEntry.sourceId !== nextEntry.sourceId) return true;
+
+  const currentSourceEnd = currentEntry.sourceStart + currentEntry.sourceDuration;
+  return Math.abs(nextEntry.sourceStart - currentSourceEnd) > CONTINUOUS_SOURCE_SEQUENCE_EPSILON;
 }
 
 export function resolveTransitions(
