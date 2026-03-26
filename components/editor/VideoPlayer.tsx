@@ -32,9 +32,6 @@ const CSS_FILTERS: Record<string, string> = {
 const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
-const PRELOAD_MIN_LEAD_TIME = 0.75;
-const PRELOAD_TRANSITION_BUFFER = 0.25;
-
 type VideoFrameRequestCallback = (now: number, metadata: unknown) => void;
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number;
@@ -686,13 +683,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const upcomingEntry = primaryIndex >= 0 ? renderTimeline[primaryIndex + 1] ?? null : null;
     const spareLayerId = getOtherLayer(leadLayerId);
     const secondaryVideo = getVideoElement(spareLayerId);
-    const remainingPrimaryTime = Math.max(0, primaryEntry.timelineEnd - timelineTime);
     const upcomingUsesDifferentSource = Boolean(
       upcomingEntry && upcomingEntry.sourceId !== primaryEntry.sourceId,
-    );
-    const preloadLeadTime = Math.max(
-      PRELOAD_MIN_LEAD_TIME,
-      (primaryEntry.transitionOut?.duration ?? upcomingEntry?.transitionIn?.duration ?? 0) + PRELOAD_TRANSITION_BUFFER,
     );
     const shouldPreloadUpcomingLayer = Boolean(
       upcomingEntry
@@ -701,8 +693,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       // come from the same source file. Reusing one element avoids duplicate
       // loads on the same URL, which can blank the preview after transitions
       // are added between split clips.
-      && upcomingUsesDifferentSource
-      && remainingPrimaryTime <= preloadLeadTime,
+      && upcomingUsesDifferentSource,
     );
 
     if (
