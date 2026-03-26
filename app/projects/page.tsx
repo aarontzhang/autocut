@@ -7,6 +7,7 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import UserProfileMenu from '@/components/auth/UserProfileMenu';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useStorageQuota } from '@/lib/useStorageQuota';
+import { capture } from '@/lib/analytics';
 
 export interface Project {
   id: string;
@@ -55,12 +56,18 @@ export default function ProjectsPage() {
     if (!res.ok) return;
 
     const { id } = await res.json();
+    capture('project_created', { project_id: id });
     router.push(`/editor?project=${id}`);
   };
 
-  const handleOpen = (id: string) => router.push(`/editor?project=${id}`);
+  const handleOpen = (id: string) => {
+    const project = projects.find(p => p.id === id);
+    capture('project_opened', { project_id: id, has_video: Boolean(project?.video_path) });
+    router.push(`/editor?project=${id}`);
+  };
 
   const handleDelete = async (id: string) => {
+    capture('project_deleted', { project_id: id });
     const response = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
     if (!response.ok) {
       await loadProjects();
@@ -77,6 +84,7 @@ export default function ProjectsPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
+    capture('project_renamed', { project_id: id });
     setProjects(prev => prev.map(p => p.id === id ? { ...p, name } : p));
   };
 

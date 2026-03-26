@@ -18,6 +18,7 @@ import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
 import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
+import { capture } from '@/lib/analytics';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
 const SOURCE_INDEX_POLL_INTERVAL_MS = 4000;
@@ -286,6 +287,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const totalRanges = workPlan.reduce((total, entry) => total + Math.max(entry.ranges.length, 1), 0);
     setBackgroundTranscript(useEditorStore.getState().backgroundTranscript, 'loading');
     setTranscriptProgress({ completed: 0, total: Math.max(totalRanges, 1) });
+    capture('transcription_started', {});
+    const transcriptionStartMs = performance.now();
     (async () => {
       try {
         let completedRanges = 0;
@@ -306,14 +309,19 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             },
           );
           completedRanges += Math.max(entry.ranges.length, 1);
+          const isDone = completedRanges >= totalRanges;
           setBackgroundTranscript(
             useEditorStore.getState().backgroundTranscript,
-            completedRanges >= totalRanges ? 'done' : 'loading',
+            isDone ? 'done' : 'loading',
             rawWords,
           );
+          if (isDone) {
+            capture('transcription_completed', { duration_ms: Math.round(performance.now() - transcriptionStartMs) });
+          }
         }
       } catch (error) {
         console.warn('Background transcription failed:', error);
+        capture('transcription_failed', { reason: error instanceof Error ? error.message : 'Audio transcription did not finish.' });
         setBackgroundTranscript(
           useEditorStore.getState().backgroundTranscript,
           'error',

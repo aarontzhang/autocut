@@ -40,6 +40,7 @@ import {
   serializeActionForComparison,
 } from '@/lib/requestChain';
 import AutocutMark from '@/components/branding/AutocutMark';
+import { capture } from '@/lib/analytics';
 
 const OVERVIEW_FRAME_EXTRACTION_CONCURRENCY = 2;
 const FRAME_DESCRIPTION_REQUEST_TIMEOUT_MS = 60000;
@@ -235,6 +236,9 @@ async function postChatRequest(
             continue;
           }
 
+          if (res.status === 429) {
+            capture('chat_quota_hit', {});
+          }
           throw lastError;
         }
         return data ?? {};
@@ -2451,6 +2455,13 @@ function AssistantMessage({
       actionStatus: 'completed',
       actionResult: result,
     });
+    capture('chat_action_applied', { action_count: checkedReviewCount, action_types: [reviewedAction.type] });
+    if (reviewedAction.type === 'set_clip_filter' && reviewedAction.filter) {
+      capture('filter_applied', { filter_name: reviewedAction.filter.type });
+    }
+    if (reviewedAction.type === 'delete_ranges' && reviewedAction.ranges) {
+      capture('silence_removed', { silence_count: reviewedAction.ranges.length });
+    }
     setActiveReviewSession(null);
     setActiveReviewFocusItemId(null);
     setReviewResult(result);
@@ -3404,6 +3415,7 @@ export default function ChatSidebar() {
       const initialCompleted = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
       const completedBeforeRequests = initialCompleted;
       const descriptionStartedAt = performance.now();
+      capture('frame_descriptions_started', { frame_count: totalOverviewFrames });
       const descriptionFallbackPerFrame = estimateFrameDescriptionSeconds(totalOverviewFrames) / Math.max(totalOverviewFrames, 1);
       const batches: FrameDescriptionBatch[] = [];
       for (let start = 0; start < nextFrames.length; start += FRAME_DESCRIPTION_BATCH_SIZE) {
@@ -3579,6 +3591,11 @@ export default function ChatSidebar() {
       } else {
         setFrameAnalysisError(null);
       }
+      const completedFrameCount = nextFrames.filter((frame) => hasUsableFrameDescription(frame.description)).length;
+      capture('frame_descriptions_completed', {
+        frame_count: completedFrameCount,
+        duration_ms: Math.round(performance.now() - descriptionStartedAt),
+      });
       return nextFrames;
     })();
 
@@ -3749,6 +3766,12 @@ export default function ChatSidebar() {
       }
 
       setVisualSearchSession(visualSearch ?? null);
+      if (visualSearch) {
+        capture('visual_search_performed', {
+          query_length: latestUserInput.length,
+          has_results: (visualSearch.candidates?.length ?? 0) > 0,
+        });
+      }
       const markerAction = isMarkerMutationAction(action);
       if (!markerAction) {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
@@ -3933,6 +3956,7 @@ export default function ChatSidebar() {
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
     addMessage({ role: 'user', content: text, requestChainId });
+    capture('chat_message_sent', { message_length: text.length, has_analysis: useServerSourceIndex });
     setIsChatLoading(true);
     setLoadingStatus('');
     setLoadingPhaseId(null);
@@ -3945,6 +3969,7 @@ export default function ChatSidebar() {
       await runSingleTurn(history, ctrl, requestChainId);
     } catch (err) {
       if ((err as Error)?.name !== 'AbortError') {
+        capture('chat_request_failed', { reason: err instanceof Error ? err.message : 'Unknown' });
         addMessage({
           role: 'assistant',
           content: `Network error: ${err instanceof Error ? err.message : 'Unknown'}`,
@@ -3956,7 +3981,7 @@ export default function ChatSidebar() {
       setLoadingStatus('');
       setLoadingPhaseId(null);
     }
-  }, [addMessage, initialIndexingReady, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading]);
+  }, [addMessage, initialIndexingReady, input, isChatLoading, messages, reviewLocked, runSingleTurn, setIsChatLoading, useServerSourceIndex]);
 
   const handleTranscriptReady = useCallback(async (messageId: string) => {
     if (!initialIndexingReady) return;

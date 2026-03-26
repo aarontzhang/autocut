@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
 import AutocutMark from '@/components/branding/AutocutMark';
+import { capture } from '@/lib/analytics';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -37,6 +38,7 @@ export default function LoginPage() {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
+      capture('user_signed_in', { method: 'email' });
       router.push('/projects');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Authentication failed');
@@ -49,6 +51,7 @@ export default function LoginPage() {
     setError('');
     setNotice('');
     const supabase = getSupabaseBrowser();
+    capture('user_signed_in', { method: 'google' });
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: `${window.location.origin}/auth/callback` },
