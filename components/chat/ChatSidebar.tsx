@@ -2659,7 +2659,7 @@ export default function ChatSidebar() {
       if (!markerAction) {
         upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
       }
-      const assistantMessage = message.trim() || getAssistantFallbackMessage(action);
+      const assistantMessage = streamingAccumulated.trim() || message.trim() || getAssistantFallbackMessage(action);
       const duplicateCompletedAction = requestChainId && action && action.type !== 'none' && chainState
         ? chainState.completedActions.find((completedAction) => actionsMatch(completedAction, action)) ?? null
         : null;

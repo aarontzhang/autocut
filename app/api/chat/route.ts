@@ -62,6 +62,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 ### 2b. Delete Range (delete_range)
 - Remove everything between two timeline times, automatically trimming or removing any clips in that region
 - Use when user says: "delete between X and Y", "remove from 0:20 to 0:30", "cut out the section from X to Y", etc.
+- CRITICAL: If the user says "cut out", "remove", "delete", or "trim" a section — even when described by name or relative to moments ("between my attacks", "the part after the intro") — always use delete_range with your best-guess timestamps. Never respond to an explicit cut/remove/delete request with add_marker.
 - If the user asks to remove the entire block before/after/between markers or timestamps, use delete_range for that contiguous span even if earlier turns discussed silence removal
 - After any structural edit, earlier chat messages may refer to pre-edit timeline times. Use the clip source ranges and applied-action history in context to translate those old references onto the current timeline instead of reusing stale timestamps.
 
@@ -121,7 +122,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 
 ### 9b. Markers (add_marker / add_markers / update_marker / remove_marker)
 - Create numbered markers on the timeline to tag candidate moments for review
-- Use markers when the user asks you to find, tag, or point out likely moments before cutting
+- Use markers when the user asks you to find, tag, or point out likely moments before cutting. Markers are for FIND / TAG / POINT-OUT requests only — not for cut, remove, or delete requests. If the user says "cut", "remove", or "delete", attempt delete_range instead of add_marker.
 - When the user asks where/when a moment happens, treat that as a find request and return add_marker/add_markers with the best supported timestamp instead of prose alone
 - If the user asks for a marker plus another edit in the same request, do the marker step first whenever you already have enough evidence. The system can continue the remaining edit afterward.
 - Prefer adding markers first when you found plausible events but the user still needs to review them
@@ -235,7 +236,7 @@ No action:
 - When you emit an action, prefer one concrete operation unless the user explicitly asked for a natural batch operation such as delete_ranges or add_markers.
 - Marker placement is an exception to "need a clearer target" when you have any plausible evidence. If transcript or frame context suggests a likely moment, place the best-effort marker instead of returning type:none.
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
-- CRITICAL: If the latest user message is even remotely asking you to do, find, tag, cut, mark, place, caption, move, or inspect something, prefer emitting a concrete action over returning type:none or prose-only analysis.
+- CRITICAL: If the latest user message is even remotely asking you to do, find, tag, cut, mark, place, caption, move, or inspect something, prefer emitting a concrete action over returning type:none or prose-only analysis. When the request uses cut/remove/delete/trim language, that concrete action must be delete_range (not add_marker).
 - Use type:none only when you truly have no actionable target and no plausible marker, range, or tool request to advance the user's goal. Ordinary conversational replies can omit the action block entirely.
 - In every action block, include "final": true when this action fully satisfies the current request with no further steps needed, or "final": false when additional steps will follow (e.g. transcribe_request before add_captions, or a multi-step task with more edits remaining). transcribe_request is always "final": false. Single-step requests are always "final": true.
 
@@ -1267,8 +1268,8 @@ function shouldHideInternalReasoning(message: string): boolean {
     || /frame summary/.test(normalized)
     || /ocr/.test(normalized)
     || /whisper/.test(normalized)
-    || /\bapi\b/.test(normalized)
-    || /\bmodel\b/.test(normalized)
+    || /\bthe\s+api\b|\bapi\s+(?:returned|failed|error|call)\b/.test(normalized)
+    || /\bthe\s+model\b|\bmodel\s+(?:returned|failed|error)\b/.test(normalized)
     || /speaker says/.test(normalized)
     || /appears to run from/.test(normalized);
 }
@@ -1722,6 +1723,12 @@ Honor these defaults unless the user explicitly asks for something different in 
             if (!actionBlockStarted) {
               if (accumulatedText.includes('<action>')) {
                 actionBlockStarted = true;
+                const preActionEnd = accumulatedText.indexOf('<action>');
+                const alreadySentLength = accumulatedText.length - chunk.length;
+                const unsent = accumulatedText.slice(alreadySentLength, preActionEnd);
+                if (unsent) {
+                  await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: unsent })}\n\n`));
+                }
               } else {
                 await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`));
               }
