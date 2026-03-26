@@ -110,6 +110,7 @@ type AnalysisStatusCard = {
   detail?: string | null;
   secondaryLabel?: string | null;
   tone?: ProgressCardTone;
+  showProgressBar?: boolean;
 };
 
 const CHAT_REQUEST_TIMEOUT_MS = 45000;
@@ -297,15 +298,15 @@ function getErrorMessage(error: unknown, fallback: string): string {
 function formatTranscriptFailureNotice(error: string | null): string {
   const normalized = error?.trim();
   if (!normalized) {
-    return 'Audio transcription did not finish, but the assistant is ready to work from the video and visual analysis.';
+    return 'Audio transcription did not finish. Initial indexing is incomplete.';
   }
   if (normalized.includes('OPENAI_API_KEY')) {
-    return 'Audio transcription is not configured on this deployment. Missing OPENAI_API_KEY. The assistant is ready to work from the video and visual analysis.';
+    return 'Audio transcription is not configured on this deployment. Missing OPENAI_API_KEY. Initial indexing is incomplete.';
   }
   if (normalized === 'Unauthorized') {
-    return 'Audio transcription was rejected because the current session was not authorized. The assistant is ready to work from the video and visual analysis.';
+    return 'Audio transcription was rejected because the current session was not authorized. Initial indexing is incomplete.';
   }
-  return `${normalized} The assistant is ready to work from the video and visual analysis.`;
+  return `${normalized} Initial indexing is incomplete.`;
 }
 
 function clampProgress(value: number): number {
@@ -561,7 +562,11 @@ function stabilizeEtaEstimate(params: {
 }
 
 function normalizeVisualAnalysisProgress(progress: IndexingProgress): IndexingProgress {
-  if (progress.stage === 'dense_refinement') {
+  if (
+    progress.stage === 'dense_refinement'
+    || progress.stage === 'describing_representative_frames'
+    || progress.stage === 'describing_frames'
+  ) {
     return {
       ...progress,
       label: 'Analyzing visuals',
@@ -603,6 +608,13 @@ function formatProgressSummary(params: {
   if (detail) {
     return {
       summary: detail,
+      secondary: null,
+    };
+  }
+
+  if (targetProgress === null && params.secondaryLabel) {
+    return {
+      summary: params.secondaryLabel,
       secondary: null,
     };
   }
@@ -1000,6 +1012,12 @@ function buildServerAnalysisStatusCards(params: {
   analysisBySourceId: SourceIndexAnalysisStateMap;
   freshnessBySourceId: Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>;
 }): AnalysisStatusCard[] {
+  const isVisualPreparationStage = (stage: IndexingProgress['stage']) => (
+    stage === 'preparing_media'
+    || stage === 'detecting_scenes'
+    || stage === 'choosing_representative_frames'
+  );
+
   const estimateTaskEtaSeconds = (
     kind: 'audio' | 'visual',
     duration: number,
@@ -1106,7 +1124,11 @@ function buildServerAnalysisStatusCards(params: {
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
       const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
       const progress = kind === 'visual'
-        ? (analysis?.progress ? normalizeVisualAnalysisProgress(analysis.progress) : null)
+        ? (
+          analysis?.progress && !isVisualPreparationStage(analysis.progress.stage)
+            ? normalizeVisualAnalysisProgress(analysis.progress)
+            : null
+        )
         : (
           analysis?.progress?.stage === 'transcribing_audio' || analysis?.progress?.stage === 'transcribing'
             ? analysis.progress
@@ -1187,6 +1209,16 @@ function buildServerAnalysisStatusCards(params: {
             ?? 0,
           0,
         )), 0) || null;
+
+    if (kind === 'visual' && aggregateStatus === 'running' && isVisualPreparationStage(activeStage)) {
+      return {
+        key: `${kind}-analysis`,
+        title,
+        progress: null,
+        secondaryLabel: 'Extracting frames…',
+        showProgressBar: false,
+      };
+    }
 
     const activeEtaSeconds = activeEntry
       ? stabilizeEtaEstimate({
@@ -2812,12 +2844,14 @@ function ProgressStatusCard({
   detail,
   secondaryLabel,
   tone = 'active',
+  showProgressBar = true,
 }: {
   title: string;
   progress: IndexingProgress | null;
   detail?: string | null;
   secondaryLabel?: string | null;
   tone?: ProgressCardTone;
+  showProgressBar?: boolean;
 }) {
   const targetProgress = getProgressValue(progress);
   const isCompleted = tone === 'completed';
@@ -2858,7 +2892,7 @@ function ProgressStatusCard({
           {title}
         </span>
       </div>
-      {!isCompleted && (
+      {!isCompleted && showProgressBar && (
         <div style={{
           width: '100%',
           height: 5,
@@ -3963,7 +3997,7 @@ export default function ChatSidebar() {
     ? formatTranscriptFailureNotice(transcriptError)
     : null;
   const frameAnalysisErrorNotice = hasVideoSource && frameAnalysisError
-    ? `${frameAnalysisError} The assistant will continue without visual frame summaries until analysis succeeds.`
+    ? `${frameAnalysisError} Initial indexing is incomplete.`
     : hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
       ? `${sourceIndexAnalysis.error} Initial indexing is still incomplete.`
       : null;
@@ -4254,12 +4288,14 @@ export default function ChatSidebar() {
                 detail={card.detail}
                 secondaryLabel={card.secondaryLabel}
                 tone={card.tone}
+                showProgressBar={card.showProgressBar}
               />
             ))}
             {transcriptUnavailableNotice && (
               <StatusNoticeCard
-                title="Transcript unavailable"
+                title="Audio analysis issue"
                 detail={transcriptUnavailableNotice}
+                tone="error"
               />
             )}
             {frameAnalysisErrorNotice && (
