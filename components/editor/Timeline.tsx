@@ -103,6 +103,7 @@ export default function Timeline({
   const zoom = useEditorStore(s => s.zoom);
   const setZoom = useEditorStore(s => s.setZoom);
   const setCurrentTime = useEditorStore(s => s.setCurrentTime);
+  const currentTime = useEditorStore(s => s.currentTime);
   const previewSnapshot = useEditorStore(s => s.previewSnapshot);
   const activeReviewSession = useEditorStore(s => s.activeReviewSession);
   const activeReviewFocusItemId = useEditorStore(s => s.activeReviewFocusItemId);
@@ -178,6 +179,33 @@ export default function Timeline({
     () => contentDuration + RIGHT_PAD,
     [RIGHT_PAD, contentDuration],
   );
+  const displayedCurrentTime = useMemo(() => {
+    if (!activeReviewSession || reviewPlaybackUsesBase) {
+      return Math.max(0, Math.min(currentTime, contentDuration));
+    }
+
+    const mappedTime = mapTimelineTimeAcrossSnapshots(
+      playbackSnapshot.clips,
+      clips,
+      currentTime,
+      playbackSnapshot.transitions,
+      transitions,
+    );
+    if (mappedTime === null) {
+      return Math.max(0, Math.min(currentTime, contentDuration));
+    }
+    return Math.max(0, Math.min(mappedTime, contentDuration));
+  }, [
+    activeReviewSession,
+    clips,
+    contentDuration,
+    currentTime,
+    reviewPlaybackUsesBase,
+    playbackSnapshot.clips,
+    playbackSnapshot.transitions,
+    transitions,
+  ]);
+
   const totalW = trackWidth * zoom;
   const ticks = getRulerTicks(totalTimelineDuration, totalW);
   const majorTickInterval = useMemo(() => {
@@ -1027,14 +1055,8 @@ export default function Timeline({
             </EffectTrackRow>
           )}
 
-          <TimelineLivePlayheadOverlay
-            activeReviewSession={activeReviewSession}
-            reviewPlaybackUsesBase={reviewPlaybackUsesBase}
-            clips={clips}
-            transitions={transitions}
-            playbackClips={playbackSnapshot.clips}
-            playbackTransitions={playbackSnapshot.transitions}
-            contentDuration={contentDuration}
+          <TimelinePlayheadOverlay
+            currentTime={displayedCurrentTime}
             scrollRef={scrollRef}
             totalTimelineDuration={totalTimelineDuration}
             totalW={totalW}
@@ -1105,79 +1127,6 @@ function EffectTrackRow({ height, children }: { height: number; children: ReactN
     </div>
   );
 }
-
-const TimelineLivePlayheadOverlay = memo(function TimelineLivePlayheadOverlay({
-  activeReviewSession,
-  reviewPlaybackUsesBase,
-  clips,
-  transitions,
-  playbackClips,
-  playbackTransitions,
-  contentDuration,
-  scrollRef,
-  totalTimelineDuration,
-  totalW,
-  headerWidth,
-  rulerHeight,
-  playheadDragRef,
-  onBeginDrag,
-}: {
-  activeReviewSession: ReturnType<typeof useEditorStore.getState>['activeReviewSession'];
-  reviewPlaybackUsesBase: boolean;
-  clips: ReturnType<typeof useEditorStore.getState>['clips'];
-  transitions: ReturnType<typeof useEditorStore.getState>['transitions'];
-  playbackClips: ReturnType<typeof useEditorStore.getState>['clips'];
-  playbackTransitions: ReturnType<typeof useEditorStore.getState>['transitions'];
-  contentDuration: number;
-  scrollRef: RefObject<HTMLDivElement | null>;
-  totalTimelineDuration: number;
-  totalW: number;
-  headerWidth: number;
-  rulerHeight: number;
-  playheadDragRef: MutableRefObject<PlayheadDragInfo | null>;
-  onBeginDrag: (clientX: number, pointerId: number) => void;
-}) {
-  const currentTime = useEditorStore((s) => s.currentTime);
-  const displayedCurrentTime = useMemo(() => {
-    if (!activeReviewSession || reviewPlaybackUsesBase) {
-      return Math.max(0, Math.min(currentTime, contentDuration));
-    }
-
-    const mappedTime = mapTimelineTimeAcrossSnapshots(
-      playbackClips,
-      clips,
-      currentTime,
-      playbackTransitions,
-      transitions,
-    );
-    if (mappedTime === null) {
-      return Math.max(0, Math.min(currentTime, contentDuration));
-    }
-    return Math.max(0, Math.min(mappedTime, contentDuration));
-  }, [
-    activeReviewSession,
-    clips,
-    contentDuration,
-    currentTime,
-    playbackClips,
-    playbackTransitions,
-    reviewPlaybackUsesBase,
-    transitions,
-  ]);
-
-  return (
-    <TimelinePlayheadOverlay
-      currentTime={displayedCurrentTime}
-      scrollRef={scrollRef}
-      totalTimelineDuration={totalTimelineDuration}
-      totalW={totalW}
-      headerWidth={headerWidth}
-      rulerHeight={rulerHeight}
-      playheadDragRef={playheadDragRef}
-      onBeginDrag={onBeginDrag}
-    />
-  );
-});
 
 const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   currentTime,
