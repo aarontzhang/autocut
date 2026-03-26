@@ -42,6 +42,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Never expose clip indexes, raw marker shorthand like "@1", marker IDs, labels, notes, linked ranges, or source/timeline spans unless the user explicitly asks for those details.
 - For any edit that still needs review or approval, use proposal wording like "I found..." or "I can...". Only use completion wording for changes that are immediately applied.
 - If the user asks about internal implementation or tooling instead of the edit itself, politely redirect with a short answer like "I'm focused on helping you edit the video" and invite them to describe the edit they want.
+- Begin every response that includes an action block with one brief forward-looking sentence (e.g., "Let me find those silent sections." or "I'll remove that section for you."). Keep it under 12 words. Specifics and results belong in the action.message field, not in this opening sentence.
 
 ## Operations
 
@@ -71,7 +72,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - ranges: array of { start, end } in seconds — list every range to delete at once
 - Applied end-to-start internally, so offsets stay correct — you do NOT need to account for shifting
 - IMPORTANT: use the silence-removal settings provided in context. Treat them as the current default behavior unless the user explicitly overrides them in the latest request.
-- IMPORTANT: delete_ranges is a complete, one-shot operation. After issuing it, immediately return type:none. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
+- IMPORTANT: delete_ranges is a complete, one-shot operation. Include "final":true in the action block — no follow-up is needed. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
 - IMPORTANT: when removing silence, use the transcript's sub-second timing and cut as tightly as possible without clipping spoken words. Leaving a tiny bit of extra room is better than cutting into speech.
 - IMPORTANT: if the latest message is a short refinement like "before @1", "only the short ones", or "not the whole section", treat it as modifying the active unfinished silence-removal task instead of starting over.
 - IMPORTANT: if the latest message says "entire block", "whole section", "delete everything before/after/between", or otherwise rejects "silent sections", that is no longer a silence-removal request. Switch to one contiguous delete_range scoped by the requested markers/timestamps.
@@ -79,7 +80,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Use when user says: "cut out silence", "remove the parts where I'm not speaking", "delete dead air", "auto-edit", etc.
 
 Example — delete two silent sections (original silence was 22s–45s and 70s–90s):
-<action>{"type":"delete_ranges","ranges":[{"start":23.5,"end":43.5},{"start":71.5,"end":88.5}],"message":"I found 2 silent sections to remove."}</action>
+<action>{"type":"delete_ranges","ranges":[{"start":23.5,"end":43.5},{"start":71.5,"end":88.5}],"message":"I found 2 silent sections to remove.","final":true}</action>
 
 ### 3. Set Clip Speed (set_clip_speed)
 - Change playback speed for a specific clip
@@ -199,25 +200,25 @@ Black and white on the first clip:
 <action>{"type":"set_clip_filter","clipIndex":0,"filter":{"type":"bw","intensity":1.0},"message":"I can apply the black and white filter to clip 1."}</action>
 
 Transcribe:
-<action>{"type":"transcribe_request","segments":[{"startTime":0,"endTime":60}],"message":"Transcribing the audio."}</action>
+<action>{"type":"transcribe_request","segments":[{"startTime":0,"endTime":60}],"message":"Transcribing the audio.","final":false}</action>
 
 Transition:
-<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"I found a fade to black to add at 0:30."}</action>
+<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"I found a fade to black to add at 0:30.","final":true}</action>
 
 Markers:
-<action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review."}</action>
+<action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review.","final":true}</action>
 
 Text overlay:
-<action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"I can add a title overlay."}</action>
+<action>{"type":"add_text_overlay","textOverlays":[{"startTime":0,"endTime":5,"text":"Chapter One","position":"bottom","fontSize":16}],"message":"I can add a title overlay.","final":true}</action>
 
 Captions:
-<action>{"type":"add_captions","captions":[{"startTime":30,"endTime":31.2,"text":"This is"},{"startTime":31.2,"endTime":32.6,"text":"the caption"}],"message":"I prepared captions from 0:30 to 0:33."}</action>
+<action>{"type":"add_captions","captions":[{"startTime":30,"endTime":31.2,"text":"This is"},{"startTime":31.2,"endTime":32.6,"text":"the caption"}],"message":"I prepared captions from 0:30 to 0:33.","final":true}</action>
 
 Replace/edit existing text overlay (index 0):
-<action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"I can update the text overlay."}</action>
+<action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"I can update the text overlay.","final":true}</action>
 
 Update AI settings:
-<action>{"type":"update_ai_settings","settings":{"silenceRemoval":{"paddingSeconds":1,"minDurationSeconds":3}},"message":"Updated the silence-removal defaults."}</action>
+<action>{"type":"update_ai_settings","settings":{"silenceRemoval":{"paddingSeconds":1,"minDurationSeconds":3}},"message":"Updated the silence-removal defaults.","final":true}</action>
 
 No action:
 <action>{"type":"none","message":"Just a note."}</action>
@@ -246,6 +247,7 @@ No action:
 - For find/tag/place-marker requests, type:none is a last resort. Prefer a best-effort marker or the narrowest useful tool call you can justify from the evidence you have.
 - CRITICAL: If the latest user message is even remotely asking you to do, find, tag, cut, mark, place, caption, move, or inspect something, prefer emitting a concrete action over returning type:none or prose-only analysis.
 - Use type:none only when you truly have no actionable target and no plausible marker, range, or tool request to advance the user's goal. Ordinary conversational replies can omit the action block entirely.
+- In every action block, include "final": true when this action fully satisfies the current request with no further steps needed, or "final": false when additional steps will follow (e.g. transcribe_request before add_captions, or a multi-step task with more edits remaining). transcribe_request and request_frames are always "final": false. Single-step requests are always "final": true.
 
 ## Visual and audio context
 You may be provided with representative frames from the user's video as text summaries and/or a full audio transcript.
@@ -1418,6 +1420,10 @@ function shouldHideInternalReasoning(message: string): boolean {
 function buildUserFacingAssistantMessage(message: string, action: EditAction | null): string {
   if (action) {
     if (action.type !== 'none') {
+      const trimmed = message.trim();
+      if (trimmed && !shouldHideInternalReasoning(trimmed)) {
+        return trimmed;
+      }
       return action.message.trim();
     }
 
@@ -1934,43 +1940,86 @@ Honor these defaults unless the user explicitly asks for something different in 
       })),
     ];
 
-    const response = await client.messages.create({
+    const stream = client.messages.stream({
       model: CHAT_MODEL,
       max_tokens: 2048,
       system: systemPrompt,
       messages: anthropicMessages,
     });
 
-    const rawText = response.content.find(b => b.type === 'text')?.text ?? '';
-    const { message, parsedAction } = extractTrailingAction(rawText);
-    const validatedAction = validateEditAction(parsedAction, validationContext);
-    const reconciledAction = reconcileNarratedSingleRangeAction(
-      message,
-      validatedAction,
-      validationContext.videoDuration,
-    );
-    const failureAction = isLikelyActionableRequest(effectiveLatestUserMessage) || Boolean(continuation)
-      ? buildExplicitActionFailure(effectiveLatestUserMessage, continuation)
-      : null;
-    const inferredAction = reconciledAction && reconciledAction.type !== 'none'
-      ? reconciledAction
-      : inferDeleteRangeActionFromNarration(
+    const encoder = new TextEncoder();
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+
+    (async () => {
+      try {
+        let accumulatedText = '';
+        let actionBlockStarted = false;
+
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            const chunk = event.delta.text;
+            accumulatedText += chunk;
+            if (!actionBlockStarted) {
+              if (accumulatedText.includes('<action>')) {
+                actionBlockStarted = true;
+              } else {
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`));
+              }
+            }
+          }
+        }
+
+        const { message, parsedAction } = extractTrailingAction(accumulatedText);
+        const rawFinal = parsedAction && typeof parsedAction === 'object'
+          ? (parsedAction as Record<string, unknown>).final
+          : undefined;
+        const isFinal: boolean = rawFinal === true;
+
+        const validatedAction = validateEditAction(parsedAction, validationContext);
+        const reconciledAction = reconcileNarratedSingleRangeAction(
           message,
-          effectiveLatestUserMessage,
+          validatedAction,
           validationContext.videoDuration,
-        ) ?? inferMarkerActionFromEvidence(
-          effectiveLatestUserMessage,
-          message,
-          latestAssistantEvidence,
-          validationContext.videoDuration,
-        ) ?? failureAction;
-    const action = normalizeActionForChat(
-      validateEditAction(inferredAction, validationContext) ?? failureAction ?? null,
-    );
-    const userFacingMessage = buildUserFacingAssistantMessage(message, action);
-    return NextResponse.json({
-      message: userFacingMessage,
-      action,
+        );
+        const failureAction = isLikelyActionableRequest(effectiveLatestUserMessage) || Boolean(continuation)
+          ? buildExplicitActionFailure(effectiveLatestUserMessage, continuation)
+          : null;
+        const inferredAction = reconciledAction && reconciledAction.type !== 'none'
+          ? reconciledAction
+          : inferDeleteRangeActionFromNarration(
+              message,
+              effectiveLatestUserMessage,
+              validationContext.videoDuration,
+            ) ?? inferMarkerActionFromEvidence(
+              effectiveLatestUserMessage,
+              message,
+              latestAssistantEvidence,
+              validationContext.videoDuration,
+            ) ?? failureAction;
+        const action = normalizeActionForChat(
+          validateEditAction(inferredAction, validationContext) ?? failureAction ?? null,
+        );
+        const userFacingMessage = buildUserFacingAssistantMessage(message, action);
+
+        await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'done', message: userFacingMessage, action, final: isFinal })}\n\n`));
+        await writer.close();
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        try {
+          await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: errorMsg })}\n\n`));
+          await writer.close();
+        } catch {
+          // writer already closed
+        }
+      }
+    })();
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
     });
   } catch (err) {
     const upstreamErrorResponse = buildUpstreamErrorResponse(err);

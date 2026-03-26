@@ -744,8 +744,9 @@ interface EditorState {
   undo: () => void;
   redo: () => void;
   pushHistory: (snap: EditSnapshot) => void;
-  addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
+  addMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => string;
   updateMessage: (id: string, patch: Partial<Omit<ChatMessage, 'id' | 'timestamp'>>) => void;
+  removeMessage: (id: string) => void;
   setIsChatLoading: (v: boolean) => void;
   clearChatHistory: () => void;
   clearMessages: () => void;
@@ -1598,14 +1599,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   pushHistory: (snap) => set((state) => ({ history: [...state.history, snap], future: [] })),
 
-  addMessage: (msg) => set((state) => ({
-    messages: [...state.messages, { ...msg, id: uuidv4(), timestamp: Date.now() }],
-  })),
+  addMessage: (msg) => {
+    const id = uuidv4();
+    set((state) => ({
+      messages: [...state.messages, { ...msg, id, timestamp: Date.now() }],
+    }));
+    return id;
+  },
 
   updateMessage: (id, patch) => set((state) => ({
     messages: state.messages.map((message) => (
       message.id === id ? { ...message, ...patch } : message
     )),
+  })),
+
+  removeMessage: (id) => set((state) => ({
+    messages: state.messages.filter((message) => message.id !== id),
   })),
 
   setIsChatLoading: (v) => set({ isChatLoading: v }),

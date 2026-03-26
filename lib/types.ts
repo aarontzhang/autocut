@@ -135,6 +135,8 @@ export interface ChatMessage {
   autoApplied?: boolean;
   actionStatus?: 'pending' | 'completed' | 'rejected';
   actionResult?: string;
+  final?: boolean;
+  isStreaming?: boolean;
 }
 
 export interface AppliedActionRecord {

@@ -76,6 +76,7 @@ type ChatResponse = {
   error?: string;
   retryAfterSeconds?: number;
   requestId?: string | null;
+  final?: boolean;
 };
 
 type ChatRequestMessage = {
@@ -158,6 +159,7 @@ async function postChatRequest(
     context: Record<string, unknown>;
   },
   ctrl: AbortController,
+  onChunk?: (text: string) => void,
 ): Promise<ChatResponse> {
   const timeoutId = window.setTimeout(() => {
     try {
@@ -178,6 +180,43 @@ async function postChatRequest(
           signal: ctrl.signal,
           body: JSON.stringify(payload),
         });
+
+        const contentType = res.headers.get('Content-Type') ?? '';
+        if (contentType.includes('text/event-stream')) {
+          if (!res.ok) throw new Error(`Chat request failed (${res.status}).`);
+          if (!res.body) throw new Error('No response body.');
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let sseBuffer = '';
+          let finalResponse: ChatResponse = {};
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            sseBuffer += decoder.decode(value, { stream: true });
+
+            const lines = sseBuffer.split('\n');
+            sseBuffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              let event: { type: string; text?: string; message?: string; action?: EditAction | null; final?: boolean; error?: string };
+              try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+              if (event.type === 'chunk' && typeof event.text === 'string') {
+                onChunk?.(event.text);
+              } else if (event.type === 'done') {
+                finalResponse = { message: event.message, action: event.action, final: event.final };
+              } else if (event.type === 'error') {
+                throw new Error(event.error ?? 'Stream error');
+              }
+            }
+          }
+
+          return finalResponse;
+        }
+
         const data = await parseJsonResponse<ChatResponse>(res);
         if (!res.ok) {
           const retryAfterSeconds = Number(res.headers.get('Retry-After') ?? data?.retryAfterSeconds);
@@ -3070,6 +3109,8 @@ export default function ChatSidebar() {
   const messages = useEditorStore(s => s.messages);
   const isChatLoading = useEditorStore(s => s.isChatLoading);
   const addMessage = useEditorStore(s => s.addMessage);
+  const updateMessage = useEditorStore(s => s.updateMessage);
+  const removeMessage = useEditorStore(s => s.removeMessage);
   const setIsChatLoading = useEditorStore(s => s.setIsChatLoading);
   const videoDuration = useEditorStore(s => s.videoDuration);
   const clips = useEditorStore(s => s.clips);
@@ -3608,8 +3649,13 @@ export default function ChatSidebar() {
     let currentFrames = [...baseFrames];
     let nextHistory = [...history];
     let producedVisibleResponse = false;
+    let streamingMessageId: string | null = null;
+    let streamingAccumulated = '';
 
     for (let round = 0; round < MAX_CHAIN_CHAT_ROUNDS; round++) {
+      streamingMessageId = null;
+      streamingAccumulated = '';
+
       if (!initialIndexingReady) break;
       if (stopRequestedRef.current) break;
       const freshState = useEditorStore.getState();
@@ -3625,7 +3671,21 @@ export default function ChatSidebar() {
         missing: !(freshState.sourceTranscriptCaptions && freshState.sourceTranscriptCaptions.length > 0),
       };
 
-      const { message = '', action, visualSearch } = await postChatRequest({
+      const onChunk = (text: string) => {
+        streamingAccumulated += text;
+        if (!streamingMessageId) {
+          streamingMessageId = addMessage({
+            role: 'assistant',
+            content: streamingAccumulated,
+            requestChainId,
+            isStreaming: true,
+          });
+        } else {
+          updateMessage(streamingMessageId, { content: streamingAccumulated });
+        }
+      };
+
+      const { message = '', action, visualSearch, final: isFinal } = await postChatRequest({
         messages: nextHistory,
         context: {
           projectId: freshState.currentProjectId,
@@ -3658,9 +3718,10 @@ export default function ChatSidebar() {
           frameCoverage,
           frames: buildFrameContextPayload([...packedFrames, ...currentFrames.filter((frame) => frame.kind === 'dense')], currentClips),
         },
-      }, ctrl);
+      }, ctrl, onChunk);
 
       if (action?.type === 'request_frames' && action.frameRequest && round < 2) {
+        if (streamingMessageId) { removeMessage(streamingMessageId); streamingMessageId = null; }
         if (!initialIndexingReady) break;
         setLoadingStatus('Dense local refinement…');
         setLoadingPhaseId('continuing_remaining_step');
@@ -3712,6 +3773,7 @@ export default function ChatSidebar() {
         }));
 
         if (nextChainState) {
+          if (streamingMessageId) { removeMessage(streamingMessageId); streamingMessageId = null; }
           nextHistory = [
             ...nextHistory,
             {
@@ -3767,32 +3829,45 @@ export default function ChatSidebar() {
         }));
       }
 
-      addMessage({
-        role: 'assistant',
+      const finalMessageProps = {
+        role: 'assistant' as const,
         content: assistantMessage,
         requestChainId,
         action: action ?? undefined,
         visualSearch: visualSearch ?? undefined,
         autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
-        actionStatus: nextActionStatus,
+        actionStatus: nextActionStatus as 'pending' | 'completed' | 'rejected' | undefined,
         actionResult: markerAction && action
           ? markerActionPreviouslyApplied
             ? 'Already applied.'
             : getMarkerActionResult(action)
           : undefined,
-      });
+        final: isFinal,
+        isStreaming: false,
+      };
+
+      if (streamingMessageId) {
+        updateMessage(streamingMessageId, finalMessageProps);
+      } else {
+        addMessage(finalMessageProps);
+      }
       producedVisibleResponse = true;
       return;
     }
 
     if (!producedVisibleResponse) {
-      addMessage({
-        role: 'assistant',
-        content: 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.',
-        requestChainId,
-      });
+      const fallbackContent = 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.';
+      if (streamingMessageId) {
+        updateMessage(streamingMessageId, { content: fallbackContent, isStreaming: false });
+      } else {
+        addMessage({
+          role: 'assistant',
+          content: fallbackContent,
+          requestChainId,
+        });
+      }
     }
-  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, requestSeek, setVisualSearchSession, updateRequestChainState, useServerSourceIndex]);
+  }, [addMarker, addMessage, applyStoredAction, availableSources, buildCurrentTranscript, ensureFramesExtracted, extractDenseFramesForRange, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, removeMessage, requestSeek, setVisualSearchSession, updateMessage, updateRequestChainState, useServerSourceIndex]);
 
   const continueRequestChain = useCallback(async (
     requestChainId: string,
@@ -3923,6 +3998,7 @@ export default function ChatSidebar() {
     if (!requestChainId) return;
     const nextChainState = recordCompletedChainAction(requestChainId, action);
     if (!nextChainState || action.type === 'transcribe_request') return;
+    if (assistantMessage?.final === true) return;
     await continueRequestChain(
       requestChainId,
       'action_resolved',
@@ -4310,7 +4386,7 @@ export default function ChatSidebar() {
               ? <UserMessage key={msg.id} msg={msg} />
               : <AssistantMessage key={msg.id} msg={msg} onTranscriptReady={handleTranscriptReady} onActionResolved={handleActionResolved} />
             )}
-            {isChatLoading && <ThinkingIndicator status={loadingStatus || undefined} />}
+            {isChatLoading && !messages.some(m => m.isStreaming) && <ThinkingIndicator status={loadingStatus || undefined} />}
           </div>
         )}
         <div ref={messagesEndRef} />
