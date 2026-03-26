@@ -33,6 +33,7 @@ const CSS_FILTERS: Record<string, string> = {
 const END_EPSILON = 0.03;
 const SEEK_EPSILON = 1 / 120;
 const DRIFT_EPSILON = 1 / 45;
+const SAME_SOURCE_HANDOFF_PRELOAD_WINDOW = 0.75;
 
 type VideoFrameRequestCallback = (now: number, metadata: unknown) => void;
 type VideoWithFrameCallback = HTMLVideoElement & {
@@ -146,6 +147,23 @@ function normalizeVideoUrl(url: string | null | undefined) {
   } catch {
     return url;
   }
+}
+
+function shouldStartPreloadingUpcomingEntry(
+  currentEntry: RenderTimelineEntry,
+  upcomingEntry: RenderTimelineEntry | null,
+  timelineTime: number,
+) {
+  if (!upcomingEntry) return false;
+  if (!shouldUseSeparateVideoLayerForPlaybackHandoff(currentEntry, upcomingEntry)) {
+    return false;
+  }
+  if (currentEntry.sourceId !== upcomingEntry.sourceId) {
+    return true;
+  }
+
+  const timeUntilBoundary = Math.max(0, currentEntry.timelineEnd - timelineTime);
+  return timeUntilBoundary <= SAME_SOURCE_HANDOFF_PRELOAD_WINDOW;
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef }, ref) => {
@@ -597,11 +615,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const shouldPreloadUpcomingLayer = Boolean(
       upcomingEntry
       && secondaryVideo
-      // Same-file clip boundaries still need the spare layer when playback has
-      // to jump to a non-contiguous source time. Without that warm-up the
-      // active element stalls while the browser seeks and decodes the next
-      // frame, which is the pause users were seeing between cuts.
-      && shouldUseSeparateVideoLayerForPlaybackHandoff(primaryEntry, upcomingEntry),
+      // Cross-source handoffs can stay warm the whole time. Same-source jumps
+      // are only preloaded shortly before the cut so we avoid keeping two
+      // decoders pinned to the same media asset during normal playback.
+      && shouldStartPreloadingUpcomingEntry(primaryEntry, upcomingEntry, timelineTime),
     );
 
     if (
