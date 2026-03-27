@@ -72,7 +72,7 @@ The video is organized as a sequence of clips on the timeline. You can split, de
 - Applied end-to-start internally, so offsets stay correct — you do NOT need to account for shifting
 - IMPORTANT: use the silence-removal settings provided in context. Treat them as the current default behavior unless the user explicitly overrides them in the latest request.
 - IMPORTANT: delete_ranges is a complete, one-shot operation. Include "final":true in the action block — no follow-up is needed. Do NOT issue a second delete_ranges or any delete_range actions afterward — all silence is removed in the single batch.
-- IMPORTANT: when removing silence, use the transcript's sub-second timing and cut as tightly as possible without clipping spoken words. Leaving a tiny bit of extra room is better than cutting into speech.
+- IMPORTANT: when removing silence, leave a natural ~0.15s buffer after the last spoken word before the cut start and before the first spoken word after the cut end. This prevents abrupt cuts that clip speech. Exception: if the user explicitly requests "tight cuts", "remove all silence", "even if it's super short", or similar phrasing indicating maximum compression, skip the buffer and cut at the exact word boundary.
 - IMPORTANT: if the latest message is a short refinement like "before @1", "only the short ones", or "not the whole section", treat it as modifying the active unfinished silence-removal task instead of starting over.
 - IMPORTANT: if the latest message says "entire block", "whole section", "delete everything before/after/between", or otherwise rejects "silent sections", that is no longer a silence-removal request. Switch to one contiguous delete_range scoped by the requested markers/timestamps.
 - IMPORTANT: keep large delete_ranges payloads compact. Do not add commentary inside the JSON. Return a single valid <action> block only.
@@ -1715,6 +1715,7 @@ Honor these defaults unless the user explicitly asks for something different in 
       try {
         let accumulatedText = '';
         let actionBlockStarted = false;
+        let sentLength = 0;
 
         for await (const event of stream) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -1724,13 +1725,30 @@ Honor these defaults unless the user explicitly asks for something different in 
               if (accumulatedText.includes('<action>')) {
                 actionBlockStarted = true;
                 const preActionEnd = accumulatedText.indexOf('<action>');
-                const alreadySentLength = accumulatedText.length - chunk.length;
-                const unsent = accumulatedText.slice(alreadySentLength, preActionEnd);
-                if (unsent) {
-                  await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: unsent })}\n\n`));
+                if (preActionEnd > sentLength) {
+                  const unsent = accumulatedText.slice(sentLength, preActionEnd);
+                  if (unsent) {
+                    await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: unsent })}\n\n`));
+                    sentLength = preActionEnd;
+                  }
                 }
               } else {
-                await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`));
+                // Hold back any partial <action prefix at the end to avoid leaking it to the UI
+                const actionTag = '<action>';
+                let safeEnd = accumulatedText.length;
+                for (let prefixLen = actionTag.length - 1; prefixLen >= 1; prefixLen--) {
+                  if (accumulatedText.endsWith(actionTag.slice(0, prefixLen))) {
+                    safeEnd = accumulatedText.length - prefixLen;
+                    break;
+                  }
+                }
+                if (safeEnd > sentLength) {
+                  const toSend = accumulatedText.slice(sentLength, safeEnd);
+                  if (toSend) {
+                    await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'chunk', text: toSend })}\n\n`));
+                    sentLength = safeEnd;
+                  }
+                }
               }
             }
           }
