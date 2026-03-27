@@ -1870,7 +1870,24 @@ Honor these defaults unless the user explicitly asks for something different in 
         await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'done', message: userFacingMessage, action, final: isFinal })}\n\n`));
         await writer.close();
       } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        let errorMsg: string;
+        if (err instanceof APIError && (err.status === 529 || /overload/i.test(err.message))) {
+          errorMsg = 'The chat provider is temporarily overloaded. Please try again in a moment.';
+        } else if (err instanceof Error) {
+          const raw = err.message;
+          try {
+            const parsed = JSON.parse(raw) as { error?: { type?: string; message?: string } };
+            if (parsed?.error?.type === 'overloaded_error' || /overload/i.test(raw)) {
+              errorMsg = 'The chat provider is temporarily overloaded. Please try again in a moment.';
+            } else {
+              errorMsg = parsed?.error?.message ?? raw;
+            }
+          } catch {
+            errorMsg = raw;
+          }
+        } else {
+          errorMsg = 'Unknown error';
+        }
         try {
           await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: errorMsg })}\n\n`));
           await writer.close();

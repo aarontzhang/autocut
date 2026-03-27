@@ -179,7 +179,17 @@ async function postChatRequest(
               } else if (event.type === 'done') {
                 finalResponse = { message: event.message, action: event.action, final: event.final };
               } else if (event.type === 'error') {
-                throw new Error(event.error ?? 'Stream error');
+                const raw = event.error ?? 'Stream error';
+                let friendly = raw;
+                try {
+                  const parsed = JSON.parse(raw) as { error?: { type?: string; message?: string } };
+                  if (parsed?.error?.type === 'overloaded_error' || /overload/i.test(raw)) {
+                    friendly = 'The chat provider is temporarily overloaded. Please try again in a moment.';
+                  } else if (parsed?.error?.message) {
+                    friendly = parsed.error.message;
+                  }
+                } catch { /* not JSON, use as-is */ }
+                throw new Error(friendly);
               }
             }
           }
@@ -1575,6 +1585,7 @@ function UserMessage({ msg }: { msg: ChatMessageType }) {
         fontFamily: 'var(--font-serif)',
         marginLeft: 'auto',
         textAlign: 'left',
+        wordBreak: 'break-word',
       }}>
         <MarkerAwareText text={msg.content} />
       </div>
@@ -1877,6 +1888,7 @@ function AssistantMessage({
             maxWidth: '100%',
             alignSelf: 'flex-start',
             textAlign: 'left',
+            wordBreak: 'break-word',
           }}>
             <MarkerAwareText text={msg.content} />
           </div>
@@ -3200,7 +3212,7 @@ export default function ChatSidebar() {
       </div>
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '14px 12px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '14px 12px' }}>
         {(analysisStatusCards.length > 0 || transcriptUnavailableNotice || frameAnalysisErrorNotice) && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: messages.length === 0 ? 18 : 12 }}>
             {analysisStatusCards.map((card) => (
