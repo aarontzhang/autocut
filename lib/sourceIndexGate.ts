@@ -26,12 +26,9 @@ export function isInitialIndexingReadyForSource(input: {
   analysis?: SourceIndexAnalysisState | null;
   freshness?: Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null;
 }): boolean {
-  const audioReady = input.freshness?.transcript === true
+  return input.freshness?.transcript === true
     || input.analysis?.audio?.status === 'completed'
     || input.analysis?.audio?.status === 'unavailable';
-  const visualReady = input.freshness?.overview === true
-    || input.analysis?.visual?.status === 'completed';
-  return audioReady && visualReady;
 }
 
 export function getInitialIndexingReady(
