@@ -14,7 +14,7 @@ import {
   SourceIndexTaskState,
   VisualSearchSession,
 } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction } from '@/lib/timelineUtils';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, projectCaptionWordsToTimeline } from '@/lib/timelineUtils';
 import {
   buildReviewGroupWithUpdatedItems,
   buildReviewPreviewSnapshot,
@@ -126,6 +126,7 @@ async function postChatRequest(
   payload: {
     messages: ChatRequestMessage[];
     context: Record<string, unknown>;
+    planMode?: boolean;
   },
   ctrl: AbortController,
   onChunk?: (text: string) => void,
@@ -586,6 +587,14 @@ function buildSilenceCandidatePayload(): SilenceCandidate[] {
   if (!rawCaptions || rawCaptions.length === 0) return [];
 
   return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
+}
+
+function buildWordBoundaryPayload(): Array<{ start: number; end: number }> {
+  const state = useEditorStore.getState();
+  const rawCaptions = state.sourceTranscriptCaptions;
+  if (!rawCaptions || rawCaptions.length === 0) return [];
+  return projectCaptionWordsToTimeline(state.clips, rawCaptions)
+    .map((word) => ({ start: word.startTime, end: word.endTime }));
 }
 
 function getAssistantFallbackMessage(action?: EditAction | null): string {
@@ -2433,6 +2442,7 @@ export default function ChatSidebar() {
   const clearChatHistory = useEditorStore(s => s.clearChatHistory);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [loadingPhaseId, setLoadingPhaseId] = useState<string | null>(null);
+  const [isPlanMode, setIsPlanMode] = useState(false);
   const videoUrl = useEditorStore(s => s.videoUrl);
   const processingVideoUrl = useEditorStore(s => s.processingVideoUrl);
   const videoData = useEditorStore(s => s.videoData);
@@ -2643,9 +2653,11 @@ export default function ChatSidebar() {
           transcript: currentTranscript,
           transcriptAvailability,
           silenceCandidates,
+          wordBoundaries: buildWordBoundaryPayload(),
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
         },
+        planMode: isPlanMode,
       }, ctrl, onChunk);
 
       setVisualSearchSession(visualSearch ?? null);
@@ -3118,6 +3130,11 @@ export default function ChatSidebar() {
         return;
       }
     }
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault();
+      setIsPlanMode((prev) => !prev);
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
@@ -3365,6 +3382,36 @@ export default function ChatSidebar() {
                 </svg>
               </button>
             )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={() => setIsPlanMode((prev) => !prev)}
+              title="Plan mode — discuss edits without applying them (Shift+Tab)"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                padding: '2px 8px',
+                height: 20,
+                borderRadius: 999,
+                border: isPlanMode ? '1px solid var(--accent)' : '1px solid rgba(255,255,255,0.12)',
+                background: isPlanMode ? 'var(--accent)' : 'transparent',
+                color: isPlanMode ? '#000' : 'var(--fg-muted)',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+                cursor: 'pointer',
+                transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+              }}
+            >
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.2"
+                strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+              Plan
+            </button>
           </div>
         </div>
       </div>
