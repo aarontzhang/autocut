@@ -1751,8 +1751,23 @@ Honor these defaults unless the user explicitly asks for something different in 
         const failureAction = isLikelyActionableRequest(effectiveLatestUserMessage) || Boolean(continuation)
           ? buildExplicitActionFailure(effectiveLatestUserMessage, continuation)
           : null;
-        const inferredAction = reconciledAction && reconciledAction.type !== 'none'
-          ? reconciledAction
+        // If the AI chose add_marker but the user clearly wants a delete, try to
+        // upgrade to delete_range using time ranges narrated in the prose.
+        let effectiveReconciledAction = reconciledAction;
+        if (
+          reconciledAction?.type === 'add_marker'
+          && isLikelySingleRangeDeleteIntent(effectiveLatestUserMessage)
+        ) {
+          const deleteUpgrade = inferDeleteRangeActionFromNarration(
+            message,
+            effectiveLatestUserMessage,
+            validationContext.videoDuration,
+          );
+          if (deleteUpgrade) effectiveReconciledAction = deleteUpgrade;
+        }
+
+        const inferredAction = effectiveReconciledAction && effectiveReconciledAction.type !== 'none'
+          ? effectiveReconciledAction
           : inferDeleteRangeActionFromNarration(
               message,
               effectiveLatestUserMessage,

@@ -78,8 +78,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Project ID is required' }, { status: 400 });
   }
 
-  const quota = await getProjectedQuotaSnapshot(user.id, fileSize);
-  if (quota.projected.usedBytes > quota.projected.limitBytes) {
+  let quota: Awaited<ReturnType<typeof getProjectedQuotaSnapshot>> | null = null;
+  try {
+    quota = await getProjectedQuotaSnapshot(user.id, fileSize);
+  } catch (quotaError) {
+    console.error('[uploads.initiate] quota check failed, proceeding without limit enforcement', quotaError);
+  }
+  if (quota && quota.projected.usedBytes > quota.projected.limitBytes) {
     if (kind === 'project-main' && projectId) {
       await supabase.from('projects').delete().eq('id', projectId).eq('user_id', user.id);
     }

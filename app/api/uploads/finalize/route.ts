@@ -89,16 +89,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Uploaded file not found' }, { status: 404 });
   }
 
-  await upsertTrackedStorageUpload({
-    userId: user.id,
-    projectId,
-    storagePath,
-    kind,
-    sizeBytes: uploadedSize,
-  });
+  try {
+    await upsertTrackedStorageUpload({
+      userId: user.id,
+      projectId,
+      storagePath,
+      kind,
+      sizeBytes: uploadedSize,
+    });
+  } catch (trackError) {
+    console.error('[uploads.finalize] failed to track storage upload', trackError);
+  }
 
-  const quota = await getUserStorageQuotaSnapshot(user.id);
-  if (quota.usedBytes > STORAGE_QUOTA_BYTES) {
+  let quota: Awaited<ReturnType<typeof getUserStorageQuotaSnapshot>> | null = null;
+  try {
+    quota = await getUserStorageQuotaSnapshot(user.id);
+  } catch (quotaError) {
+    console.error('[uploads.finalize] failed to get quota snapshot', quotaError);
+  }
+  if (quota && quota.usedBytes > STORAGE_QUOTA_BYTES) {
     await removeStorageObjects([storagePath]);
     await removeTrackedStorageUploads([storagePath]);
 
