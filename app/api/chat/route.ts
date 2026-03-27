@@ -904,22 +904,7 @@ function buildActionValidationContext(
   markerIds: Set<string>;
   overlayCount?: number;
   transcript?: string | null;
-  wordBoundaries?: Array<{ start: number; end: number }>;
 } {
-  const rawWordBoundaries = context?.wordBoundaries;
-  const wordBoundaries = Array.isArray(rawWordBoundaries)
-    ? rawWordBoundaries.filter(
-        (entry): entry is { start: number; end: number } =>
-          entry !== null &&
-          typeof entry === 'object' &&
-          typeof (entry as { start?: unknown }).start === 'number' &&
-          typeof (entry as { end?: unknown }).end === 'number' &&
-          Number.isFinite((entry as { start: number }).start) &&
-          Number.isFinite((entry as { end: number }).end) &&
-          (entry as { end: number }).end > (entry as { start: number }).start,
-      )
-    : undefined;
-
   return {
     clipCount,
     videoDuration: Number(context?.videoDuration ?? 0),
@@ -932,7 +917,6 @@ function buildActionValidationContext(
     ),
     overlayCount: typeof context?.textOverlayCount === 'number' ? context.textOverlayCount : undefined,
     transcript: typeof context?.transcript === 'string' ? context.transcript : null,
-    wordBoundaries,
   };
 }
 

@@ -18,7 +18,6 @@ type ActionValidationContext = {
   markerIds?: Set<string>;
   overlayCount?: number;
   transcript?: string | null;
-  wordBoundaries?: Array<{ start: number; end: number }>;
 };
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
@@ -136,42 +135,18 @@ function snapDeleteBoundaryOutOfSpeech(
   return time;
 }
 
-function snapToWordBoundary(
-  time: number,
-  role: 'start' | 'end',
-  words: Array<{ start: number; end: number }>,
-): number {
-  for (const word of words) {
-    if (time > word.start && time < word.end) {
-      // Strictly interior to a word: push the boundary OUT of speech.
-      // start → snap forward to word.end (cut begins after speech ends)
-      // end   → snap backward to word.start (cut ends before speech begins)
-      return role === 'start' ? word.end : word.start;
-    }
-  }
-  return time;
-}
-
 function sanitizeDeleteRange(
   start: unknown,
   end: unknown,
   videoDuration: number,
   speechSegments: Array<{ start: number; end: number }>,
-  wordBoundaries?: Array<{ start: number; end: number }>,
 ) {
   const range = sanitizeRange(start, end, videoDuration);
   if (!range) return null;
+  if (speechSegments.length === 0) return range;
 
-  const useWordBoundaries = wordBoundaries && wordBoundaries.length > 0;
-
-  if (!useWordBoundaries && speechSegments.length === 0) return range;
-
-  const snappedStart = useWordBoundaries
-    ? snapToWordBoundary(range.start, 'start', wordBoundaries!)
-    : snapDeleteBoundaryOutOfSpeech(range.start, 'forward', speechSegments);
-  const snappedEnd = useWordBoundaries
-    ? snapToWordBoundary(range.end, 'end', wordBoundaries!)
-    : snapDeleteBoundaryOutOfSpeech(range.end, 'backward', speechSegments);
+  const snappedStart = snapDeleteBoundaryOutOfSpeech(range.start, 'forward', speechSegments);
+  const snappedEnd = snapDeleteBoundaryOutOfSpeech(range.end, 'backward', speechSegments);
   if (snappedEnd <= snappedStart) return null;
 
   return {
@@ -410,7 +385,7 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
   }
 
   if (type === 'delete_range') {
-    const range = sanitizeDeleteRange(action.deleteStartTime, action.deleteEndTime, safeDuration, speechSegments, context.wordBoundaries);
+    const range = sanitizeDeleteRange(action.deleteStartTime, action.deleteEndTime, safeDuration, speechSegments);
     if (!range) return null;
     return { ...base, type, deleteStartTime: range.start, deleteEndTime: range.end };
   }
@@ -426,7 +401,6 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
           (range as { end?: unknown }).end,
           safeDuration,
           speechSegments,
-          context.wordBoundaries,
         );
         return safeRange ? [{ start: safeRange.start, end: safeRange.end }] : [];
       });
