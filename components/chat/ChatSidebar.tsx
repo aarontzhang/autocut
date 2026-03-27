@@ -14,7 +14,7 @@ import {
   SourceIndexTaskState,
   VisualSearchSession,
 } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction } from '@/lib/timelineUtils';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, projectCaptionWordsToTimeline } from '@/lib/timelineUtils';
 import {
   buildReviewGroupWithUpdatedItems,
   buildReviewPreviewSnapshot,
@@ -596,6 +596,14 @@ function buildSilenceCandidatePayload(): SilenceCandidate[] {
   if (!rawCaptions || rawCaptions.length === 0) return [];
 
   return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
+}
+
+function buildWordBoundaryPayload(): Array<{ start: number; end: number }> {
+  const state = useEditorStore.getState();
+  const rawCaptions = state.sourceTranscriptCaptions;
+  if (!rawCaptions || rawCaptions.length === 0) return [];
+  return projectCaptionWordsToTimeline(state.clips, rawCaptions)
+    .map((word) => ({ start: word.startTime, end: word.endTime }));
 }
 
 function getAssistantFallbackMessage(action?: EditAction | null): string {
@@ -2656,6 +2664,7 @@ export default function ChatSidebar() {
           transcript: currentTranscript,
           transcriptAvailability,
           silenceCandidates,
+          wordBoundaries: buildWordBoundaryPayload(),
           settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
         },
