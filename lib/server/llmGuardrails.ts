@@ -143,9 +143,10 @@ function snapToWordBoundary(
 ): number {
   for (const word of words) {
     if (time > word.start && time < word.end) {
-      // Strictly interior: snap to word.start for cut-start (include full word in cut)
-      // or word.end for cut-end (include full word in cut)
-      return role === 'start' ? word.start : word.end;
+      // Strictly interior to a word: push the boundary OUT of speech.
+      // start → snap forward to word.end (cut begins after speech ends)
+      // end   → snap backward to word.start (cut ends before speech begins)
+      return role === 'start' ? word.end : word.start;
     }
   }
   return time;
