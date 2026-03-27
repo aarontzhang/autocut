@@ -259,7 +259,7 @@ const PROMPT_INJECTION_RULES = `
 
 const DEFAULT_SETTINGS: AIEditingSettings = {
   silenceRemoval: {
-    paddingSeconds: 0.12,
+    paddingSeconds: 0,
     minDurationSeconds: 0.08,
     preserveShortPauses: false,
     requireSpeakerAbsence: true,
@@ -984,8 +984,6 @@ function formatSilenceCandidatesContext(candidates: SilenceCandidate[]): string[
       start: Number(formatCompactTime(candidate.deleteStart)),
       end: Number(formatCompactTime(candidate.deleteEnd)),
       duration: Number(formatCompactTime(candidate.deleteEnd - candidate.deleteStart)),
-      gapStart: Number(formatCompactTime(candidate.gapStart)),
-      gapEnd: Number(formatCompactTime(candidate.gapEnd)),
     })))}`
   ];
 }
