@@ -3,8 +3,10 @@ import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import jpeg from 'jpeg-js';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -567,14 +569,19 @@ async function getAssetForJob(job) {
 }
 
 async function downloadAssetToTemp(storagePath) {
-  const { data, error } = await supabase.storage.from('videos').download(storagePath);
-  if (error || !data) {
-    throw error ?? new Error(`Failed to download ${storagePath}.`);
+  const { data: signedData, error: signedError } = await supabase.storage
+    .from('videos')
+    .createSignedUrl(storagePath, 3600);
+  if (signedError || !signedData?.signedUrl) {
+    throw signedError ?? new Error(`Failed to create download URL for ${storagePath}.`);
   }
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-analysis-'));
   const inputPath = path.join(tempDir, path.basename(storagePath) || 'input.mp4');
-  const arrayBuffer = await data.arrayBuffer();
-  await fs.writeFile(inputPath, Buffer.from(arrayBuffer));
+  const response = await fetch(signedData.signedUrl);
+  if (!response.ok || !response.body) {
+    throw new Error(`Failed to download video: HTTP ${response.status}`);
+  }
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(inputPath));
   return { tempDir, inputPath };
 }
 

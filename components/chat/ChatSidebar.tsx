@@ -845,7 +845,7 @@ function buildServerAnalysisStatusCards(params: {
                 label: null,
                 etaSeconds: activeEntry?.task.etaSeconds ?? null,
               }),
-      detail: aggregateStatus === 'failed' && firstReason ? firstReason : null,
+      detail: aggregateStatus === 'failed' ? 'Video analysis could not be completed. Please try again.' : null,
     };
   };
 
@@ -2966,7 +2966,7 @@ export default function ChatSidebar() {
     completed: transcriptProgress?.completed ?? 0,
     total: Math.max(transcriptProgress?.total ?? 1, 1),
   });
-  const transcriptUnavailableNotice = hasVideoSource && transcriptFailed
+  const transcriptUnavailableNotice = hasVideoSource && !usingServerSourceIndex && transcriptFailed
     ? formatTranscriptFailureNotice(transcriptError)
     : null;
   const frameAnalysisErrorNotice = hasVideoSource && sourceIndexAnalysis?.status === 'failed' && sourceIndexAnalysis.error
