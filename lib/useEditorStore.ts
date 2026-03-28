@@ -2135,8 +2135,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setBackgroundTranscript: (text, status, rawCaptions, errorMessage, options) => set((state) => {
     const validSourceIds = new Set(state.sources.map((source) => source.id));
+    const sourceIdAliases = buildProjectSourceAliasMap(state.sources);
     const normalizedCaptions = rawCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))
       .filter((entry): entry is CaptionEntry => !!entry) ?? undefined;
     const shouldMarkTranscriptFresh = options?.markFresh ?? (normalizedCaptions !== undefined);
     const nextSourceTranscriptCaptions = normalizedCaptions !== undefined
@@ -2174,8 +2175,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSourceOverviewFrames: (sourceId, frames, options) => set((state) => {
     const validSourceIds = new Set(state.sources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
+    const sourceIdAliases = buildProjectSourceAliasMap(state.sources);
     const normalizedFrames = frames
-      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
+      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId, sourceIdAliases))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
     const nextSourceOverviewFrames = replaceEntriesForSource(state.sourceOverviewFrames, sourceId, normalizedFrames);
     return {
@@ -2198,16 +2200,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   hydrateSourceIndex: (payload) => set((state) => {
     const validSourceIds = new Set(state.sources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(state.sources)?.id ?? MAIN_SOURCE_ID;
+    const sourceIdAliases = buildProjectSourceAliasMap(state.sources);
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
     const analysisBySourceId = normalizeSourceIndexAnalysisStateMap(payload.analysisBySourceId);
     const audioStates = Object.values(analysisBySourceId).map((entry) => entry.audio).filter((entry): entry is NonNullable<typeof entry> => !!entry);
     const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running'
       || audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
     const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
-      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds))
+      ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
     const normalizedIncomingOverviewFrames = payload.sourceOverviewFrames
-      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId))
+      ?.map((entry) => normalizeOverviewFrame(entry, validSourceIds, fallbackSourceId, sourceIdAliases))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
     const sourceIds = state.sources.map((source) => source.id);
 
