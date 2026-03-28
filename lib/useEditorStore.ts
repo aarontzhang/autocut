@@ -35,6 +35,11 @@ import {
   splitClipsAtTime,
 } from './editActionUtils';
 import {
+  DEFAULT_AI_EDITING_SETTINGS,
+  mergeAISettings,
+  resolveAIEditingSettings,
+} from './aiSettings';
+import {
   buildTranscriptContext,
   formatTimePrecise,
   projectSourceFramesToTimeline,
@@ -449,51 +454,6 @@ function mergeHydratedEntriesForSources<T extends { sourceId?: string | null }>(
     }
   }
   return next;
-}
-
-export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
-  silenceRemoval: {
-    paddingSeconds: 0.12,
-    minDurationSeconds: 0.08,
-    preserveShortPauses: false,
-    requireSpeakerAbsence: true,
-  },
-  frameInspection: {
-    defaultFrameCount: 30,
-    overviewIntervalSeconds: 5,
-    maxOverviewFrames: 720,
-  },
-  captions: {
-    wordsPerCaption: 4,
-  },
-  transitions: {
-    defaultDuration: 1,
-    defaultType: 'fade_black',
-  },
-  textOverlays: {
-    defaultPosition: 'bottom',
-    defaultFontSize: 16,
-  },
-};
-
-function mergeAISettings(
-  current: AIEditingSettings,
-  patch?: Partial<AIEditingSettings>,
-): AIEditingSettings {
-  if (!patch) return current;
-  const normalizedTransitionPatch = patch.transitions
-    ? {
-        ...patch.transitions,
-        ...(patch.transitions.defaultType ? { defaultType: 'fade_black' as const } : {}),
-      }
-    : undefined;
-  return {
-    silenceRemoval: { ...current.silenceRemoval, ...patch.silenceRemoval },
-    frameInspection: { ...current.frameInspection, ...patch.frameInspection },
-    captions: { ...current.captions, ...patch.captions },
-    transitions: { ...current.transitions, ...normalizedTransitionPatch },
-    textOverlays: { ...current.textOverlays, ...patch.textOverlays },
-  };
 }
 
 function filterTaggedMarkerIds(taggedMarkerIds: string[], markers: MarkerEntry[]): string[] {
@@ -1845,7 +1805,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
-    const aiSettings = mergeAISettings(DEFAULT_AI_EDITING_SETTINGS, editState.aiSettings as Partial<AIEditingSettings> | undefined);
+    const aiSettings = resolveAIEditingSettings(editState.aiSettings as Partial<AIEditingSettings> | undefined);
     const normalizedTransitions = normalizeTransitionState(
       hydratedClips,
       (editState.transitions as Array<Partial<TransitionEntry>> | undefined) ?? [],
