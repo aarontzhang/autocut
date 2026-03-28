@@ -48,7 +48,11 @@ import {
 import { MAIN_SOURCE_ID, normalizeSourceId } from './sourceUtils';
 import { buildClipSchedule, getTimelineDuration, normalizeTransitionEntries } from './playbackEngine';
 import type { SourceRuntimeMediaMap } from './sourceMedia';
-import { buildProjectSources } from './projectSources';
+import {
+  buildProjectSourceAliasMap,
+  buildProjectSources,
+  canonicalizeProjectSourceId,
+} from './projectSources';
 import { normalizeTextOverlayEntry } from './textOverlays';
 
 export type { EditSnapshot } from './editActionUtils';
@@ -138,10 +142,11 @@ function getPrimarySource(sources: ProjectSource[]): ProjectSource | null {
 function normalizeLoadedClip(
   clip: Partial<VideoClip> & { sourcePath?: unknown },
   fallbackSourceId: string,
+  sourceIdAliases: Map<string, string>,
 ): VideoClip | null {
   if (typeof clip.id !== 'string') return null;
   if (!Number.isFinite(clip.sourceStart) || !Number.isFinite(clip.sourceDuration)) return null;
-  const sourceId = normalizeSourceId(clip.sourceId) ?? fallbackSourceId;
+  const sourceId = canonicalizeProjectSourceId(clip.sourceId, sourceIdAliases, fallbackSourceId) ?? fallbackSourceId;
 
   return {
     id: clip.id,
@@ -159,11 +164,12 @@ function normalizeLoadedClip(
 function normalizeCaptionEntry(
   entry: Partial<CaptionEntry>,
   validSourceIds: Set<string>,
+  sourceIdAliases: Map<string, string>,
 ): CaptionEntry | null {
   if (!Number.isFinite(entry.startTime) || !Number.isFinite(entry.endTime) || typeof entry.text !== 'string') {
     return null;
   }
-  const normalizedSourceId = normalizeSourceId(entry.sourceId);
+  const normalizedSourceId = canonicalizeProjectSourceId(entry.sourceId, sourceIdAliases);
   const words = Array.isArray(entry.words)
     ? entry.words.flatMap((word) => {
         if (
@@ -234,9 +240,10 @@ function normalizeOverviewFrame(
   entry: Partial<SourceIndexedFrame>,
   validSourceIds: Set<string>,
   fallbackSourceId: string,
+  sourceIdAliases: Map<string, string>,
 ): SourceIndexedFrame | null {
   if (!Number.isFinite(entry.sourceTime)) return null;
-  const sourceId = normalizeSourceId(entry.sourceId);
+  const sourceId = canonicalizeProjectSourceId(entry.sourceId, sourceIdAliases, fallbackSourceId);
   return {
     sourceId: sourceId && validSourceIds.has(sourceId) ? sourceId : fallbackSourceId,
     sourceTime: entry.sourceTime!,
@@ -1702,16 +1709,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const persistedDuration = typeof editState.videoDuration === 'number' && editState.videoDuration > 0 ? editState.videoDuration : 0;
     const effectiveDuration = (typeof duration === 'number' && duration > 0) ? duration : persistedDuration;
     const rawClips = Array.isArray(editState.clips) ? editState.clips : [];
+    const persistedSources = Array.isArray(editState.sources) ? editState.sources : project.sources;
+    const hydratedSourceBase = buildHydratedSources({
+      persistedSources,
+      projectStoragePath: storagePath,
+      projectVideoFilename: videoFilename ?? null,
+      projectDuration: effectiveDuration,
+    });
+    const baseSourceIdAliases = buildProjectSourceAliasMap(hydratedSourceBase);
     const referencedSourceIds = rawClips
-      .map((clip) => normalizeSourceId((clip as Partial<VideoClip>).sourceId))
+      .map((clip) => canonicalizeProjectSourceId((clip as Partial<VideoClip>).sourceId, baseSourceIdAliases))
       .filter((sourceId): sourceId is string => !!sourceId);
     const hydratedSources = buildHydratedSources({
-      persistedSources: Array.isArray(editState.sources) ? editState.sources : project.sources,
+      persistedSources,
       projectStoragePath: storagePath,
       projectVideoFilename: videoFilename ?? null,
       projectDuration: effectiveDuration,
       referencedSourceIds,
     });
+    const sourceIdAliases = buildProjectSourceAliasMap(hydratedSources);
     const validSourceIds = new Set(hydratedSources.map((source) => source.id));
     const fallbackSourceId = getPrimarySource(hydratedSources)?.id ?? MAIN_SOURCE_ID;
     const nextRuntimeById: SourceRuntimeMediaMap = {};
@@ -1750,6 +1766,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       .map((clip) => normalizeLoadedClip(
         clip as Partial<VideoClip> & { sourcePath?: unknown },
         fallbackSourceId,
+        sourceIdAliases,
       ))
       .filter((clip): clip is VideoClip => !!clip));
     const hydratedClips = clips.length > 0
@@ -1765,6 +1782,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ?.map((entry) => normalizeCaptionEntry(
         entry as Partial<CaptionEntry>,
         validSourceIds,
+        sourceIdAliases,
       ))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
 
@@ -1787,13 +1805,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         entry as Partial<SourceIndexedFrame>,
         validSourceIds,
         fallbackSourceId,
+        sourceIdAliases,
       ))
       .filter((entry): entry is SourceIndexedFrame => !!entry) ?? null;
 
     const persistedFreshness = buildInitialSourceIndexState(hydratedSources);
     if (editState.sourceIndexFreshBySourceId && typeof editState.sourceIndexFreshBySourceId === 'object') {
+      const canonicalFreshnessBySourceId = Object.entries(
+        editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>,
+      ).reduce<Record<string, Partial<SourceIndexState>>>((acc, [sourceId, entry]) => {
+        const canonicalSourceId = canonicalizeProjectSourceId(sourceId, sourceIdAliases);
+        if (!canonicalSourceId) return acc;
+        acc[canonicalSourceId] = {
+          ...(acc[canonicalSourceId] ?? {}),
+          ...entry,
+        };
+        return acc;
+      }, {});
       for (const source of hydratedSources) {
-        const rawEntry = (editState.sourceIndexFreshBySourceId as Record<string, Partial<SourceIndexState>>)[source.id];
+        const rawEntry = canonicalFreshnessBySourceId[source.id];
         if (!rawEntry) continue;
         persistedFreshness[source.id] = {
           overview: rawEntry.overview === true,
@@ -1839,7 +1869,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }),
       clips: hydratedClips,
       captions: ((editState.captions as Partial<CaptionEntry>[] | undefined) ?? [])
-        .map((entry) => normalizeCaptionEntry(entry, validSourceIds))
+        .map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))
         .filter((entry): entry is CaptionEntry => !!entry),
       transitions: normalizedTransitions,
       markers: (editState.markers as MarkerEntry[] | undefined) ?? [],
@@ -1855,7 +1885,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         requestChainId: typeof entry.requestChainId === 'string' ? entry.requestChainId : undefined,
         sourceRanges: entry.sourceRanges?.map((range) => ({
           ...range,
-          sourceId: normalizeSourceId(range.sourceId) ?? MAIN_SOURCE_ID,
+          sourceId: canonicalizeProjectSourceId(range.sourceId, sourceIdAliases, MAIN_SOURCE_ID) ?? MAIN_SOURCE_ID,
         })),
       })),
       aiSettings,

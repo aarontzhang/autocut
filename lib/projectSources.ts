@@ -26,6 +26,30 @@ export function createMissingProjectSource(sourceId: string): ProjectSource {
   };
 }
 
+export function buildProjectSourceAliasMap(sources: ProjectSource[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const source of sources) {
+    aliases.set(source.id, source.id);
+    const assetId = normalizeSourceId(source.assetId);
+    if (assetId && !aliases.has(assetId)) {
+      aliases.set(assetId, source.id);
+    }
+  }
+  return aliases;
+}
+
+export function canonicalizeProjectSourceId(
+  value: unknown,
+  aliases: Map<string, string>,
+  fallbackSourceId?: string | null,
+): string | null {
+  const normalized = normalizeSourceId(value);
+  if (!normalized) {
+    return fallbackSourceId ?? null;
+  }
+  return aliases.get(normalized) ?? normalized;
+}
+
 export function normalizeProjectSource(
   value: Partial<ProjectSource> | null | undefined,
   fallback: {
