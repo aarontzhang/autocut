@@ -546,6 +546,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const currentLeadLayer = leadLayerRef.current;
     if (layerClipIdRef.current[currentLeadLayer] === entry.clipId) return false;
     const spareLayer = getOtherLayer(currentLeadLayer);
+    const currentLeadVideo = getVideoElement(currentLeadLayer);
     const spareVideo = getVideoElement(spareLayer);
     if (
       !spareVideo
@@ -558,9 +559,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     if (Math.abs(spareVideo.currentTime - targetSourceTime) > DRIFT_EPSILON) {
       spareVideo.currentTime = Math.max(0, targetSourceTime);
     }
+    pauseVideo(currentLeadVideo);
     setLeadLayerSafely(spareLayer);
     return true;
-  }, [getVideoElement, setLeadLayerSafely]);
+  }, [getVideoElement, pauseVideo, setLeadLayerSafely]);
 
   const syncLayers = useCallback((timelineTime: number, options?: { allowPlay?: boolean }) => {
     const activeEntries = findRenderEntriesAtTime(renderTimeline, timelineTime);
@@ -577,7 +579,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const currentLeadLayer = leadLayerRef.current;
     const currentLeadVideo = getVideoElement(currentLeadLayer);
     const leadHasReadyFrame = Boolean(currentLeadVideo && currentLeadVideo.readyState >= 2 && !currentLeadVideo.error && hasDisplayedFrame);
-    const leadMatchesPrimary = layerSourceIdRef.current[currentLeadLayer] === primaryEntry.sourceId;
+    const leadMatchesPrimary = (
+      layerSourceIdRef.current[currentLeadLayer] === primaryEntry.sourceId
+      && layerClipIdRef.current[currentLeadLayer] === primaryEntry.clipId
+    );
     if (!leadMatchesPrimary) {
       const targetLayer = leadHasReadyFrame ? getOtherLayer(currentLeadLayer) : currentLeadLayer;
       const preparedPrimaryLayer = prepareLayerForEntry(targetLayer, primaryEntry, primarySourceTime);
@@ -586,8 +591,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
         return;
       }
       if (leadHasReadyFrame && targetLayer !== currentLeadLayer) {
-        pauseVideo(currentLeadVideo);
         if (preparedPrimaryLayer.status === 'ready') {
+          pauseVideo(currentLeadVideo);
           setLeadLayerSafely(targetLayer);
         }
       }
@@ -772,7 +777,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
           activateMissingSourceState(nextEntry.sourceId);
           return;
         }
-        pauseVideo(primaryVideo);
         prepareLayerForEntry(spareLayerId, nextEntry, nextSourceTime);
       }
 
