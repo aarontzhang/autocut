@@ -1887,12 +1887,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
 
-  updateCaption: (id, patch) => set((state) => ({
-    captions: state.captions.map((caption) => (
-      caption.id === id ? { ...caption, ...patch } : caption
-    )),
-    ...clearReviewStatePatch(),
-  })),
+  updateCaption: (id, patch) => set((state) => {
+    if (state.previewSnapshot) {
+      return {
+        previewSnapshot: {
+          ...state.previewSnapshot,
+          captions: state.previewSnapshot.captions.map((caption) => (
+            caption.id === id ? { ...caption, ...patch } : caption
+          )),
+        },
+      };
+    }
+    return {
+      captions: state.captions.map((caption) => (
+        caption.id === id ? { ...caption, ...patch } : caption
+      )),
+      ...clearReviewStatePatch(),
+    };
+  }),
 
   updateTextOverlay: (id, patch) => set((state) => ({
     textOverlays: state.textOverlays.map((overlay) => (
