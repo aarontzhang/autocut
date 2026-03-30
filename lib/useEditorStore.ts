@@ -2044,9 +2044,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const sourceIdAliases = buildProjectSourceAliasMap(state.sources);
     const analysis = normalizeSourceIndexAnalysisState(payload.analysis);
     const analysisBySourceId = normalizeSourceIndexAnalysisStateMap(payload.analysisBySourceId);
-    const audioStates = Object.values(analysisBySourceId).map((entry) => entry.audio).filter((entry): entry is NonNullable<typeof entry> => !!entry);
-    const isAnalysisActive = analysis?.status === 'queued' || analysis?.status === 'running'
-      || audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
     const normalizedIncomingTranscriptCaptions = payload.sourceTranscriptCaptions
       ?.map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))
       .filter((entry): entry is CaptionEntry => !!entry) ?? null;
@@ -2055,8 +2052,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const preservedTranscriptSources = new Set<string>();
     for (const sourceId of sourceIds) {
       if (
-        isAnalysisActive
-        && !hasEntriesForSource(normalizedIncomingTranscriptCaptions, sourceId)
+        !hasEntriesForSource(normalizedIncomingTranscriptCaptions, sourceId)
         && hasEntriesForSource(state.sourceTranscriptCaptions, sourceId)
       ) {
         preservedTranscriptSources.add(sourceId);
