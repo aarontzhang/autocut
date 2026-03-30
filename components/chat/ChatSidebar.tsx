@@ -335,20 +335,6 @@ function getIndexingStageTitle(progress: IndexingProgress | null, fallback?: str
       return 'Preparing media…';
     case 'transcribing_audio':
       return 'Transcribing audio…';
-    case 'detecting_scenes':
-      return 'Detecting scenes…';
-    case 'choosing_representative_frames':
-      return 'Analyzing sampled frames…';
-    case 'describing_representative_frames':
-      return 'Analyzing sampled frames…';
-    case 'dense_refinement':
-      return 'Dense local refinement…';
-    case 'extracting_frames':
-      return 'Sampling video frames…';
-    case 'describing_frames':
-      return 'Analyzing sampled frames…';
-    case 'transcribing':
-      return 'Transcribing audio…';
     default:
       return 'Preparing media…';
   }
@@ -366,19 +352,11 @@ function buildCompletedProgress(stage: IndexingProgress['stage']): IndexingProgr
 
 function isServerAudioReady(
   analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
-  freshness: { transcript?: boolean; overview?: boolean } | null | undefined,
+  freshness: { transcript?: boolean } | null | undefined,
 ) {
   return freshness?.transcript === true
     || analysis?.audio?.status === 'completed'
     || analysis?.audio?.status === 'unavailable';
-}
-
-function isServerVisualReady(
-  analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
-  freshness: { transcript?: boolean; overview?: boolean } | null | undefined,
-) {
-  return freshness?.overview === true
-    || analysis?.visual?.status === 'completed';
 }
 
 function estimateTranscriptSeconds(duration: number): number {
@@ -640,13 +618,8 @@ function buildServerAnalysisStatusCards(params: {
     assetId: string | null;
   }>;
   analysisBySourceId: SourceIndexAnalysisStateMap;
-  freshnessBySourceId: Record<string, { transcript?: boolean; overview?: boolean } | null | undefined>;
+  freshnessBySourceId: Record<string, { transcript?: boolean } | null | undefined>;
 }): AnalysisStatusCard[] {
-  const isVisualPreparationStage = (stage: IndexingProgress['stage']) => (
-    stage === 'preparing_media'
-    || stage === 'detecting_scenes'
-  );
-
   const estimateTaskEtaSeconds = (
     kind: 'audio' | 'visual',
     duration: number,
@@ -665,9 +638,8 @@ function buildServerAnalysisStatusCards(params: {
   };
 
   const buildFallbackTask = (
-    kind: 'audio' | 'visual',
     source: { status: string },
-    freshness: { transcript?: boolean; overview?: boolean } | null,
+    freshness: { transcript?: boolean } | null,
   ): SourceIndexTaskState => {
     if (source.status === 'missing') {
       return {
@@ -687,7 +659,7 @@ function buildServerAnalysisStatusCards(params: {
         reason: 'Upload failed.',
       };
     }
-    const isReady = kind === 'audio' ? freshness?.transcript === true : freshness?.overview === true;
+    const isReady = freshness?.transcript === true;
     return {
       status: isReady ? 'completed' : 'queued',
       completed: isReady ? 1 : 0,
@@ -698,12 +670,11 @@ function buildServerAnalysisStatusCards(params: {
   };
 
   const getDisplayTask = (
-    kind: 'audio' | 'visual',
     source: { status: string },
     task: SourceIndexTaskState | null | undefined,
-    freshness: { transcript?: boolean; overview?: boolean } | null,
+    freshness: { transcript?: boolean } | null,
   ): SourceIndexTaskState => {
-    const isReady = kind === 'audio' ? freshness?.transcript === true : freshness?.overview === true;
+    const isReady = freshness?.transcript === true;
     if (isReady) {
       const total = Math.max(task?.total ?? 1, 1);
       return {
@@ -714,7 +685,7 @@ function buildServerAnalysisStatusCards(params: {
         reason: null,
       };
     }
-    return task ?? buildFallbackTask(kind, source, freshness);
+    return task ?? buildFallbackTask(source, freshness);
   };
 
   const trackedSources = params.sources.filter((source) => (
@@ -726,47 +697,38 @@ function buildServerAnalysisStatusCards(params: {
   if (trackedSources.length === 0) return [];
 
   const getTaskProgressStage = (
-    kind: 'audio' | 'visual',
     analysis: SourceIndexAnalysisStateMap[string] | null | undefined,
   ): IndexingProgress['stage'] => {
     const stage = analysis?.progress?.stage;
-    if (kind === 'audio') {
-      return stage === 'transcribing_audio' || stage === 'transcribing'
-        ? stage
-        : 'transcribing_audio';
-    }
-    return stage === 'preparing_media'
-      || stage === 'detecting_scenes'
-      || stage === 'choosing_representative_frames'
-      || stage === 'describing_representative_frames'
+    return stage === 'transcribing_audio' || stage === 'transcribing'
       ? stage
-      : 'describing_representative_frames';
+      : 'transcribing_audio';
   };
 
-  const buildAggregateCard = (kind: 'audio' | 'visual'): AnalysisStatusCard => {
+  const buildAggregateCard = (): AnalysisStatusCard => {
     const taskEntries = trackedSources.map((source) => {
       const analysis = params.analysisBySourceId[source.sourceId] ?? null;
       const freshness = params.freshnessBySourceId[source.sourceId] ?? null;
-      const task = getDisplayTask(kind, source, kind === 'audio' ? analysis?.audio : analysis?.visual, freshness);
+      const task = getDisplayTask(source, analysis?.audio, freshness);
       const progress = analysis?.progress?.stage === 'transcribing_audio' || analysis?.progress?.stage === 'transcribing'
         ? analysis.progress
         : null;
-      const fallbackEtaSeconds = estimateTaskEtaSeconds(kind, source.duration, task, progress);
+      const fallbackEtaSeconds = estimateTaskEtaSeconds('audio', source.duration, task, progress);
       return {
         analysis,
         fallbackEtaSeconds,
         progress,
         task,
-        stage: getTaskProgressStage(kind, analysis),
+        stage: getTaskProgressStage(analysis),
       };
     });
     const tasks = taskEntries.map((entry) => entry.task);
     const total = tasks.length;
     const completed = tasks.filter((task) => (
-      task.status === 'completed' || (kind === 'audio' && task.status === 'unavailable')
+      task.status === 'completed' || task.status === 'unavailable'
     )).length;
-    const title = kind === 'audio' ? 'Video analysis' : 'Visual analysis';
-    const completedStage = kind === 'audio' ? 'transcribing' : 'describing_frames';
+    const title = 'Video analysis';
+    const completedStage = 'transcribing';
     const firstReason = tasks.find((task) => task.reason)?.reason ?? null;
     const hasObservedProgress = taskEntries.some((entry) => {
       const fraction = entry.progress
@@ -785,7 +747,7 @@ function buildServerAnalysisStatusCards(params: {
 
     if (completed >= total) {
       return {
-        key: `${kind}-analysis`,
+        key: 'audio-analysis',
         title,
         progress: buildCompletedProgress(completedStage),
         tone: 'completed',
@@ -793,7 +755,7 @@ function buildServerAnalysisStatusCards(params: {
     }
 
     const progressFraction = taskEntries.reduce((sum, entry) => {
-      if (entry.task.status === 'completed' || (kind === 'audio' && entry.task.status === 'unavailable')) {
+      if (entry.task.status === 'completed' || entry.task.status === 'unavailable') {
         return sum + 1;
       }
       if (entry.progress) {
@@ -814,7 +776,7 @@ function buildServerAnalysisStatusCards(params: {
       ?? taskEntries[0];
     const activeStage = activeEntry?.progress?.stage
       ?? activeEntry?.stage
-      ?? (kind === 'audio' ? 'transcribing_audio' : 'describing_representative_frames');
+      ?? 'transcribing_audio';
     const averageEtaSeconds = aggregateStatus === 'failed'
       ? null
       : Math.max(...taskEntries.map((entry) => Math.max(
@@ -837,7 +799,7 @@ function buildServerAnalysisStatusCards(params: {
       : null;
 
     return {
-      key: `${kind}-analysis`,
+      key: 'audio-analysis',
       title,
       progress: {
           stage: activeStage,
@@ -868,7 +830,7 @@ function buildServerAnalysisStatusCards(params: {
   };
 
   return [
-    buildAggregateCard('audio'),
+    buildAggregateCard(),
   ];
 }
 
@@ -1346,9 +1308,6 @@ function ActionDetails({ action }: { action: EditAction }) {
     const details = [
       settings?.silenceRemoval?.paddingSeconds !== undefined ? `silence padding ${settings.silenceRemoval.paddingSeconds}s` : '',
       settings?.silenceRemoval?.minDurationSeconds !== undefined ? `min silence ${settings.silenceRemoval.minDurationSeconds}s` : '',
-      settings?.frameInspection?.defaultFrameCount !== undefined ? `inspect ${settings.frameInspection.defaultFrameCount} frames` : '',
-      settings?.frameInspection?.overviewIntervalSeconds !== undefined ? `long-video coarse spacing ~${settings.frameInspection.overviewIntervalSeconds}s` : '',
-      settings?.frameInspection?.maxOverviewFrames !== undefined ? `max ${settings.frameInspection.maxOverviewFrames} coarse frames` : '',
       settings?.captions?.wordsPerCaption !== undefined ? `${settings.captions.wordsPerCaption} words per caption` : '',
       settings?.transitions?.defaultDuration !== undefined ? `${settings.transitions.defaultDuration}s transitions` : '',
       settings?.textOverlays?.defaultFontSize !== undefined ? `${settings.textOverlays.defaultFontSize}px text` : '',

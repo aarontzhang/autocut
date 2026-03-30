@@ -46,7 +46,7 @@ export default function MediaPanel({
         ...source,
         previewUrl: runtime?.objectUrl || runtime?.playerUrl || runtime?.processingUrl || '',
         isPlayable,
-        isIndexReady: freshness?.transcript === true && freshness?.overview === true,
+        isIndexReady: freshness?.transcript === true,
         hasActiveAnalysis: analysis?.status === 'queued' || analysis?.status === 'running',
       };
     })

@@ -2,15 +2,13 @@ import 'dotenv/config';
 
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
-import jpeg from 'jpeg-js';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -36,23 +34,12 @@ const HOST_PARALLELISM = typeof os.availableParallelism === 'function'
   ? os.availableParallelism()
   : Math.max(os.cpus().length, 1);
 const DEFAULT_WORKER_CONCURRENCY = Math.min(8, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
-const DEFAULT_INDEX_CONCURRENCY = Math.min(6, Math.max(2, Math.floor(HOST_PARALLELISM / 2)));
-const DEFAULT_DESCRIPTION_CONCURRENCY = 1;
 
 const WORKER_ID = process.env.ANALYSIS_WORKER_ID?.trim() || `analysis-worker:${process.pid}`;
 const POLL_INTERVAL_MS = normalizeInteger(process.env.ANALYSIS_WORKER_POLL_MS, 3000, 500, 60_000);
 const WORKER_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_WORKER_CONCURRENCY, DEFAULT_WORKER_CONCURRENCY, 1, 8);
-const INDEX_SELECTION_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_INDEX_SEGMENT_CONCURRENCY, DEFAULT_INDEX_CONCURRENCY, 1, 8);
-const DESCRIPTION_BATCH_CONCURRENCY = normalizeInteger(process.env.ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY, DEFAULT_DESCRIPTION_CONCURRENCY, 1, 4);
-const FRAME_DESCRIPTION_TIMEOUT_MS = 45_000;
-const FRAME_DESCRIPTION_MAX_RETRIES = 2;
-const FRAME_DESCRIPTION_UNAVAILABLE = 'Visual summary unavailable.';
-const FRAME_DESCRIPTION_IMAGE_DETAIL = 'low';
 const TRANSCRIPT_CHUNK_SECONDS = 45;
 const TRANSCRIPT_OVERLAP_SECONDS = 0.75;
-const FRAME_BATCH_SIZE = 8;
-const DEFAULT_LONG_INTERVAL_SECONDS = 5;
-const DEFAULT_MAX_COARSE_FRAMES = 720;
 const STALE_RUNNING_JOB_MS = normalizeInteger(process.env.ANALYSIS_JOB_STALE_MS, 10 * 60_000, 60_000, 24 * 60 * 60_000);
 
 function normalizeInteger(value, fallback, min, max) {
@@ -118,59 +105,6 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
 
-function getAdaptiveCoarseFrameBudget(duration, preferredLongIntervalSeconds, maxCoarseFrames) {
-  if (duration <= 0 || maxCoarseFrames <= 0) return 0;
-  const shortVideoInterval = Math.max(0.9, Math.min(preferredLongIntervalSeconds * 0.45, 2.25));
-  const longVideoInterval = Math.max(shortVideoInterval, preferredLongIntervalSeconds * 2.4);
-  const normalizedDuration = clamp01((duration - 90) / (30 * 60 - 90));
-  const durationTaper = Math.pow(normalizedDuration, 0.72);
-  const averageSpacing = shortVideoInterval + (longVideoInterval - shortVideoInterval) * durationTaper;
-  const softCap = duration >= 20 * 60
-    ? 180
-    : duration >= 10 * 60
-      ? 240
-      : maxCoarseFrames;
-  return Math.max(1, Math.min(maxCoarseFrames, softCap, Math.floor(duration / averageSpacing) + 1));
-}
-
-function buildCoarseRepresentativeWindows(duration, preferredLongIntervalSeconds, maxCoarseFrames) {
-  const budget = getAdaptiveCoarseFrameBudget(duration, preferredLongIntervalSeconds, maxCoarseFrames);
-  if (budget <= 0) return [];
-  const windowDuration = duration / budget;
-  return Array.from({ length: budget }, (_, index) => {
-    const startTime = index * windowDuration;
-    const endTime = index === budget - 1 ? duration : Math.min(duration, (index + 1) * windowDuration);
-    return {
-      index,
-      startTime,
-      endTime,
-      duration: Math.max(0, endTime - startTime),
-    };
-  }).filter((window) => window.duration > 0);
-}
-
-function buildRepresentativeCandidateTimes(window, sceneChangeTimes = []) {
-  const edgeInset = Math.min(0.35, Math.max(0.08, window.duration * 0.18));
-  const baseCandidates = window.duration <= 2.5
-    ? [window.startTime + window.duration / 2]
-    : [
-        window.startTime + edgeInset,
-        window.startTime + window.duration / 2,
-        window.endTime - edgeInset,
-      ];
-  const sceneCandidates = sceneChangeTimes
-    .filter((time) => time >= window.startTime && time < window.endTime)
-    .map((time) => Math.min(window.endTime - 0.05, Math.max(window.startTime + 0.05, time + 0.18)));
-  const deduped = [];
-  for (const candidate of [...baseCandidates, ...sceneCandidates]) {
-    const clamped = Math.max(window.startTime + 0.01, Math.min(candidate, window.endTime - 0.01));
-    if (!Number.isFinite(clamped)) continue;
-    if (deduped.some((existing) => Math.abs(existing - clamped) < 0.12)) continue;
-    deduped.push(clamped);
-  }
-  return deduped.sort((a, b) => a - b);
-}
-
 function buildOverlappingRanges(startTime, endTime, chunkDuration = TRANSCRIPT_CHUNK_SECONDS, overlapSeconds = TRANSCRIPT_OVERLAP_SECONDS) {
   const ranges = [];
   const safeStart = Math.max(0, startTime);
@@ -185,62 +119,9 @@ function buildOverlappingRanges(startTime, endTime, chunkDuration = TRANSCRIPT_C
   return ranges;
 }
 
-function parseFrameDescriptions(text) {
-  const normalized = String(text ?? '').trim();
-  const candidates = [
-    normalized,
-    normalized.replace(/^```json\s*/i, '').replace(/\s*```$/, ''),
-    normalized.replace(/^```\s*/i, '').replace(/\s*```$/, ''),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate);
-      const frames = Array.isArray(parsed) ? parsed : parsed.frames;
-      if (!Array.isArray(frames)) continue;
-      return frames
-        .filter((entry) => typeof entry?.index === 'number' && typeof entry?.description === 'string')
-        .map((entry) => ({
-          index: entry.index,
-          description: entry.description.trim(),
-        }));
-    } catch {}
-  }
-  return null;
-}
-
-function parseScdetTimestamps(stderr) {
-  const times = [];
-  const regex = /scdet:([\d.]+)/g;
-  let match;
-  while ((match = regex.exec(stderr)) !== null) {
-    const t = parseFloat(match[1]);
-    if (Number.isFinite(t)) times.push(t);
-  }
-  return times.sort((a, b) => a - b);
-}
-
-function timestampsToSceneBoundaries(timestamps, sourceDuration, minSceneDurationSeconds = 1) {
-  const starts = [0, ...timestamps].filter((time, index, arr) => {
-    if (index === 0) return true;
-    return time - arr[index - 1] >= minSceneDurationSeconds;
-  });
-  return starts.map((start, index) => ({
-    id: `scene_${index}_${Math.round(start * 1000)}_${Math.round((starts[index + 1] ?? sourceDuration) * 1000)}`,
-    sourceStart: start,
-    sourceEnd: starts[index + 1] ?? sourceDuration,
-  }));
-}
 
 function buildTranscriptRangeKey(range) {
   return `${range.startTime.toFixed(3)}-${range.endTime.toFixed(3)}`;
-}
-
-function buildWindowSelectionKey(window) {
-  return `coarse_window_rep:${window.startTime.toFixed(3)}:${window.endTime.toFixed(3)}`;
-}
-
-function buildSceneSelectionKey(scene) {
-  return `scene_rep:${scene.id}`;
 }
 
 function getJobResultValue(result, key) {
@@ -327,92 +208,6 @@ async function checkpointPause(jobId) {
   }
 }
 
-function nearestDistanceToSceneBoundary(sourceTime, sceneChangeTimes) {
-  if (sceneChangeTimes.length === 0) return Infinity;
-  let nearest = Infinity;
-  for (const sceneTime of sceneChangeTimes) {
-    nearest = Math.min(nearest, Math.abs(sceneTime - sourceTime));
-  }
-  return nearest;
-}
-
-function findSceneForTime(sourceTime, scenes) {
-  return scenes.find((scene) => sourceTime >= scene.sourceStart && sourceTime < scene.sourceEnd) ?? null;
-}
-
-function scoreFrameMetrics(metrics, sceneBoundaryDistanceSeconds) {
-  const exposureScore = 1 - Math.min(1, Math.abs(metrics.brightness - 0.52) / 0.52);
-  const washedOutPenalty = metrics.contrast < 0.16 ? (0.16 - metrics.contrast) / 0.16 : 0;
-  const transitionPenalty = sceneBoundaryDistanceSeconds < 0.18
-    ? 1 - sceneBoundaryDistanceSeconds / 0.18
-    : 0;
-  const score = (
-    metrics.sharpness * 0.36 +
-    metrics.edgeDensity * 0.22 +
-    metrics.textUiScore * 0.16 +
-    exposureScore * 0.18 +
-    metrics.contrast * 0.08 -
-    metrics.darknessScore * 0.18 -
-    washedOutPenalty * 0.12 -
-    transitionPenalty * 0.45
-  );
-  return Number(score.toFixed(4));
-}
-
-function analyzeJpegMetrics(jpegBuffer) {
-  const decoded = jpeg.decode(jpegBuffer, { useTArray: true });
-  const { width, height, data } = decoded;
-  const pixelCount = Math.max(1, width * height);
-  const gray = new Float32Array(pixelCount);
-  let brightnessSum = 0;
-  let brightnessSqSum = 0;
-
-  for (let index = 0; index < pixelCount; index += 1) {
-    const offset = index * 4;
-    const r = data[offset];
-    const g = data[offset + 1];
-    const b = data[offset + 2];
-    const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-    gray[index] = luma;
-    brightnessSum += luma;
-    brightnessSqSum += luma * luma;
-  }
-
-  const brightness = brightnessSum / pixelCount;
-  const variance = Math.max(0, brightnessSqSum / pixelCount - brightness * brightness);
-  const contrast = Math.min(1, Math.sqrt(variance) / 0.5);
-
-  let edgeSum = 0;
-  let strongEdges = 0;
-  let horizontalLineEvidence = 0;
-
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = y * width + x;
-      const gx = Math.abs(gray[index + 1] - gray[index - 1]);
-      const gy = Math.abs(gray[index + width] - gray[index - width]);
-      const laplacian = Math.abs((4 * gray[index]) - gray[index - 1] - gray[index + 1] - gray[index - width] - gray[index + width]);
-      const magnitude = gx + gy;
-      edgeSum += laplacian;
-      if (magnitude > 0.18) strongEdges += 1;
-      if (gx > 0.12 && gy < 0.08) horizontalLineEvidence += 1;
-    }
-  }
-
-  const edgeDensity = Math.min(1, strongEdges / pixelCount * 8);
-  const sharpness = Math.min(1, edgeSum / pixelCount * 3.5);
-  const darknessScore = brightness < 0.16 ? (0.16 - brightness) / 0.16 : 0;
-  const textUiScore = Math.min(1, horizontalLineEvidence / pixelCount * 18 + edgeDensity * 0.35);
-
-  return {
-    brightness: Number(brightness.toFixed(4)),
-    contrast: Number(contrast.toFixed(4)),
-    edgeDensity: Number(edgeDensity.toFixed(4)),
-    sharpness: Number(sharpness.toFixed(4)),
-    darknessScore: Number(darknessScore.toFixed(4)),
-    textUiScore: Number(textUiScore.toFixed(4)),
-  };
-}
 
 async function updateJob(jobId, patch) {
   const { error } = await supabase
@@ -643,415 +438,6 @@ async function transcribeAudioChunk(audioPath, rangeStartTime) {
     .filter(Boolean);
 }
 
-async function detectScenes(inputPath, sourceDuration) {
-  const stderrChunks = [];
-  await new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', [
-      '-i', inputPath,
-      '-vf', 'scdet=threshold=0.3:sc_pass=0',
-      '-an',
-      '-f', 'null',
-      '-',
-    ]);
-    child.stderr.on('data', (chunk) => {
-      stderrChunks.push(String(chunk));
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0 || code === 1) resolve();
-      else reject(new Error(`ffmpeg scene detect exited with code ${code}`));
-    });
-  });
-  const timestamps = parseScdetTimestamps(stderrChunks.join(''));
-  return timestampsToSceneBoundaries(timestamps, sourceDuration, 1);
-}
-
-async function extractFrameBuffer(inputPath, sourceTime, outputPath) {
-  await execFileAsync('ffmpeg', [
-    '-y',
-    '-ss', sourceTime.toFixed(3),
-    '-i', inputPath,
-    '-frames:v', '1',
-    '-vf', 'scale=320:-2',
-    '-q:v', '4',
-    outputPath,
-  ]);
-  return fs.readFile(outputPath);
-}
-
-async function evaluateCandidateFrame(inputPath, sourceTime, sceneChangeTimes, scratchDir) {
-  const outputPath = path.join(
-    scratchDir,
-    `frame-${sourceTime.toFixed(3).replace(/\./g, '_')}-${randomUUID().slice(0, 8)}.jpg`,
-  );
-  const jpegBuffer = await extractFrameBuffer(inputPath, sourceTime, outputPath);
-  const metrics = analyzeJpegMetrics(jpegBuffer);
-  const score = scoreFrameMetrics(metrics, nearestDistanceToSceneBoundary(sourceTime, sceneChangeTimes));
-  await fs.rm(outputPath, { force: true });
-  return {
-    sourceTime,
-    imageBase64: jpegBuffer.toString('base64'),
-    score,
-    metrics,
-  };
-}
-
-async function describeRepresentativeFrameBatch(batch) {
-  const input = [{
-    role: 'user',
-    content: [
-      {
-        type: 'input_text',
-        text:
-          'Describe each representative video frame in one short sentence for retrieval. ' +
-          'Focus on visible subjects, actions, text on screen, and the dominant visual event. ' +
-          'Return strict JSON as {"frames":[{"index":0,"description":"..."}]}.',
-      },
-      ...batch.flatMap((frame, index) => ([
-        {
-          type: 'input_text',
-          text: `Frame ${index}: source ${frame.sourceTime.toFixed(2)}s.`,
-        },
-        {
-          type: 'input_image',
-          image_url: `data:image/jpeg;base64,${frame.imageBase64}`,
-          detail: FRAME_DESCRIPTION_IMAGE_DETAIL,
-        },
-      ])),
-    ],
-  }];
-
-  let lastError = null;
-  for (let attempt = 0; attempt < FRAME_DESCRIPTION_MAX_RETRIES; attempt += 1) {
-    try {
-      const response = await openai.responses.create({
-        model: process.env.OPENAI_FRAME_DESCRIPTION_MODEL?.trim() || 'gpt-4o-mini',
-        input,
-        max_output_tokens: 1600,
-      }, {
-        maxRetries: 1,
-        timeout: FRAME_DESCRIPTION_TIMEOUT_MS,
-      });
-      const parsed = parseFrameDescriptions(response.output_text ?? '');
-      if (!parsed || parsed.length === 0) {
-        throw new Error('Could not parse representative-frame descriptions.');
-      }
-      return parsed;
-    } catch (error) {
-      lastError = error;
-      if (attempt + 1 >= FRAME_DESCRIPTION_MAX_RETRIES) break;
-      await sleep(getRetryAfterDelayMs(error, attempt));
-    }
-  }
-
-  throw lastError ?? new Error('Could not describe representative frames.');
-}
-
-async function describeRepresentativeFramesWithFallback(batch) {
-  try {
-    return await describeRepresentativeFrameBatch(batch);
-  } catch (error) {
-    if (batch.length === 1) {
-      console.warn('[analysis-worker] representative-frame description failed for a single frame', {
-        sourceTime: batch[0]?.sourceTime ?? null,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [{ index: 0, description: FRAME_DESCRIPTION_UNAVAILABLE }];
-    }
-
-    console.warn('[analysis-worker] representative-frame batch failed; retrying frames individually', {
-      batchSize: batch.length,
-      error: error instanceof Error ? error.message : String(error),
-    });
-
-    return runWithConcurrency(
-      batch.map((frame, index) => ({ frame, index })),
-      Math.min(DESCRIPTION_BATCH_CONCURRENCY, batch.length),
-      async ({ frame, index }) => {
-        const single = await describeRepresentativeFramesWithFallback([frame]);
-        return {
-          index,
-          description: single[0]?.description?.trim() || FRAME_DESCRIPTION_UNAVAILABLE,
-        };
-      },
-    );
-  }
-}
-
-async function chooseBestCandidateForWindow(inputPath, candidateTimes, sceneChangeTimes, scratchDir) {
-  let best = null;
-  for (const candidateTime of candidateTimes) {
-    const evaluated = await evaluateCandidateFrame(inputPath, candidateTime, sceneChangeTimes, scratchDir);
-    if (!best || evaluated.score > best.score) {
-      best = evaluated;
-    }
-  }
-  return best;
-}
-
-async function persistRepresentativeSelection(assetId, selection, existingRowsByKey) {
-  const existing = existingRowsByKey.get(selection.selectionKey);
-  if (existing) {
-    return {
-      ...selection,
-      rowId: existing.id,
-      metadata: existing.metadata ?? {},
-      imageBase64: selection.imageBase64 ?? null,
-    };
-  }
-
-  const { data, error } = await supabase
-    .from('asset_visual_index')
-    .insert({
-      asset_id: assetId,
-      source_time: selection.sourceTime,
-      window_duration: Math.max(selection.windowDuration, 0.25),
-      sample_kind: selection.sampleKind,
-      thumbnail_path: null,
-      brightness: selection.metrics.brightness,
-      contrast: selection.metrics.contrast,
-      edge_density: selection.metrics.edgeDensity,
-      darkness_score: selection.metrics.darknessScore,
-      metadata: {
-        score: selection.score,
-        sceneId: selection.sceneId,
-        windowStart: selection.windowStart,
-        windowEnd: selection.windowEnd,
-        sampleKind: selection.sampleKind,
-      },
-    })
-    .select('id, metadata')
-    .single();
-  if (error) throw error;
-
-  existingRowsByKey.set(selection.selectionKey, {
-    id: data.id,
-    metadata: data.metadata ?? {},
-    sourceTime: selection.sourceTime,
-    sampleKind: selection.sampleKind,
-    sceneId: selection.sceneId,
-    score: selection.score,
-    selectionKey: selection.selectionKey,
-  });
-  return {
-    ...selection,
-    rowId: data.id,
-    metadata: data.metadata ?? {},
-  };
-}
-
-async function chooseRepresentativeFrames(inputPath, assetId, duration, scenes, scratchDir, jobId, existingRowsByKey) {
-  const sceneChangeTimes = scenes.slice(1).map((scene) => scene.sourceStart);
-  const windows = buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES);
-  const totalWork = windows.length + scenes.length;
-  let completed = existingRowsByKey.size;
-  const tasks = [
-    ...windows.map((window, index) => ({
-      kind: 'window',
-      index,
-      window,
-      selectionKey: buildWindowSelectionKey(window),
-    })),
-    ...scenes.map((scene, sceneIndex) => ({
-      kind: 'scene',
-      index: sceneIndex,
-      scene,
-      selectionKey: buildSceneSelectionKey(scene),
-      window: {
-        index: sceneIndex,
-        startTime: scene.sourceStart,
-        endTime: scene.sourceEnd,
-        duration: Math.max(0, scene.sourceEnd - scene.sourceStart),
-      },
-    })),
-  ].filter((task) => !existingRowsByKey.has(task.selectionKey));
-
-  await updateProgress(
-    jobId,
-    'choosing_representative_frames',
-    completed,
-    Math.max(1, totalWork),
-    `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
-    { plannedUnitSeconds: 1.8 },
-  );
-
-  const resolved = await runWithConcurrency(tasks, INDEX_SELECTION_CONCURRENCY, async (task) => {
-    await checkpointPause(jobId);
-    const candidates = task.kind === 'window'
-      ? buildRepresentativeCandidateTimes(task.window, sceneChangeTimes)
-      : buildRepresentativeCandidateTimes(task.window, [task.scene.sourceStart]);
-    const best = await chooseBestCandidateForWindow(inputPath, candidates, sceneChangeTimes, scratchDir);
-
-    completed += 1;
-    await updateProgress(
-      jobId,
-      'choosing_representative_frames',
-      completed,
-      Math.max(1, totalWork),
-      `Choosing representative frames ${completed}/${Math.max(1, totalWork)}`,
-      { plannedUnitSeconds: 1.8 },
-    );
-    await checkpointPause(jobId);
-
-    if (!best) return null;
-    if (task.kind === 'window') {
-      const scene = findSceneForTime(best.sourceTime, scenes);
-      const selection = await persistRepresentativeSelection(assetId, {
-        sampleKind: 'coarse_window_rep',
-        sourceTime: best.sourceTime,
-        windowStart: task.window.startTime,
-        windowEnd: task.window.endTime,
-        windowDuration: task.window.duration,
-        sceneId: scene?.id ?? null,
-        imageBase64: best.imageBase64,
-        score: best.score,
-        metrics: best.metrics,
-        selectionKey: task.selectionKey,
-      }, existingRowsByKey);
-      return {
-        kind: 'window',
-        index: task.index,
-        selection,
-      };
-    }
-
-    const selection = await persistRepresentativeSelection(assetId, {
-      sampleKind: 'scene_rep',
-      sourceTime: best.sourceTime,
-      windowStart: task.scene.sourceStart,
-      windowEnd: task.scene.sourceEnd,
-      windowDuration: Math.max(0, task.scene.sourceEnd - task.scene.sourceStart),
-      sceneId: task.scene.id,
-      imageBase64: best.imageBase64,
-      score: best.score,
-      metrics: best.metrics,
-      sceneIndex: task.index,
-      selectionKey: task.selectionKey,
-    }, existingRowsByKey);
-    return {
-      kind: 'scene',
-      index: task.index,
-      selection,
-    };
-  });
-
-  const windowSelections = new Array(windows.length).fill(null);
-  const sceneSelections = new Array(scenes.length).fill(null);
-  for (const entry of resolved) {
-    if (!entry) continue;
-    if (entry.kind === 'window') windowSelections[entry.index] = entry.selection;
-    if (entry.kind === 'scene') sceneSelections[entry.index] = entry.selection;
-  }
-
-  return {
-    windowSelections: windowSelections.filter(Boolean),
-    sceneSelections: sceneSelections.filter(Boolean),
-    plannedWindowCount: windows.length,
-    plannedSceneCount: scenes.length,
-  };
-}
-
-async function insertScenes(assetId, scenes, sceneSelections, existingSceneIndexes = new Set()) {
-  for (const [sceneIndex, scene] of scenes.entries()) {
-    if (existingSceneIndexes.has(sceneIndex)) continue;
-    const rep = sceneSelections.find((candidate) => candidate.sceneId === scene.id);
-    const { error } = await supabase
-      .from('asset_scenes')
-      .insert({
-        asset_id: assetId,
-        scene_index: sceneIndex,
-        source_start: scene.sourceStart,
-        source_end: scene.sourceEnd,
-        representative_thumbnail_path: null,
-        metadata: {
-          sceneId: scene.id,
-          representativeSourceTime: rep?.sourceTime ?? null,
-          score: rep?.score ?? null,
-        },
-      });
-    if (error) throw error;
-  }
-}
-
-async function writeRepresentativeDescriptions(inputPath, scratchDir, selections, jobId, initialCompleted = 0) {
-  let completed = initialCompleted;
-  const pendingSelections = selections.filter((selection) => {
-    const description = typeof selection.metadata?.description === 'string'
-      ? selection.metadata.description.trim()
-      : '';
-    return description.length === 0;
-  });
-  const total = Math.max(1, completed + pendingSelections.length);
-  await updateProgress(
-    jobId,
-    'describing_representative_frames',
-    completed,
-    total,
-    `Describing representative frames ${completed}/${total}`,
-    { plannedUnitSeconds: 2.6 },
-  );
-
-  const batches = [];
-  for (let start = 0; start < pendingSelections.length; start += FRAME_BATCH_SIZE) {
-    batches.push(pendingSelections.slice(start, start + FRAME_BATCH_SIZE));
-  }
-
-  await runWithConcurrency(batches, DESCRIPTION_BATCH_CONCURRENCY, async (batch) => {
-    await checkpointPause(jobId);
-    const hydratedBatch = await Promise.all(batch.map(async (selection) => {
-      if (selection.imageBase64) return selection;
-      const outputPath = path.join(
-        scratchDir,
-        `describe-${selection.rowId}-${randomUUID().slice(0, 8)}.jpg`,
-      );
-      const jpegBuffer = await extractFrameBuffer(inputPath, selection.sourceTime, outputPath);
-      await fs.rm(outputPath, { force: true });
-      return {
-        ...selection,
-        imageBase64: jpegBuffer.toString('base64'),
-      };
-    }));
-
-    const descriptions = await describeRepresentativeFramesWithFallback(hydratedBatch);
-    for (const item of descriptions) {
-      const target = hydratedBatch[item.index];
-      if (!target) continue;
-      const nextMetadata = {
-        ...(target.metadata ?? {}),
-        description: item.description.trim() || FRAME_DESCRIPTION_UNAVAILABLE,
-        score: target.score,
-        sceneId: target.sceneId,
-        sampleKind: target.sampleKind,
-      };
-      const { error } = await supabase
-        .from('asset_visual_index')
-        .update({ metadata: nextMetadata })
-        .eq('id', target.rowId);
-      if (error) throw error;
-
-      completed += 1;
-      await updateJobResult(jobId, (currentResult) => {
-        const visual = getJobResultValue(currentResult, 'visual');
-        return {
-          ...currentResult,
-          visual: {
-            ...visual,
-            describedCount: completed,
-          },
-        };
-      });
-      await updateProgress(
-        jobId,
-        'describing_representative_frames',
-        completed,
-        total,
-        `Describing representative frames ${completed}/${total}`,
-        { plannedUnitSeconds: 2.6 },
-      );
-    }
-    await checkpointPause(jobId);
-  });
-}
 
 async function processIndexAssetJob(job) {
   const asset = await getAssetForJob(job);
@@ -1063,7 +449,7 @@ async function processIndexAssetJob(job) {
       locked_by: null,
       pause_requested: false,
       progress: {
-        stage: 'describing_representative_frames',
+        stage: 'transcribing_audio',
         completed: 1,
         total: 1,
         label: 'Completed',
@@ -1073,7 +459,6 @@ async function processIndexAssetJob(job) {
     return;
   }
   const { tempDir, inputPath } = await downloadAssetToTemp(asset.storage_path);
-  const scratchDir = await fs.mkdtemp(path.join(tempDir, 'frames-'));
 
   try {
     await setAssetStatus(asset.id, { status: 'indexing' });
@@ -1094,16 +479,12 @@ async function processIndexAssetJob(job) {
     const completedTranscriptKeys = new Set(transcriptCheckpoint.completedChunkKeys);
     await updateJobResult(job.id, (currentResult) => {
       const transcript = getJobResultValue(currentResult, 'transcript');
-      const visual = getJobResultValue(currentResult, 'visual');
       return {
         ...currentResult,
         transcript: {
           ...transcript,
           totalChunks: transcriptRanges.length,
           completedChunkKeys: Array.from(completedTranscriptKeys),
-        },
-        visual: {
-          ...visual,
         },
       };
     });
@@ -1190,106 +571,7 @@ async function processIndexAssetJob(job) {
       throw markCancelled(error);
     });
 
-    const visualTask = (async () => {
-      throwIfCancelled();
-      await updateProgress(job.id, 'detecting_scenes', 0, 1, 'Detecting scenes', { plannedUnitSeconds: 8 });
-      const scenes = await detectScenes(inputPath, duration);
-      await updateProgress(job.id, 'detecting_scenes', 1, 1, 'Detecting scenes', { etaSeconds: 0, plannedUnitSeconds: 8 });
-      throwIfCancelled();
-
-      const [{ data: existingVisualRows, error: existingVisualError }, { data: existingSceneRows, error: existingSceneError }] = await Promise.all([
-        supabase
-          .from('asset_visual_index')
-          .select('id, source_time, sample_kind, metadata')
-          .eq('asset_id', asset.id)
-          .in('sample_kind', ['coarse_window_rep', 'scene_rep']),
-        supabase
-          .from('asset_scenes')
-          .select('scene_index')
-          .eq('asset_id', asset.id),
-      ]);
-      if (existingVisualError) throw existingVisualError;
-      if (existingSceneError) throw existingSceneError;
-
-      const existingRowsByKey = new Map();
-      let describedCount = 0;
-      for (const row of existingVisualRows ?? []) {
-        const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-        const key = row.sample_kind === 'scene_rep' && typeof metadata.sceneId === 'string'
-          ? `scene_rep:${metadata.sceneId}`
-          : `coarse_window_rep:${Number(metadata.windowStart ?? row.source_time).toFixed(3)}:${Number(metadata.windowEnd ?? row.source_time).toFixed(3)}`;
-        existingRowsByKey.set(key, {
-          id: row.id,
-          metadata,
-          sourceTime: row.source_time,
-          sampleKind: row.sample_kind,
-          sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
-          score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
-          selectionKey: key,
-        });
-        if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
-          describedCount += 1;
-        }
-      }
-
-      await updateJobResult(job.id, (currentResult) => {
-        const visual = getJobResultValue(currentResult, 'visual');
-        return {
-          ...currentResult,
-          visual: {
-            ...visual,
-            plannedWindowCount: buildCoarseRepresentativeWindows(duration, DEFAULT_LONG_INTERVAL_SECONDS, DEFAULT_MAX_COARSE_FRAMES).length,
-            plannedSceneCount: scenes.length,
-            describedCount,
-          },
-        };
-      });
-
-      const { sceneSelections, plannedWindowCount, plannedSceneCount } = await chooseRepresentativeFrames(
-        inputPath,
-        asset.id,
-        duration,
-        scenes,
-        scratchDir,
-        job.id,
-        existingRowsByKey,
-      );
-      throwIfCancelled();
-      await insertScenes(
-        asset.id,
-        scenes,
-        sceneSelections,
-        new Set((existingSceneRows ?? []).map((row) => Number(row.scene_index))),
-      );
-
-      const allSelections = Array.from(existingRowsByKey.values()).map((row) => ({
-        rowId: row.id,
-        metadata: row.metadata ?? {},
-        sourceTime: row.sourceTime,
-        sampleKind: row.sampleKind,
-        sceneId: row.sceneId,
-        score: row.score,
-        selectionKey: row.selectionKey,
-        imageBase64: null,
-      }));
-      await writeRepresentativeDescriptions(inputPath, scratchDir, allSelections, job.id, describedCount);
-
-      return {
-        scenes,
-        plannedWindowCount,
-        plannedSceneCount,
-        describedCount: plannedWindowCount + plannedSceneCount,
-      };
-    })().catch((error) => {
-      throw markCancelled(error);
-    });
-
-    const [transcriptOutcome, visualOutcome] = await Promise.allSettled([transcriptTask, visualTask]);
-    if (transcriptOutcome.status === 'rejected') throw transcriptOutcome.reason;
-    if (visualOutcome.status === 'rejected') throw visualOutcome.reason;
-
-    const transcriptResult = transcriptOutcome.value;
-    const visualResult = visualOutcome.value;
+    const transcriptResult = await transcriptTask;
 
     await setAssetStatus(asset.id, {
       status: 'ready',
@@ -1310,17 +592,11 @@ async function processIndexAssetJob(job) {
           totalChunks: transcriptResult.totalChunks,
           completedChunkKeys: transcriptResult.completedChunkKeys,
         },
-        visual: {
-          plannedWindowCount: visualResult.plannedWindowCount,
-          plannedSceneCount: visualResult.plannedSceneCount,
-          describedCount: visualResult.describedCount,
-        },
-        sceneCount: visualResult.scenes.length,
       },
       progress: {
-        stage: 'describing_representative_frames',
-        completed: visualResult.describedCount,
-        total: Math.max(1, visualResult.describedCount),
+        stage: 'transcribing_audio',
+        completed: transcriptResult.totalChunks,
+        total: Math.max(1, transcriptResult.totalChunks),
         label: 'Completed',
         etaSeconds: 0,
       },
@@ -1391,8 +667,6 @@ async function run() {
   console.log('[analysis-worker] started', {
     workerId: WORKER_ID,
     workerConcurrency: WORKER_CONCURRENCY,
-    indexSelectionConcurrency: INDEX_SELECTION_CONCURRENCY,
-    descriptionBatchConcurrency: DESCRIPTION_BATCH_CONCURRENCY,
     pollIntervalMs: POLL_INTERVAL_MS,
   });
   await Promise.all(Array.from({ length: WORKER_CONCURRENCY }, (_, index) => runWorkerSlot(index)));

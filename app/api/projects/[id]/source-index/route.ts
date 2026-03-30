@@ -109,14 +109,6 @@ function getTranscriptCheckpoint(result: Record<string, unknown> | null) {
   };
 }
 
-function getVisualCheckpoint(result: Record<string, unknown> | null) {
-  const visual = asRecord(result?.visual);
-  return {
-    plannedWindowCount: Math.max(0, toFiniteNumber(visual?.plannedWindowCount, 0)),
-    plannedSceneCount: Math.max(0, toFiniteNumber(visual?.plannedSceneCount, 0)),
-  };
-}
-
 function buildTaskState(input: {
   status: SourceIndexTaskState['status'];
   completed: number;
@@ -212,151 +204,43 @@ function buildAudioTaskState(input: {
   });
 }
 
-function buildVisualTaskState(input: {
-  job: AnalysisJobRow | null;
-  visualRowCount: number;
-  describedVisualRowCount: number;
-  sceneCount: number;
-}): SourceIndexTaskState {
-  const checkpoint = getVisualCheckpoint(input.job?.result ?? null);
-  const totalSelections = Math.max(
-    1,
-    checkpoint.plannedWindowCount + Math.max(checkpoint.plannedSceneCount, input.sceneCount),
-    input.visualRowCount,
-  );
-  const totalWorkUnits = Math.max(1, totalSelections * 2);
-  const activeProgress = input.job?.progress?.stage === 'choosing_representative_frames'
-    || input.job?.progress?.stage === 'describing_representative_frames'
-    ? input.job.progress
-    : null;
-  const completedSelections = activeProgress?.stage === 'choosing_representative_frames'
-    ? Math.min(totalSelections, Math.max(0, activeProgress.completed))
-    : Math.min(totalSelections, Math.max(input.visualRowCount, input.describedVisualRowCount));
-  const completedDescriptions = activeProgress?.stage === 'describing_representative_frames'
-    ? Math.min(totalSelections, Math.max(0, activeProgress.completed))
-    : Math.min(totalSelections, Math.max(0, input.describedVisualRowCount));
-  const overallCompleted = Math.min(totalWorkUnits, completedSelections + completedDescriptions);
-
-  if (!input.job) {
-    return buildTaskState({
-      status: input.describedVisualRowCount >= totalSelections ? 'completed' : 'queued',
-      completed: input.describedVisualRowCount >= totalSelections ? totalWorkUnits : overallCompleted,
-      total: totalWorkUnits,
-    });
-  }
-
-  if (input.job.status === 'failed' && input.describedVisualRowCount < totalSelections) {
-    return buildTaskState({
-      status: 'failed',
-      completed: overallCompleted,
-      total: totalWorkUnits,
-      reason: input.job.error,
-    });
-  }
-
-  if (input.describedVisualRowCount >= totalSelections && totalSelections > 0) {
-    return buildTaskState({
-      status: 'completed',
-      completed: totalWorkUnits,
-      total: totalWorkUnits,
-    });
-  }
-
-  if (input.job.status === 'paused') {
-    return buildTaskState({
-      status: 'paused',
-      completed: overallCompleted,
-      total: totalWorkUnits,
-    });
-  }
-
-  if (input.job.status === 'queued') {
-    return buildTaskState({
-      status: 'queued',
-      completed: overallCompleted,
-      total: totalWorkUnits,
-    });
-  }
-
-  if (input.job.status === 'running') {
-    return buildTaskState({
-      status: 'running',
-      completed: overallCompleted,
-      total: totalWorkUnits,
-      etaSeconds: activeProgress?.etaSeconds ?? null,
-      reason: input.job.pause_requested ? 'Pausing after the current visual batch.' : null,
-    });
-  }
-
-  if (input.job.status === 'completed') {
-    return buildTaskState({
-      status: 'completed',
-      completed: totalWorkUnits,
-      total: totalWorkUnits,
-    });
-  }
-
-  return buildTaskState({
-    status: 'queued',
-    completed: overallCompleted,
-    total: totalWorkUnits,
-  });
-}
-
-function resolveOverallStatus(audio: SourceIndexTaskState, visual: SourceIndexTaskState): AnalysisJobStatus {
-  const statuses = [audio.status, visual.status];
-  if (statuses.includes('running')) return 'running';
-  if (statuses.includes('queued')) return 'queued';
-  if (statuses.includes('paused')) return 'paused';
-  if (statuses.includes('failed')) return 'failed';
+function resolveOverallStatus(audio: SourceIndexTaskState): AnalysisJobStatus {
+  if (audio.status === 'running') return 'running';
+  if (audio.status === 'queued') return 'queued';
+  if (audio.status === 'paused') return 'paused';
+  if (audio.status === 'failed') return 'failed';
   return 'completed';
 }
 
-function buildAggregateProgress(audio: SourceIndexTaskState, visual: SourceIndexTaskState): AnalysisProgress {
-  const toFraction = (task: SourceIndexTaskState) => {
-    if (task.status === 'completed' || task.status === 'unavailable') return 1;
-    return getProgressFraction({
-      stage: 'queued',
-      completed: task.completed,
-      total: task.total,
-    });
-  };
-  const combinedFraction = (toFraction(audio) + toFraction(visual)) / 2;
+function buildAggregateProgress(audio: SourceIndexTaskState): AnalysisProgress {
+  const fraction = audio.status === 'completed' || audio.status === 'unavailable'
+    ? 1
+    : getProgressFraction({ stage: 'queued', completed: audio.completed, total: audio.total });
   return {
-    stage: audio.status === 'running' ? 'transcribing_audio' : 'describing_representative_frames',
-    completed: Math.round(combinedFraction * 1000),
+    stage: 'transcribing_audio',
+    completed: Math.round(fraction * 1000),
     total: 1000,
-    label: `${audio.status === 'completed' || audio.status === 'unavailable' ? 1 : 0}/${visual.status === 'completed' ? 1 : 0}`,
-    etaSeconds: Math.max(audio.etaSeconds ?? 0, visual.etaSeconds ?? 0) || null,
+    label: null,
+    etaSeconds: audio.etaSeconds ?? null,
   };
 }
 
 function buildSourceAnalysisState(input: {
   job: AnalysisJobRow | null;
   transcriptRowCount: number;
-  visualRowCount: number;
-  describedVisualRowCount: number;
-  sceneCount: number;
 }): SourceIndexAnalysisState {
   const audio = buildAudioTaskState({
     job: input.job,
     transcriptRowCount: input.transcriptRowCount,
   });
-  const visual = buildVisualTaskState({
-    job: input.job,
-    visualRowCount: input.visualRowCount,
-    describedVisualRowCount: input.describedVisualRowCount,
-    sceneCount: input.sceneCount,
-  });
 
   return {
     jobId: input.job?.id ?? null,
-    status: resolveOverallStatus(audio, visual),
+    status: resolveOverallStatus(audio),
     error: input.job?.error ?? null,
     pauseRequested: input.job?.pause_requested ?? false,
-    progress: input.job?.progress ?? buildAggregateProgress(audio, visual),
+    progress: input.job?.progress ?? buildAggregateProgress(audio),
     audio,
-    visual,
   };
 }
 
@@ -376,10 +260,7 @@ function buildAggregateAnalysis(states: SourceIndexAnalysisState[]): SourceIndex
     const audio = state.audio ? (state.audio.status === 'completed' || state.audio.status === 'unavailable'
       ? 1
       : state.audio.completed / Math.max(state.audio.total, 1)) : 0;
-    const visual = state.visual ? (state.visual.status === 'completed'
-      ? 1
-      : state.visual.completed / Math.max(state.visual.total, 1)) : 0;
-    return sum + ((audio + visual) / 2);
+    return sum + audio;
   }, 0) / Math.max(states.length, 1);
 
   return {
@@ -388,17 +269,15 @@ function buildAggregateAnalysis(states: SourceIndexAnalysisState[]): SourceIndex
     error: states.find((state) => state.status === 'failed')?.error ?? null,
     pauseRequested: states.some((state) => state.pauseRequested),
     progress: {
-      stage: status === 'running' ? 'transcribing_audio' : 'describing_representative_frames',
+      stage: 'transcribing_audio',
       completed: Math.round(clampFraction(fraction) * 1000),
       total: 1000,
       label: `${states.filter((state) => (
-        state.visual?.status === 'completed'
-        && (state.audio?.status === 'completed' || state.audio?.status === 'unavailable')
+        state.audio?.status === 'completed' || state.audio?.status === 'unavailable'
       )).length}/${states.length} clips ready`,
-      etaSeconds: Math.max(...states.map((state) => Math.max(state.audio?.etaSeconds ?? 0, state.visual?.etaSeconds ?? 0)), 0) || null,
+      etaSeconds: Math.max(...states.map((state) => state.audio?.etaSeconds ?? 0), 0) || null,
     },
     audio: null,
-    visual: null,
   };
 }
 
@@ -439,7 +318,6 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
   if (!project || sources.length === 0) {
     return {
       sourceTranscriptCaptions: [],
-      sourceOverviewFrames: [],
       sourceIndexFreshBySourceId: {},
       analysis: null,
       analysisBySourceId: {},
@@ -495,7 +373,6 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
     }
 
     sourceIndexFreshBySourceId[source.id] = {
-      overview: false,
       transcript: false,
       version: 'source-index-v2',
       assetId: asset?.id ?? source.assetId ?? null,
@@ -514,7 +391,6 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
   if (assetIds.length === 0) {
     return {
       sourceTranscriptCaptions: [],
-      sourceOverviewFrames: [],
       sourceIndexFreshBySourceId,
       analysis: null,
       analysisBySourceId,
@@ -522,32 +398,15 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
     };
   }
 
-  const [{ data: transcriptRows, error: transcriptError }, { data: visualRows, error: visualError }, { data: sceneRows, error: sceneError }] = await Promise.all([
-    supabase
-      .from('asset_transcript_words')
-      .select('asset_id, start_time, end_time, text')
-      .in('asset_id', assetIds)
-      .order('start_time', { ascending: true }),
-    supabase
-      .from('asset_visual_index')
-      .select('asset_id, source_time, sample_kind, metadata')
-      .in('asset_id', assetIds)
-      .in('sample_kind', ['coarse_window_rep', 'scene_rep'])
-      .order('source_time', { ascending: true }),
-    supabase
-      .from('asset_scenes')
-      .select('asset_id, scene_index')
-      .in('asset_id', assetIds),
-  ]);
+  const { data: transcriptRows, error: transcriptError } = await supabase
+    .from('asset_transcript_words')
+    .select('asset_id, start_time, end_time, text')
+    .in('asset_id', assetIds)
+    .order('start_time', { ascending: true });
 
   if (transcriptError) throw transcriptError;
-  if (visualError) throw visualError;
-  if (sceneError) throw sceneError;
 
   const transcriptCountByAssetId = new Map<string, number>();
-  const visualCountByAssetId = new Map<string, number>();
-  const describedVisualCountByAssetId = new Map<string, number>();
-  const sceneCountByAssetId = new Map<string, number>();
 
   const sourceTranscriptCaptions: CaptionEntry[] = ((transcriptRows ?? []) as Array<{
     asset_id: string;
@@ -570,42 +429,6 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
     }];
   });
 
-  const sourceOverviewFrames = ((visualRows ?? []) as Array<{
-    asset_id: string;
-    source_time: number;
-    sample_kind: string;
-    metadata?: Record<string, unknown> | null;
-  }>).flatMap((row) => {
-    const sourceId = assetIdToSourceId.get(row.asset_id);
-    if (!sourceId) return [];
-    visualCountByAssetId.set(row.asset_id, (visualCountByAssetId.get(row.asset_id) ?? 0) + 1);
-    const metadata = asRecord(row.metadata) ?? {};
-    if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) {
-      describedVisualCountByAssetId.set(row.asset_id, (describedVisualCountByAssetId.get(row.asset_id) ?? 0) + 1);
-    }
-    const freshness = sourceIndexFreshBySourceId[sourceId];
-    sourceIndexFreshBySourceId[sourceId] = {
-      ...freshness,
-      overview: true,
-    };
-    return [{
-      sourceId,
-      sourceTime: Number(row.source_time ?? 0),
-      description: typeof metadata.description === 'string' ? metadata.description : undefined,
-      assetId: row.asset_id,
-      indexedAt: freshness?.indexedAt ?? null,
-      sampleKind: row.sample_kind === 'scene_rep' || row.sample_kind === 'coarse_window_rep'
-        ? row.sample_kind
-        : 'coarse_window_rep',
-      score: Number.isFinite(metadata.score) ? Number(metadata.score) : null,
-      sceneId: typeof metadata.sceneId === 'string' ? metadata.sceneId : null,
-    }];
-  });
-
-  for (const row of (sceneRows ?? []) as Array<{ asset_id: string; scene_index: number }>) {
-    sceneCountByAssetId.set(row.asset_id, (sceneCountByAssetId.get(row.asset_id) ?? 0) + 1);
-  }
-
   for (const source of normalizedSources) {
     const assetId = source.assetId;
     if (!assetId) {
@@ -619,7 +442,6 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
         pauseRequested: false,
         progress: null,
         audio: buildTaskState({ status: 'queued', completed: 0, total: 1 }),
-        visual: buildTaskState({ status: 'queued', completed: 0, total: 1 }),
       };
       continue;
     }
@@ -627,15 +449,11 @@ async function buildSourceIndexResponse(projectId: string, userId: string) {
     analysisBySourceId[source.id] = buildSourceAnalysisState({
       job: jobByAssetId.get(assetId) ?? null,
       transcriptRowCount: transcriptCountByAssetId.get(assetId) ?? 0,
-      visualRowCount: visualCountByAssetId.get(assetId) ?? 0,
-      describedVisualRowCount: describedVisualCountByAssetId.get(assetId) ?? 0,
-      sceneCount: sceneCountByAssetId.get(assetId) ?? 0,
     });
   }
 
   return {
     sourceTranscriptCaptions,
-    sourceOverviewFrames,
     sourceIndexFreshBySourceId,
     analysis: buildAggregateAnalysis(Object.values(analysisBySourceId)),
     analysisBySourceId,

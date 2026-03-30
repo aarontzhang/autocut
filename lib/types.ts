@@ -182,57 +182,17 @@ export interface AssetTranscriptWord {
   confidence?: number | null;
 }
 
-export type SourceIndexedFrameSampleKind =
-  | 'coarse_window_rep'
-  | 'scene_rep'
-  | 'window_250ms';
-
-export interface SourceIndexedFrame {
-  sourceId: string;
-  sourceTime: number;
-  description?: string;
-  image?: string;
-  assetId?: string | null;
-  indexedAt?: string | null;
-  sampleKind?: SourceIndexedFrameSampleKind;
-  score?: number | null;
-  sceneId?: string | null;
-}
-
 export interface SourceIndexState {
-  overview: boolean;
   transcript: boolean;
   version: string;
   assetId?: string | null;
   indexedAt?: string | null;
 }
 
-export interface IndexedVideoFrame {
-  image?: string;
-  timelineTime: number;
-  sourceTime: number;
-  sourceId?: string;
-  kind: 'overview' | 'dense';
-  rangeStart?: number;
-  rangeEnd?: number;
-  description?: string;
-  projectedTimelineTime?: number | null;
-  visibleOnTimeline?: boolean;
-  sampleKind?: SourceIndexedFrameSampleKind;
-  score?: number | null;
-  sceneId?: string | null;
-}
-
 export type AnalysisJobStage =
   | 'queued'
   | 'preparing_media'
   | 'transcribing_audio'
-  | 'detecting_scenes'
-  | 'choosing_representative_frames'
-  | 'describing_representative_frames'
-  | 'dense_refinement'
-  | 'extracting_frames'
-  | 'describing_frames'
   | 'transcribing';
 
 export interface AnalysisProgress {
@@ -269,7 +229,6 @@ export interface SourceIndexAnalysisState {
   pauseRequested?: boolean | null;
   progress: AnalysisProgress | null;
   audio?: SourceIndexTaskState | null;
-  visual?: SourceIndexTaskState | null;
 }
 
 export type SourceIndexAnalysisStateMap = Record<string, SourceIndexAnalysisState>;
@@ -341,11 +300,6 @@ export interface AIEditingSettings {
     minDurationSeconds: number;
     preserveShortPauses: boolean;
     requireSpeakerAbsence: boolean;
-  };
-  frameInspection: {
-    defaultFrameCount: number;
-    overviewIntervalSeconds: number;
-    maxOverviewFrames: number;
   };
   captions: {
     wordsPerCaption: number;
@@ -441,16 +395,8 @@ export interface SourceSegment {
   sourceStart: number;
   sourceEnd: number;
   words: SourceWord[];
-  sceneId: string | null;
   fillerWords: string[];   // filler words found in this segment
   pauseAfterMs: number;    // gap in ms to the next segment (0 if last)
-}
-
-/** A scene boundary detected via visual change analysis */
-export interface SceneBoundary {
-  id: string;
-  sourceStart: number;
-  sourceEnd: number;
 }
 
 /** The complete source index for one video clip — stored alongside the project */
@@ -459,6 +405,5 @@ export interface SourceIndex {
   sourceId: string;
   sourceDuration: number;
   segments: SourceSegment[];
-  scenes: SceneBoundary[];
   indexedAt: string;
 }

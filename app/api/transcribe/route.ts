@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
         end: startTime + typedWord.end,
       };
     }).filter((w) => w.word);
-    const sourceIndex = buildSourceIndex(rawWords, [], MAIN_SOURCE_ID, startTime + (requestedDuration || 0));
+    const sourceIndex = buildSourceIndex(rawWords, MAIN_SOURCE_ID, startTime + (requestedDuration || 0));
 
     return NextResponse.json({ captions, words: wordEntries, segments: sourceIndex.segments });
   } catch (err) {

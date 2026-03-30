@@ -24,7 +24,7 @@ export function getInitialIndexingTrackedSourceIds(
 
 export function isInitialIndexingReadyForSource(input: {
   analysis?: SourceIndexAnalysisState | null;
-  freshness?: Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null;
+  freshness?: Partial<Pick<SourceIndexState, 'transcript'>> | null;
 }): boolean {
   return input.freshness?.transcript === true
     || input.analysis?.audio?.status === 'completed'
@@ -34,7 +34,7 @@ export function isInitialIndexingReadyForSource(input: {
 export function getInitialIndexingReady(
   sources: Array<Pick<ProjectSource, 'id' | 'storagePath' | 'assetId'>>,
   analysisBySourceId: SourceIndexAnalysisStateMap,
-  freshnessBySourceId?: Record<string, Partial<Pick<SourceIndexState, 'transcript' | 'overview'>> | null | undefined>,
+  freshnessBySourceId?: Record<string, Partial<Pick<SourceIndexState, 'transcript'>> | null | undefined>,
 ): boolean {
   const trackedSourceIds = getInitialIndexingTrackedSourceIds(sources, analysisBySourceId);
   if (trackedSourceIds.length === 0) return true;

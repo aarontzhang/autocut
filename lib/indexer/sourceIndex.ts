@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { SceneBoundary, SourceIndex, SourceSegment, SourceWord } from '../types';
+import { SourceIndex, SourceSegment, SourceWord } from '../types';
 
 export const SOURCE_INDEX_VERSION = 'source-index-v2';
 
@@ -50,7 +50,6 @@ export function groupWordsIntoSegments(words: SourceWord[]): SourceSegment[] {
       sourceStart: first.start,
       sourceEnd: last.end,
       words: current,
-      sceneId: null,
       fillerWords,
       pauseAfterMs: 0,
     });
@@ -82,34 +81,20 @@ export function groupWordsIntoSegments(words: SourceWord[]): SourceSegment[] {
   return segments;
 }
 
-/** Assign scene IDs to segments based on which scene boundary they fall within */
-export function assignSceneIds(segments: SourceSegment[], scenes: SceneBoundary[]): SourceSegment[] {
-  if (scenes.length === 0) return segments;
-  return segments.map((seg) => {
-    const scene = scenes.find(
-      (s) => seg.sourceStart >= s.sourceStart && seg.sourceStart < s.sourceEnd,
-    );
-    return { ...seg, sceneId: scene?.id ?? null };
-  });
-}
-
-/** Build the full source index from word-level Whisper output and scene boundaries */
+/** Build the full source index from word-level Whisper output */
 export function buildSourceIndex(
   rawWords: RawWord[],
-  scenes: SceneBoundary[],
   sourceId: string,
   sourceDuration: number,
 ): SourceIndex {
   const annotated = annotateFillers(rawWords);
-  const rawSegments = groupWordsIntoSegments(annotated);
-  const segments = assignSceneIds(rawSegments, scenes);
+  const segments = groupWordsIntoSegments(annotated);
 
   return {
     version: SOURCE_INDEX_VERSION,
     sourceId,
     sourceDuration,
     segments,
-    scenes,
     indexedAt: new Date().toISOString(),
   };
 }
