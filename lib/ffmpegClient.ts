@@ -434,6 +434,8 @@ type ExportTextOverlay = {
   text: string;
   position: TextOverlayEntry['position'];
   fontSize: number;
+  positionX?: number;
+  positionY?: number;
 };
 
 function buildExportCaptionWindows(params: {
@@ -465,6 +467,8 @@ function buildExportTextOverlays(textOverlays: TextOverlayEntry[]): ExportTextOv
       text: overlay.text,
       position: overlay.position,
       fontSize: getTextOverlayFontSize(overlay),
+      positionX: overlay.positionX,
+      positionY: overlay.positionY,
     }))
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
 }
@@ -512,10 +516,17 @@ async function writeTextOverlayTextFiles(
     const overlay = textOverlays[overlayIndex];
     const fileName = `text_overlay_${overlayIndex}.txt`;
     await ffmpeg.writeFile(fileName, encoder.encode(overlay.text));
+    const hasCustomPos = overlay.positionX != null && overlay.positionY != null;
+    const xExpr = hasCustomPos
+      ? `w*${(overlay.positionX! / 100).toFixed(4)}-text_w/2`
+      : '(w-text_w)/2';
+    const yExpr = hasCustomPos
+      ? `h*${(overlay.positionY! / 100).toFixed(4)}-text_h/2`
+      : getTextOverlayExportY(overlay.position, frameHeight, overlay.positionY);
     drawTextFilters.push(
-      `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=${getTextOverlayFontSize(overlay)}:` +
-      `line_spacing=8:shadowcolor=black@0.8:shadowx=0:shadowy=3:` +
-      `x=(w-text_w)/2:y=${getTextOverlayExportY(overlay.position, frameHeight)}:` +
+      `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=h*0.036:line_spacing=10:` +
+      `borderw=3:bordercolor=black:shadowcolor=black@0.45:shadowx=0:shadowy=3:` +
+      `x=${xExpr}:y=${yExpr}:` +
       `enable='gte(t,${overlay.startTime.toFixed(3)})*lt(t,${overlay.endTime.toFixed(3)})'`,
     );
   }

@@ -10,7 +10,7 @@ import {
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
 import type { RenderTimelineEntry, VideoClip } from '@/lib/types';
 import { describeSourceResolutionFailure, resolveProjectSources } from '@/lib/sourceMedia';
-import { getTextOverlayFontSize, getTextOverlayPreviewPositionStyle } from '@/lib/textOverlays';
+import { getTextOverlayPreviewPositionStyle } from '@/lib/textOverlays';
 
 export interface VideoPlayerHandle {
   seekTo: (timelineTime: number) => void;
@@ -1417,12 +1417,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                       left: `${overlay.positionX}%`,
                       top: `${overlay.positionY}%`,
                       transform: 'translate(-50%, -50%)',
-                      maxWidth: '90%',
+                      maxWidth: `${videoDisplaySize.width * 0.86}px`,
+                      boxSizing: 'border-box',
                     }
                   : {
                       position: 'absolute',
                       left: '50%',
-                      maxWidth: '90%',
+                      width: videoDisplaySize.width,
+                      padding: `0 ${Math.max(20, videoDisplaySize.width * 0.07)}px`,
+                      boxSizing: 'border-box',
                       ...getTextOverlayPreviewPositionStyle(overlay.position, videoDisplaySize.height, overlay.positionX, overlay.positionY),
                     };
                 return (
@@ -1431,15 +1434,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                     style={{
                       ...textPositionStyle,
                       color: '#fff',
-                      fontSize: getTextOverlayFontSize(overlay),
-                      fontWeight: 700,
-                      lineHeight: 1.3,
+                      fontSize: captionFontSize,
+                      fontWeight: 900,
+                      lineHeight: 1.12,
                       textAlign: 'center',
-                      textShadow: '0 2px 8px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9)',
-                      padding: '4px 12px',
-                      whiteSpace: isTextEditing ? 'pre-wrap' : 'nowrap',
-                      overflow: isTextEditing ? 'visible' : 'hidden',
-                      textOverflow: isTextEditing ? 'unset' : 'ellipsis',
+                      textShadow: '0 2px 8px rgba(0,0,0,0.45)',
+                      WebkitTextStroke: `${captionStrokeWidth}px #000`,
+                      paintOrder: 'stroke fill',
+                      whiteSpace: isTextEditing ? 'pre-wrap' : 'pre-wrap',
+                      overflowWrap: 'break-word',
+                      wordBreak: 'break-word',
                       pointerEvents: 'auto',
                       cursor: isTextEditing ? 'text' : 'grab',
                       outline: isTextSelected ? '2px solid rgba(33,212,255,0.7)' : 'none',

@@ -106,6 +106,7 @@ export default function Timeline({
   const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean } | null>(null);
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
   const cutEdgeDragRef = useRef<CutEdgeDragInfo | null>(null);
+  const imageEdgeDragRef = useRef<{ pointerId: number; overlayId: string; edge: 'start' | 'end'; otherEdgeTime: number } | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
 
@@ -272,7 +273,9 @@ export default function Timeline({
         const rect = el.getBoundingClientRect();
         const cursorXInContent = (e.clientX - rect.left - HEADER_W) + el.scrollLeft;
         const cur = useEditorStore.getState().zoom;
-        const factor = e.deltaY > 0 ? 1 / 1.25 : 1.25;
+        // Proportional zoom: scale smoothly based on delta magnitude
+        const sensitivity = 0.005;
+        const factor = Math.pow(2, -e.deltaY * sensitivity);
         const next = Math.round(cur * factor * 100) / 100;
         useEditorStore.getState().setZoom(next);
 
@@ -386,6 +389,25 @@ export default function Timeline({
       insertClipFromSource(sourceId, timelineTime);
       return;
     }
+    const imageFiles = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length > 0) {
+      const file = imageFiles[0];
+      const url = URL.createObjectURL(file);
+      const store = useEditorStore.getState();
+      const addedSources = store.importSources([{
+        fileName: file.name,
+        duration: 5,
+        isPrimary: false,
+        status: 'ready',
+        runtime: { file, objectUrl: url, playerUrl: url, processingUrl: url },
+      }], { shouldAppendClips: false });
+      if (addedSources.length > 0) {
+        const newSource = addedSources[0];
+        store.updateSource(newSource.id, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+        store.createImageOverlayAtTime(newSource.id, timelineTime);
+      }
+      return;
+    }
     const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith('video/'));
     if (files.length > 0 && onImportSources) {
       void onImportSources(files, 'insert', timelineTime);
@@ -468,6 +490,34 @@ export default function Timeline({
     updateCutEdge(clientX, dragInfo);
   }, [totalTimelineDuration, totalW, updateCutEdge]);
 
+  const updateImageEdge = useCallback((clientX: number, drag: { overlayId: string; edge: 'start' | 'end'; otherEdgeTime: number }) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const newTime = pxToTimelineTime(clientX, el);
+    let clamped: number;
+    if (drag.edge === 'start') {
+      clamped = Math.max(0, Math.min(newTime, drag.otherEdgeTime - MIN_CLIP_DURATION_SECONDS));
+    } else {
+      clamped = Math.max(drag.otherEdgeTime + MIN_CLIP_DURATION_SECONDS, Math.min(newTime, contentDuration));
+    }
+    const patch = drag.edge === 'start' ? { startTime: clamped } : { endTime: clamped };
+    useEditorStore.getState().updateImageOverlay(drag.overlayId, patch);
+  }, [contentDuration, pxToTimelineTime]);
+
+  const beginImageEdgeDrag = useCallback((
+    clientX: number,
+    pointerId: number,
+    overlayId: string,
+    edge: 'start' | 'end',
+    startTime: number,
+    endTime: number,
+  ) => {
+    const drag = { pointerId, overlayId, edge, otherEdgeTime: edge === 'start' ? endTime : startTime };
+    imageEdgeDragRef.current = drag;
+    document.body.style.cursor = 'ew-resize';
+    updateImageEdge(clientX, drag);
+  }, [updateImageEdge]);
+
   const endInteractions = useCallback((pointerId?: number) => {
     const playheadDrag = playheadDragRef.current;
     if (playheadDrag && (pointerId === undefined || playheadDrag.pointerId === pointerId)) {
@@ -484,7 +534,12 @@ export default function Timeline({
       cutEdgeDragRef.current = null;
     }
 
-    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current) {
+    const imgEdgeDrag = imageEdgeDragRef.current;
+    if (imgEdgeDrag && (pointerId === undefined || imgEdgeDrag.pointerId === pointerId)) {
+      imageEdgeDragRef.current = null;
+    }
+
+    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current) {
       document.body.style.cursor = '';
     }
   }, []);
@@ -500,6 +555,12 @@ export default function Timeline({
       const cutEdgeDrag = cutEdgeDragRef.current;
       if (cutEdgeDrag && cutEdgeDrag.pointerId === e.pointerId) {
         updateCutEdge(e.clientX, cutEdgeDrag);
+        return;
+      }
+
+      const imgEdgeDrag = imageEdgeDragRef.current;
+      if (imgEdgeDrag && imgEdgeDrag.pointerId === e.pointerId) {
+        updateImageEdge(e.clientX, imgEdgeDrag);
         return;
       }
 
@@ -526,7 +587,7 @@ export default function Timeline({
       window.removeEventListener('pointercancel', onPointerEnd);
       endInteractions();
     };
-  }, [endInteractions, scrubPlayhead, updateCutEdge]);
+  }, [endInteractions, scrubPlayhead, updateCutEdge, updateImageEdge]);
 
   const px = (time: number) => tPx(time);
   const clipLayoutById = useMemo(
@@ -602,7 +663,7 @@ export default function Timeline({
               {zoom}×
             </span>
             <button
-              onClick={() => setZoom(Math.round(zoom * 1.25 * 10) / 10)}
+              onClick={() => setZoom(Math.round(zoom * 1.25 * 100) / 100)}
               style={zoomButtonStyle}
             >
               +
@@ -1156,46 +1217,100 @@ export default function Timeline({
               {imageOverlays.map((overlay) => {
                 const isSelected = selectedItem?.type === 'image' && selectedItem.id === overlay.id;
                 const source = sources.find((s) => s.id === overlay.sourceId);
+                const IMG_HANDLE_W = 14;
                 return (
-                  <button
+                  <div
                     key={overlay.id}
-                    type="button"
-                    title={source?.fileName ?? 'Image overlay'}
                     style={{
                       position: 'absolute',
                       left: px(overlay.startTime),
                       width: Math.max(4, px(overlay.endTime) - px(overlay.startTime)),
                       top: 3,
                       height: EFFECT_TRACK_H - 6,
-                      borderRadius: 3,
-                      overflow: 'hidden',
-                      border: isSelected ? '1.5px solid rgba(255,255,255,0.7)' : '1px solid rgba(255,255,255,0.12)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '0 5px',
-                      cursor: 'pointer',
-                      boxSizing: 'border-box',
-                      background: 'rgba(34,197,94,0.6)',
-                    }}
-                    onClick={e => {
-                      e.stopPropagation();
-                      setSelectedItem({ type: 'image', id: overlay.id });
                     }}
                   >
-                    <span
+                    <button
+                      type="button"
+                      title={source?.fileName ?? 'Image overlay'}
                       style={{
-                        fontSize: 9,
-                        color: 'rgba(255,255,255,0.9)',
-                        fontWeight: 500,
+                        position: 'absolute',
+                        inset: 0,
+                        borderRadius: 3,
                         overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-serif)',
+                        border: isSelected ? '1.5px solid rgba(255,255,255,0.7)' : '1px solid rgba(255,255,255,0.12)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '0 5px',
+                        cursor: 'pointer',
+                        boxSizing: 'border-box',
+                        background: 'rgba(34,197,94,0.6)',
+                      }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedItem({ type: 'image', id: overlay.id });
                       }}
                     >
-                      {source?.fileName ?? 'Image'}
-                    </span>
-                  </button>
+                      <span
+                        style={{
+                          fontSize: 9,
+                          color: 'rgba(255,255,255,0.9)',
+                          fontWeight: 500,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          fontFamily: 'var(--font-serif)',
+                        }}
+                      >
+                        {source?.fileName ?? 'Image'}
+                      </span>
+                    </button>
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: -IMG_HANDLE_W / 2,
+                        top: -2,
+                        bottom: -2,
+                        width: IMG_HANDLE_W,
+                        cursor: 'ew-resize',
+                        zIndex: 4,
+                        touchAction: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        beginImageEdgeDrag(e.clientX, e.pointerId, overlay.id, 'start', overlay.startTime, overlay.endTime);
+                      }}
+                    >
+                      <div style={{ width: 3, height: '60%', borderRadius: 1.5, background: 'rgba(255,255,255,0.5)' }} />
+                    </div>
+                    <div
+                      style={{
+                        position: 'absolute',
+                        right: -IMG_HANDLE_W / 2,
+                        top: -2,
+                        bottom: -2,
+                        width: IMG_HANDLE_W,
+                        cursor: 'ew-resize',
+                        zIndex: 4,
+                        touchAction: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        beginImageEdgeDrag(e.clientX, e.pointerId, overlay.id, 'end', overlay.startTime, overlay.endTime);
+                      }}
+                    >
+                      <div style={{ width: 3, height: '60%', borderRadius: 1.5, background: 'rgba(255,255,255,0.5)' }} />
+                    </div>
+                  </div>
                 );
               })}
               {reviewOverlays

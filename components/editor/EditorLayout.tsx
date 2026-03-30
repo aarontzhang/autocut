@@ -597,20 +597,41 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     await queueProjectStateSync(targetProjectId);
   }, [handleStorageUploadError, handleStorageUploadSuccess, importSourceDrafts, projectId, queueProjectStateSync, readVideoDuration, updateSource, user]);
 
-  const hasDraggedVideoFiles = useCallback((dataTransfer: DataTransfer) => (
-    Array.from(dataTransfer.files).some((file) => file.type.startsWith('video/'))
+  const hasDraggedMediaFiles = useCallback((dataTransfer: DataTransfer) => (
+    Array.from(dataTransfer.files).some((file) => file.type.startsWith('video/') || file.type.startsWith('image/'))
   ), []);
 
   const handleRootDrop = useCallback((e: React.DragEvent) => {
-    if (!hasDraggedVideoFiles(e.dataTransfer)) return;
+    if (!hasDraggedMediaFiles(e.dataTransfer)) return;
     e.preventDefault();
-    void importSources(Array.from(e.dataTransfer.files), 'append');
-  }, [hasDraggedVideoFiles, importSources]);
+    const imageFiles = Array.from(e.dataTransfer.files).filter((file) => file.type.startsWith('image/'));
+    const videoFiles = Array.from(e.dataTransfer.files).filter((file) => file.type.startsWith('video/'));
+    if (imageFiles.length > 0) {
+      const file = imageFiles[0];
+      const url = URL.createObjectURL(file);
+      const store = useEditorStore.getState();
+      const addedSources = store.importSources([{
+        fileName: file.name,
+        duration: 5,
+        isPrimary: false,
+        status: 'ready',
+        runtime: { file, objectUrl: url, playerUrl: url, processingUrl: url },
+      }], { shouldAppendClips: false });
+      if (addedSources.length > 0) {
+        const newSource = addedSources[0];
+        store.updateSource(newSource.id, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+        store.createImageOverlayAtTime(newSource.id, store.currentTime);
+      }
+    }
+    if (videoFiles.length > 0) {
+      void importSources(videoFiles, 'append');
+    }
+  }, [hasDraggedMediaFiles, importSources]);
 
   const handleRootDragOver = useCallback((e: React.DragEvent) => {
-    if (!hasDraggedVideoFiles(e.dataTransfer)) return;
+    if (!hasDraggedMediaFiles(e.dataTransfer)) return;
     e.preventDefault();
-  }, [hasDraggedVideoFiles]);
+  }, [hasDraggedMediaFiles]);
 
   const isActiveProjectReady = currentProjectId === projectId;
   const shouldShowProjectLoading = Boolean(projectId) && (isProjectLoading || !isActiveProjectReady);
