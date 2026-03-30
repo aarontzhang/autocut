@@ -741,6 +741,7 @@ export function buildTranscriptContext(
 
   const lines: string[] = [];
   let active: { startTime: number; endTime: number; parts: string[] } | null = null;
+  let lastFlushedEndTime: number | null = null;
 
   for (const entry of mapped) {
     const pauseSinceLast = active ? entry.startTime - active.endTime : Infinity;
@@ -757,6 +758,14 @@ export function buildTranscriptContext(
     if (!active || shouldFlush) {
       if (active) {
         lines.push(`[${formatTimePrecise(active.startTime)}-${formatTimePrecise(active.endTime)}] ${active.parts.join(' ')}`);
+        lastFlushedEndTime = active.endTime;
+      }
+      // Annotate significant silence gaps between speech groups
+      if (lastFlushedEndTime !== null) {
+        const gapDuration = entry.startTime - lastFlushedEndTime;
+        if (gapDuration >= 0.5) {
+          lines.push(`  --- gap ${gapDuration.toFixed(1)}s ---`);
+        }
       }
       active = {
         startTime: entry.startTime,

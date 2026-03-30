@@ -246,6 +246,7 @@ You are provided with a full audio transcript of the video.
 - If a transcript is provided: use it to answer questions about what is spoken and when. Transcript timestamps may include milliseconds and are word-aligned; use that precision when choosing edit boundaries.
 - CRITICAL: For requests like "remove the section between X and Y" where X and Y are spoken moments, the delete span must start only after the first moment's speech fully ends and must stop before the second moment's speech begins. Do not cut at the coarse event timestamp if speech continues past it.
 - CRITICAL: Never set deleteStartTime or deleteEndTime in the middle of spoken speech. Before finalising any delete boundary, check the transcript to confirm no caption OVERLAPS that timestamp (a caption overlaps a time T if caption.startTime <= T < caption.endTime). If a caption overlaps your proposed deleteStartTime, push deleteStartTime to at least that caption's endTime. If a caption overlaps your proposed deleteEndTime, pull deleteEndTime back to at most that caption's startTime.
+- The transcript may include "--- gap Xs ---" lines showing the duration of silence between speech groups. Use these gap annotations to identify silence regions precisely. When placing delete boundaries for a manual cut, stay within the indicated gap — set deleteStartTime no earlier than the preceding group's end timestamp and deleteEndTime no later than the following group's start timestamp.
 - CRITICAL: The "Silence padding" setting shown in AI defaults is ONLY used by the automated silence-removal tool. Never apply it as a buffer when you are manually choosing deleteStartTime or deleteEndTime. Set boundaries at the exact transcript word edge. In particular, when the user asks to remove silence at the very start or end of the video, set deleteStartTime=0 or deleteEndTime=videoDuration exactly — do not leave any gap before the first word or after the last word.
 - If transcript is not yet available: use transcribe_request to get the audio content you need before answering. Do not say you "can't analyze the video" — instead proactively request transcription.
 When the user asks about a timestamp or spoken content, use the transcript to give your best estimate.`;
@@ -1761,11 +1762,17 @@ Honor these defaults unless the user explicitly asks for something different in 
         const isFinal: boolean = rawFinal === true;
 
         const validatedAction = validateEditAction(parsedAction, validationContext);
+        if (process.env.NODE_ENV === 'development' && validatedAction?.type === 'delete_range') {
+          console.warn(`[chat:debug] After first validation: ${validatedAction.deleteStartTime?.toFixed(3)}-${validatedAction.deleteEndTime?.toFixed(3)}`);
+        }
         const reconciledAction = reconcileNarratedSingleRangeAction(
           message,
           validatedAction,
           validationContext.videoDuration,
         );
+        if (process.env.NODE_ENV === 'development' && reconciledAction !== validatedAction && reconciledAction?.type === 'delete_range') {
+          console.warn(`[chat:debug] Reconciliation changed range to: ${reconciledAction.deleteStartTime?.toFixed(3)}-${reconciledAction.deleteEndTime?.toFixed(3)}`);
+        }
         const failureAction = isLikelyActionableRequest(effectiveLatestUserMessage) || Boolean(continuation)
           ? buildExplicitActionFailure(effectiveLatestUserMessage, continuation)
           : null;
@@ -1806,9 +1813,16 @@ Honor these defaults unless the user explicitly asks for something different in 
               latestAssistantEvidence,
               validationContext.videoDuration,
             ) ?? failureAction;
-        const action = normalizeActionForChat(
-          validateEditAction(inferredAction, validationContext) ?? failureAction ?? null,
-        );
+        // Only re-validate actions from fallback inference paths.
+        // Reconciled actions were already validated; re-running sanitizeDeleteRange
+        // would re-snap word boundaries and risk undoing the reconciliation.
+        const finalAction = (inferredAction === effectiveReconciledAction)
+          ? inferredAction
+          : (validateEditAction(inferredAction, validationContext) ?? failureAction ?? null);
+        const action = normalizeActionForChat(finalAction);
+        if (process.env.NODE_ENV === 'development' && action?.type === 'delete_range') {
+          console.warn(`[chat:debug] Final action range: ${action.deleteStartTime?.toFixed(3)}-${action.deleteEndTime?.toFixed(3)}`);
+        }
         const userFacingMessage = buildUserFacingAssistantMessage(message, action);
 
         await writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'done', message: userFacingMessage, action, final: isFinal })}\n\n`));
