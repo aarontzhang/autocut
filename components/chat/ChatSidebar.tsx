@@ -2218,7 +2218,11 @@ function AssistantMessage({
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditingItemId(isEditing ? null : item.id);
+                              if (item.action.type === 'delete_range') {
+                                focusReviewItem(item.id);
+                              } else {
+                                setEditingItemId(isEditing ? null : item.id);
+                              }
                             }}
                             aria-label={`Edit ${item.label}`}
                             style={{
@@ -2232,7 +2236,7 @@ function AssistantMessage({
                               border: 'none',
                               borderRadius: 4,
                               cursor: 'pointer',
-                              color: isEditing ? 'var(--accent)' : 'var(--fg-muted)',
+                              color: (isEditing || (item.action.type === 'delete_range' && isFocused)) ? 'var(--accent)' : 'var(--fg-muted)',
                               transition: 'color 0.12s',
                               padding: 0,
                             }}
@@ -2244,7 +2248,7 @@ function AssistantMessage({
                           </button>
                           )}
                         </div>
-                        {isEditing && (
+                        {isEditing && item.action.type !== 'delete_range' && (
                           <div style={{
                             border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
                             borderTop: 'none',
