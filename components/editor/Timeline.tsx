@@ -37,6 +37,16 @@ type CutEdgeDragInfo = {
   otherEdgeTime: number;
 };
 
+type ClipReorderDragInfo = {
+  pointerId: number;
+  clipId: string;
+  sourceClipIndex: number;
+  startClientX: number;
+  startClientY: number;
+  isDragging: boolean;
+  currentDropIndex: number | null;
+};
+
 type ClipVisualLayout = {
   clipId: string;
   rawLeft: number;
@@ -107,8 +117,10 @@ export default function Timeline({
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
   const cutEdgeDragRef = useRef<CutEdgeDragInfo | null>(null);
   const imageEdgeDragRef = useRef<{ pointerId: number; overlayId: string; edge: 'start' | 'end'; otherEdgeTime: number } | null>(null);
+  const clipReorderDragRef = useRef<ClipReorderDragInfo | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
+  const [clipDropIndicator, setClipDropIndicator] = useState<{ xPx: number; targetIndex: number } | null>(null);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
@@ -129,6 +141,7 @@ export default function Timeline({
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
+  const reorderClip = useEditorStore(s => s.reorderClip);
   const liveImageOverlays = useEditorStore(s => s.imageOverlays);
   const sources = useEditorStore(s => s.sources);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -518,6 +531,26 @@ export default function Timeline({
     updateImageEdge(clientX, drag);
   }, [updateImageEdge]);
 
+  const beginClipReorderDrag = useCallback((
+    e: React.PointerEvent,
+    clipId: string,
+    clipIndex: number,
+  ) => {
+    if (e.button !== 0) return;
+    if (activeReviewSession) return;
+    e.stopPropagation();
+    e.preventDefault();
+    clipReorderDragRef.current = {
+      pointerId: e.pointerId,
+      clipId,
+      sourceClipIndex: clipIndex,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      isDragging: false,
+      currentDropIndex: null,
+    };
+  }, [activeReviewSession]);
+
   const endInteractions = useCallback((pointerId?: number) => {
     const playheadDrag = playheadDragRef.current;
     if (playheadDrag && (pointerId === undefined || playheadDrag.pointerId === pointerId)) {
@@ -539,10 +572,25 @@ export default function Timeline({
       imageEdgeDragRef.current = null;
     }
 
-    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current) {
+    const clipDrag = clipReorderDragRef.current;
+    if (clipDrag && (pointerId === undefined || clipDrag.pointerId === pointerId)) {
+      if (clipDrag.isDragging && clipDrag.currentDropIndex !== null) {
+        let effectiveIndex = clipDrag.currentDropIndex;
+        if (clipDrag.sourceClipIndex < effectiveIndex) {
+          effectiveIndex -= 1;
+        }
+        if (effectiveIndex !== clipDrag.sourceClipIndex) {
+          reorderClip(clipDrag.clipId, effectiveIndex);
+        }
+      }
+      clipReorderDragRef.current = null;
+      setClipDropIndicator(null);
+    }
+
+    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current && !clipReorderDragRef.current) {
       document.body.style.cursor = '';
     }
-  }, []);
+  }, [reorderClip]);
 
   useEffect(() => {
     const onPointerMove = (e: PointerEvent) => {
@@ -561,6 +609,53 @@ export default function Timeline({
       const imgEdgeDrag = imageEdgeDragRef.current;
       if (imgEdgeDrag && imgEdgeDrag.pointerId === e.pointerId) {
         updateImageEdge(e.clientX, imgEdgeDrag);
+        return;
+      }
+
+      const clipDrag = clipReorderDragRef.current;
+      if (clipDrag && clipDrag.pointerId === e.pointerId) {
+        const dx = e.clientX - clipDrag.startClientX;
+        const dy = e.clientY - clipDrag.startClientY;
+        if (!clipDrag.isDragging) {
+          if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+            clipDrag.isDragging = true;
+            document.body.style.cursor = 'grabbing';
+          } else {
+            return;
+          }
+        }
+        const el = scrollRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const scrollLeft = el.scrollLeft;
+        const timelineX = e.clientX - rect.left + scrollLeft - HEADER_W;
+        const currentClips = useEditorStore.getState().clips;
+        const currentTransitions = useEditorStore.getState().transitions;
+        const currentSchedule = buildClipSchedule(currentClips, currentTransitions);
+        const totalDur = currentSchedule.length > 0 ? currentSchedule[currentSchedule.length - 1].timelineEnd : 1;
+        const totalPx = trackWidth * (useEditorStore.getState().zoom ?? 1);
+        const cursorTime = (timelineX / totalPx) * totalDur;
+
+        let dropIndex = currentSchedule.length;
+        for (let i = 0; i < currentSchedule.length; i++) {
+          const midpoint = (currentSchedule[i].timelineStart + currentSchedule[i].timelineEnd) / 2;
+          if (cursorTime < midpoint) {
+            dropIndex = i;
+            break;
+          }
+        }
+        clipDrag.currentDropIndex = dropIndex;
+
+        let indicatorTime: number;
+        if (dropIndex === 0) {
+          indicatorTime = currentSchedule.length > 0 ? currentSchedule[0].timelineStart : 0;
+        } else if (dropIndex >= currentSchedule.length) {
+          indicatorTime = currentSchedule[currentSchedule.length - 1].timelineEnd;
+        } else {
+          indicatorTime = currentSchedule[dropIndex].timelineStart;
+        }
+        const indicatorX = (indicatorTime / totalDur) * totalPx;
+        setClipDropIndicator({ xPx: indicatorX, targetIndex: dropIndex });
         return;
       }
 
@@ -678,7 +773,7 @@ export default function Timeline({
         className="no-select"
         onPointerDown={e => {
           if (e.button !== 0) return;
-          if ((e.target as HTMLElement).closest('.playhead-hitbox, .playhead-dot, .cut-edge-handle')) return;
+          if ((e.target as HTMLElement).closest('.playhead-hitbox, .playhead-dot, .cut-edge-handle, .clip-block, .clip-audio')) return;
           panRef.current = {
             pointerId: e.pointerId,
             startX: e.clientX,
@@ -961,16 +1056,29 @@ export default function Timeline({
                   height={BASE_TRACK_HEIGHT - 12}
                   isSelected={selectedItem?.type === 'clip' && selectedItem.id === clip.id}
                   isTagged={false}
+                  isDragging={clipDropIndicator !== null && clipReorderDragRef.current?.clipId === clip.id}
                   index={index}
                   title={`Clip ${index + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
-                  onSelect={e => {
-                    e.stopPropagation();
-                    setSelectedItem({ type: 'clip', id: clip.id });
-                    requestDisplaySeek(entry.timelineStart);
-                  }}
+                  onPointerDown={e => beginClipReorderDrag(e, clip.id, index)}
                 />
               );
             })}
+            {clipDropIndicator && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: clipDropIndicator.xPx - 1,
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  background: 'var(--accent)',
+                  zIndex: 20,
+                  pointerEvents: 'none',
+                  borderRadius: 1,
+                  boxShadow: '0 0 6px rgba(96,165,250,0.6)',
+                }}
+              />
+            )}
           </TrackRow>
 
           <TrackRow
@@ -1029,6 +1137,7 @@ export default function Timeline({
                     0.35 + ((index % 5) / 10)
                   ));
               const isClipSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
+              const isClipDragging = clipDropIndicator !== null && clipReorderDragRef.current?.clipId === clip.id;
               return (
                 <div
                   key={clip.id}
@@ -1043,15 +1152,15 @@ export default function Timeline({
                     overflow: 'hidden',
                     background: isClipSelected ? 'rgba(96,165,250,0.18)' : undefined,
                     border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(255,255,255,0.06)',
-                    cursor: 'pointer',
+                    cursor: 'grab',
+                    touchAction: 'none',
                     boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
-                    opacity: isClipSelected ? 1 : 0.92,
+                    opacity: isClipDragging ? 0.4 : isClipSelected ? 1 : 0.92,
                   }}
                   title={`Clip ${schedule.findIndex((item) => item.clipId === clip.id) + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
-                  onClick={e => {
-                    e.stopPropagation();
-                    setSelectedItem({ type: 'clip', id: clip.id });
-                    requestDisplaySeek(entry.timelineStart);
+                  onPointerDown={e => {
+                    if (e.button !== 0) return;
+                    beginClipReorderDrag(e, clip.id, clips.findIndex(c => c.id === clip.id));
                   }}
                 >
                   <div
@@ -1070,6 +1179,22 @@ export default function Timeline({
                 </div>
               );
             })}
+            {clipDropIndicator && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: clipDropIndicator.xPx - 1,
+                  top: 0,
+                  bottom: 0,
+                  width: 2,
+                  background: 'var(--accent)',
+                  zIndex: 20,
+                  pointerEvents: 'none',
+                  borderRadius: 1,
+                  boxShadow: '0 0 6px rgba(96,165,250,0.6)',
+                }}
+              />
+            )}
           </TrackRow>
 
           {hasCaptions && (

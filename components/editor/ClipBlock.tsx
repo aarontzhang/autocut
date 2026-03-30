@@ -11,7 +11,8 @@ interface ClipBlockProps {
   top: number;
   isSelected: boolean;
   isTagged: boolean;
-  onSelect: (e: React.MouseEvent) => void;
+  onPointerDown?: (e: React.PointerEvent) => void;
+  isDragging?: boolean;
   index: number;
   title: string;
 }
@@ -24,7 +25,7 @@ const CLIP_COLOR = {
 
 export default function ClipBlock({
   clip, left, width, height, top, isSelected, isTagged,
-  onSelect, index, title,
+  onPointerDown, isDragging, index, title,
 }: ClipBlockProps) {
   const clipNumber = index + 1;
   const color = CLIP_COLOR;
@@ -50,11 +51,13 @@ export default function ClipBlock({
         outlineOffset: isSelected ? '1px' : undefined,
         boxSizing: 'border-box',
         overflow: 'hidden',
-        cursor: 'pointer',
+        cursor: 'grab',
         userSelect: 'none',
+        touchAction: 'none',
+        opacity: isDragging ? 0.4 : 1,
         boxShadow: isTagged ? '0 0 0 1px rgba(125,211,252,0.3)' : 'none',
       }}
-      onClick={onSelect}
+      onPointerDown={onPointerDown}
     >
       {isMicroClip && (
         <div
