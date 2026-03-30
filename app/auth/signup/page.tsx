@@ -8,7 +8,7 @@ import { getSupabaseBrowser } from '@/lib/supabase/client';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { capture } from '@/lib/analytics';
 
-export default function LoginPage() {
+export default function SignUpPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -21,14 +21,6 @@ export default function LoginPage() {
     if (user) router.replace('/projects');
   }, [router, user]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const routeError = params.get('error');
-    const routeMessage = params.get('message');
-    setError(routeError ?? '');
-    setNotice(routeMessage ?? '');
-  }, []);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -36,12 +28,16 @@ export default function LoginPage() {
     setLoading(true);
     const supabase = getSupabaseBrowser();
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) throw error;
-      capture('user_signed_in', { method: 'email' });
-      router.push('/projects');
+      if (data.user && !data.session) {
+        setNotice('Check your email for a confirmation link.');
+      } else {
+        capture('user_signed_up', { method: 'email' });
+        router.push('/subscribe');
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Authentication failed');
+      setError(err instanceof Error ? err.message : 'Sign up failed');
     } finally {
       setLoading(false);
     }
@@ -123,7 +119,6 @@ export default function LoginPage() {
         }
         .auth-back:hover { color: rgba(255,255,255,0.65); }
 
-        /* Hide left panel on small screens */
         @media (max-width: 768px) {
           .auth-left { display: none !important; }
           .auth-right { border-left: none !important; }
@@ -141,7 +136,6 @@ export default function LoginPage() {
         position: 'relative',
         overflow: 'hidden',
       }}>
-        {/* Subtle glow — centered behind the headline text */}
         <div style={{
           position: 'absolute',
           top: '50%',
@@ -154,7 +148,6 @@ export default function LoginPage() {
           pointerEvents: 'none',
         }} />
 
-        {/* Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <AutocutMark size={32} withTile />
           <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.025em', color: 'rgba(255,255,255,0.92)' }}>
@@ -162,7 +155,6 @@ export default function LoginPage() {
           </span>
         </div>
 
-        {/* Headline */}
         <div>
           <p style={{
             fontSize: 'clamp(32px, 3vw, 48px)',
@@ -186,7 +178,6 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {/* Bottom quote */}
         <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.18)', margin: 0 }}>
           © 2025 Autocut
         </p>
@@ -205,7 +196,6 @@ export default function LoginPage() {
         borderLeft: '1px solid rgba(255,255,255,0.07)',
       }}>
         <div style={{ width: '100%', maxWidth: 380 }}>
-          {/* Back link */}
           <Link href="/" className="auth-back" style={{ marginBottom: 40, display: 'inline-flex' }}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M9 11L5 7l4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -213,7 +203,6 @@ export default function LoginPage() {
             Back to home
           </Link>
 
-          {/* Heading */}
           <h1 style={{
             fontSize: 26,
             fontWeight: 700,
@@ -221,14 +210,14 @@ export default function LoginPage() {
             color: 'rgba(255,255,255,0.92)',
             margin: '0 0 6px',
           }}>
-            Sign in
+            Create your account
           </h1>
           <p style={{
             fontSize: 14,
             color: 'rgba(255,255,255,0.35)',
             margin: '0 0 28px',
           }}>
-            Sign in to continue editing.
+            Sign up to start editing.
           </p>
 
           <button onClick={handleGoogle} className="auth-google-btn" style={{ marginBottom: 20 }}>
@@ -238,7 +227,7 @@ export default function LoginPage() {
               <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
               <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
             </svg>
-            Sign in with Google
+            Sign up with Google
           </button>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
@@ -262,6 +251,7 @@ export default function LoginPage() {
               value={password}
               onChange={e => setPassword(e.target.value)}
               required
+              minLength={6}
               className="auth-input"
             />
 
@@ -287,7 +277,7 @@ export default function LoginPage() {
                 transition: 'filter 0.15s, box-shadow 0.15s',
               }}
             >
-              {loading ? 'Please wait…' : 'Sign in'}
+              {loading ? 'Please wait…' : 'Create account'}
             </button>
           </form>
 
@@ -297,9 +287,9 @@ export default function LoginPage() {
             margin: '20px 0 0',
             textAlign: 'center',
           }}>
-            Don&apos;t have an account?{' '}
-            <Link href="/auth/signup" style={{ color: 'rgba(255,255,255,0.7)', textDecoration: 'underline', textUnderlineOffset: 2 }}>
-              Sign up
+            Already have an account?{' '}
+            <Link href="/auth/login" style={{ color: 'rgba(255,255,255,0.7)', textDecoration: 'underline', textUnderlineOffset: 2 }}>
+              Sign in
             </Link>
           </p>
         </div>

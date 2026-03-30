@@ -8,6 +8,7 @@ import { useAuth } from '@/components/auth/AuthProvider';
 
 const VIDEO_IMAGE = '/landing/hero-gopro-ski.jpg';
 const SIGN_IN_HREF = '/auth/login';
+const SIGN_UP_HREF = '/auth/signup';
 
 type HeroTrackSegment = {
   w: string;
@@ -701,12 +702,12 @@ export default function LandingPage() {
             Tell Autocut what you want changed. Cut the filler, trim a section, place markers. It finds the right moments and applies every edit directly to your timeline.
           </p>
           <div>
-            <Link href={SIGN_IN_HREF} className="iridescent-button" style={{
+            <Link href={SIGN_UP_HREF} className="iridescent-button" style={{
               display: 'inline-block', padding: '12px 28px',
               borderRadius: 24, fontSize: 14, fontWeight: 600,
               textDecoration: 'none', letterSpacing: '-0.01em',
             }}>
-              Sign in →
+              Get started →
             </Link>
           </div>
         </div>
@@ -773,12 +774,12 @@ export default function LandingPage() {
         }}>
           The best creators spend their time creating, not clicking through timelines.
         </p>
-        <Link href={SIGN_IN_HREF} className="iridescent-button" style={{
+        <Link href={SIGN_UP_HREF} className="iridescent-button" style={{
           display: 'inline-block', padding: '13px 32px',
           borderRadius: 26, fontSize: 14, fontWeight: 600,
           textDecoration: 'none', letterSpacing: '-0.01em',
         }}>
-          Sign in →
+          Get started →
         </Link>
       </section>
 

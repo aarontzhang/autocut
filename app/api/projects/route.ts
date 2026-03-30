@@ -1,6 +1,7 @@
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { getSubscriptionStatus, subscriptionRequiredResponse } from '@/lib/server/subscription';
 
 export async function GET() {
   const supabase = await getSupabaseServer();
@@ -42,6 +43,9 @@ export async function POST(request: NextRequest) {
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const sub = await getSubscriptionStatus(user.id);
+  if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({
     key: `projects-create:${getRateLimitIdentity(request.headers, user.id)}`,
