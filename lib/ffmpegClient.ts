@@ -72,7 +72,7 @@ async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpe
   ffmpegInstance = new FFmpeg();
 
   ffmpegInstance.on('progress', ({ progress }) => {
-    progressHandler?.(Math.round(progress * 100));
+    progressHandler?.(Math.min(100, Math.max(0, Math.round(progress * 100))));
   });
   ffmpegInstance.on('log', ({ message }) => {
     const nextMessage = message.trim();
@@ -202,12 +202,25 @@ function toEvenDimension(value: number, fallback: number): number {
 }
 
 async function execOrThrow(ffmpeg: FFmpeg, args: string[]) {
-  const exitCode = await ffmpeg.exec(args);
-  if (exitCode !== 0) {
-    const logSuffix = recentFFmpegLogs.length > 0
-      ? `\n${recentFFmpegLogs.slice(-4).join('\n')}`
-      : '';
-    throw new Error(`FFmpeg exited with code ${exitCode}.${logSuffix}`);
+  const WATCHDOG_MS = 15 * 60 * 1000;
+  let watchdogId: ReturnType<typeof setTimeout> | null = null;
+  const watchdog = new Promise<never>((_, reject) => {
+    watchdogId = setTimeout(() => {
+      try { ffmpeg.terminate(); } catch { /* ignore */ }
+      resetFFmpeg();
+      reject(new Error('FFmpeg timed out after 15 minutes.'));
+    }, WATCHDOG_MS);
+  });
+  try {
+    const exitCode = await Promise.race([ffmpeg.exec(args), watchdog]);
+    if (exitCode !== 0) {
+      const logSuffix = recentFFmpegLogs.length > 0
+        ? `\n${recentFFmpegLogs.slice(-4).join('\n')}`
+        : '';
+      throw new Error(`FFmpeg exited with code ${exitCode}.${logSuffix}`);
+    }
+  } finally {
+    if (watchdogId !== null) clearTimeout(watchdogId);
   }
 }
 
