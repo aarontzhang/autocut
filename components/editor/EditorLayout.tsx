@@ -208,7 +208,11 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         if (e.shiftKey) redo(); else undo();
         return;
       }
-      if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
+      if (
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLInputElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && useEditorStore.getState().selectedItem) {
         e.preventDefault();
         deleteSelectedItem();

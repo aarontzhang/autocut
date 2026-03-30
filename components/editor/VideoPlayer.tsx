@@ -1248,6 +1248,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
                   if (isEditing || !activeCaption.captionId) return;
                   e.stopPropagation();
+                  const storeState = useEditorStore.getState();
+                  if (storeState.previewSnapshot) {
+                    storeState.commitPreviewSnapshot(storeState.previewSnapshot);
+                  }
                   const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
                   captionDragRef.current = {
                     startX: e.clientX,
@@ -1294,6 +1298,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
                 const handleDoubleClick = () => {
                   if (!activeCaption.captionId) return;
+                  const storeState = useEditorStore.getState();
+                  if (storeState.previewSnapshot) {
+                    storeState.commitPreviewSnapshot(storeState.previewSnapshot);
+                  }
                   setSelectedItem({ type: 'caption', id: activeCaption.captionId });
                   setEditingCaptionId(activeCaption.captionId);
                   requestAnimationFrame(() => {
@@ -1319,6 +1327,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
                 const handleKeyDown = (e: React.KeyboardEvent) => {
                   if (!isEditing) return;
+                  e.stopPropagation();
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     (e.target as HTMLElement).blur();
@@ -1340,6 +1349,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                       cursor: isEditing ? 'text' : isDraggingCaption ? 'grabbing' : 'grab',
                     }}
                     onPointerDown={handlePointerDown}
+                    onClick={(e) => e.stopPropagation()}
                     onDoubleClick={handleDoubleClick}
                   >
                     <div
