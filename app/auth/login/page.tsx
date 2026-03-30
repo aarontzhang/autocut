@@ -84,6 +84,13 @@ export default function LoginPage() {
         }
         .auth-input:focus { border-color: rgba(33,212,255,0.45); }
         .auth-input::placeholder { color: rgba(255,255,255,0.22); }
+        .auth-input:-webkit-autofill,
+        .auth-input:-webkit-autofill:hover,
+        .auth-input:-webkit-autofill:focus {
+          -webkit-box-shadow: 0 0 0 40px #1a1a1a inset !important;
+          -webkit-text-fill-color: rgba(255,255,255,0.92) !important;
+          caret-color: rgba(255,255,255,0.92);
+        }
         .auth-google-btn {
           width: 100%;
           padding: 11px 14px;
