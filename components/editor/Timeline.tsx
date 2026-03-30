@@ -602,6 +602,8 @@ export default function Timeline({
         if (effectiveIndex !== clipDrag.sourceClipIndex) {
           reorderClip(clipDrag.clipId, effectiveIndex);
         }
+      } else if (!clipDrag.isDragging) {
+        setSelectedItem({ type: 'clip', id: clipDrag.clipId });
       }
       clipReorderDragRef.current = null;
       setClipDropIndicator(null);
@@ -610,7 +612,7 @@ export default function Timeline({
     if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current && !imageMoveDragRef.current && !clipReorderDragRef.current) {
       document.body.style.cursor = '';
     }
-  }, [reorderClip]);
+  }, [reorderClip, setSelectedItem]);
 
   useEffect(() => {
     const onPointerMove = (e: PointerEvent) => {

@@ -2718,25 +2718,14 @@ export default function ChatSidebar() {
     }
   }, [transcriptStatus, transcriptProgress]);
 
-  const selectedClipContext = useMemo(() => {
-    if (!selectedItem || selectedItem.type !== 'clip') return null;
-    const index = clips.findIndex((clip) => clip.id === selectedItem.id);
-    if (index < 0) return null;
-    return {
-      id: clips[index].id,
-      index,
-      number: index + 1,
-    };
-  }, [clips, selectedItem]);
   const selectedMarkerContext = useMemo(() => {
     if (!selectedItem || selectedItem.type !== 'marker') return null;
     return markers.find((marker) => marker.id === selectedItem.id) ?? null;
   }, [markers, selectedItem]);
   const composerSelectionToken = useMemo(() => {
-    if (selectedClipContext) return formatClipReferenceToken(selectedClipContext.number);
     if (selectedMarkerContext) return formatMarkerReferenceToken(selectedMarkerContext.number);
     return null;
-  }, [selectedClipContext, selectedMarkerContext]);
+  }, [selectedMarkerContext]);
   const markerSuggestions = useMemo(() => {
     if (!activeMarkerMention) return [];
     const query = activeMarkerMention.query.trim().toLowerCase().replace(/^marker\s+/, '');
