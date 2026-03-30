@@ -117,6 +117,7 @@ export default function Timeline({
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
   const cutEdgeDragRef = useRef<CutEdgeDragInfo | null>(null);
   const imageEdgeDragRef = useRef<{ pointerId: number; overlayId: string; edge: 'start' | 'end'; otherEdgeTime: number } | null>(null);
+  const imageMoveDragRef = useRef<{ pointerId: number; overlayId: string; startClientX: number; originalStartTime: number; originalEndTime: number; isDragging: boolean } | null>(null);
   const clipReorderDragRef = useRef<ClipReorderDragInfo | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
@@ -531,6 +532,20 @@ export default function Timeline({
     updateImageEdge(clientX, drag);
   }, [updateImageEdge]);
 
+  const updateImageMove = useCallback((clientX: number, drag: { overlayId: string; startClientX: number; originalStartTime: number; originalEndTime: number }) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const duration = drag.originalEndTime - drag.originalStartTime;
+    const cursorTime = pxToTimelineTime(clientX, el);
+    const startCursorTime = pxToTimelineTime(drag.startClientX, el);
+    const timeDelta = cursorTime - startCursorTime;
+    let newStart = drag.originalStartTime + timeDelta;
+    let newEnd = drag.originalEndTime + timeDelta;
+    if (newStart < 0) { newStart = 0; newEnd = duration; }
+    if (newEnd > contentDuration) { newEnd = contentDuration; newStart = contentDuration - duration; }
+    useEditorStore.getState().updateImageOverlay(drag.overlayId, { startTime: newStart, endTime: newEnd });
+  }, [contentDuration, pxToTimelineTime]);
+
   const beginClipReorderDrag = useCallback((
     e: React.PointerEvent,
     clipId: string,
@@ -572,6 +587,11 @@ export default function Timeline({
       imageEdgeDragRef.current = null;
     }
 
+    const imgMoveDrag = imageMoveDragRef.current;
+    if (imgMoveDrag && (pointerId === undefined || imgMoveDrag.pointerId === pointerId)) {
+      imageMoveDragRef.current = null;
+    }
+
     const clipDrag = clipReorderDragRef.current;
     if (clipDrag && (pointerId === undefined || clipDrag.pointerId === pointerId)) {
       if (clipDrag.isDragging && clipDrag.currentDropIndex !== null) {
@@ -587,7 +607,7 @@ export default function Timeline({
       setClipDropIndicator(null);
     }
 
-    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current && !clipReorderDragRef.current) {
+    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current && !imageMoveDragRef.current && !clipReorderDragRef.current) {
       document.body.style.cursor = '';
     }
   }, [reorderClip]);
@@ -609,6 +629,21 @@ export default function Timeline({
       const imgEdgeDrag = imageEdgeDragRef.current;
       if (imgEdgeDrag && imgEdgeDrag.pointerId === e.pointerId) {
         updateImageEdge(e.clientX, imgEdgeDrag);
+        return;
+      }
+
+      const imgMoveDrag = imageMoveDragRef.current;
+      if (imgMoveDrag && imgMoveDrag.pointerId === e.pointerId) {
+        const dx = e.clientX - imgMoveDrag.startClientX;
+        if (!imgMoveDrag.isDragging) {
+          if (Math.abs(dx) > 5) {
+            imgMoveDrag.isDragging = true;
+            document.body.style.cursor = 'grabbing';
+          } else {
+            return;
+          }
+        }
+        updateImageMove(e.clientX, imgMoveDrag);
         return;
       }
 
@@ -682,7 +717,7 @@ export default function Timeline({
       window.removeEventListener('pointercancel', onPointerEnd);
       endInteractions();
     };
-  }, [endInteractions, scrubPlayhead, updateCutEdge, updateImageEdge]);
+  }, [endInteractions, scrubPlayhead, updateCutEdge, updateImageEdge, updateImageMove]);
 
   const px = (time: number) => tPx(time);
   const clipLayoutById = useMemo(
@@ -1368,13 +1403,29 @@ export default function Timeline({
                         display: 'flex',
                         alignItems: 'center',
                         padding: '0 5px',
-                        cursor: 'pointer',
+                        cursor: 'grab',
                         boxSizing: 'border-box',
                         background: 'rgba(34,197,94,0.6)',
+                        touchAction: 'none',
                       }}
                       onClick={e => {
                         e.stopPropagation();
+                        if (imageMoveDragRef.current?.isDragging) return;
                         setSelectedItem({ type: 'image', id: overlay.id });
+                      }}
+                      onPointerDown={e => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSelectedItem({ type: 'image', id: overlay.id });
+                        imageMoveDragRef.current = {
+                          pointerId: e.pointerId,
+                          overlayId: overlay.id,
+                          startClientX: e.clientX,
+                          originalStartTime: overlay.startTime,
+                          originalEndTime: overlay.endTime,
+                          isDragging: false,
+                        };
                       }}
                     >
                       <span
