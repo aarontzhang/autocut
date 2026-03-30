@@ -2133,8 +2133,10 @@ function AssistantMessage({
                             gap: 10,
                             padding: '10px 12px',
                             borderRadius: isEditing ? '12px 12px 0 0' : 12,
-                            border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
-                            borderBottom: isEditing ? '1px solid rgba(255,255,255,0.05)' : undefined,
+                            borderTop: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                            borderRight: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                            borderBottom: isEditing ? '1px solid rgba(255,255,255,0.05)' : isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                            borderLeft: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
                             background: isFocused
                               ? 'linear-gradient(180deg, rgba(33,212,255,0.12), rgba(255,255,255,0.04))'
                               : 'linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02))',
