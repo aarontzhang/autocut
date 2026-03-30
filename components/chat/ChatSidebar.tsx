@@ -12,7 +12,6 @@ import {
   SilenceCandidate,
   SourceIndexAnalysisStateMap,
   SourceIndexTaskState,
-  VisualSearchSession,
 } from '@/lib/types';
 import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, projectCaptionWordsToTimeline } from '@/lib/timelineUtils';
 import {
@@ -42,7 +41,6 @@ const REVIEW_PREROLL_SECONDS = 2.5;
 type ChatResponse = {
   message?: string;
   action?: EditAction | null;
-  visualSearch?: VisualSearchSession | null;
   error?: string;
   retryAfterSeconds?: number;
   requestId?: string | null;
@@ -978,41 +976,6 @@ function formatChatTime(seconds: number): string {
   return Math.abs(seconds - Math.round(seconds)) < 0.001
     ? formatTime(seconds)
     : formatTimePrecise(seconds);
-}
-
-function upsertMarkersFromVisualSearch(
-  query: string,
-  session: VisualSearchSession | null | undefined,
-  addMarker: ReturnType<typeof useEditorStore.getState>['addMarker'],
-) {
-  if (!session) return;
-  const proposalRanges = session.proposal?.timelineRanges ?? [];
-  const fallbackRanges = proposalRanges.length > 0
-    ? []
-    : session.candidates.slice(0, 3).map((candidate) => ({
-        timelineStart: candidate.sourceStart,
-        timelineEnd: candidate.sourceEnd,
-      }));
-  const ranges = proposalRanges.length > 0 ? proposalRanges : fallbackRanges;
-  if (ranges.length === 0) return;
-
-  const existing = useEditorStore.getState().markers;
-  ranges.forEach((range, index) => {
-    const timelineTime = range.timelineStart;
-    const alreadyExists = existing.some((marker) => (
-      marker.note === query && Math.abs(marker.timelineTime - timelineTime) < 0.1
-    ));
-    if (alreadyExists) return;
-    addMarker({
-      timelineTime,
-      label: `Finding ${index + 1}`,
-      createdBy: 'ai',
-      status: 'open',
-      linkedRange: { startTime: range.timelineStart, endTime: range.timelineEnd },
-      confidence: session.confidenceBand === 'high' ? 0.9 : session.confidenceBand === 'medium' ? 0.7 : 0.5,
-      note: query,
-    });
-  });
 }
 
 // ─── Action card config ────────────────────────────────────────────────────────
@@ -2432,7 +2395,6 @@ export default function ChatSidebar() {
   const sourceIndexAnalysis = useEditorStore(s => s.sourceIndexAnalysis);
   const sourceIndexAnalysisBySourceId = useEditorStore(s => s.sourceIndexAnalysisBySourceId);
   const currentProjectId = useEditorStore(s => s.currentProjectId);
-  const setVisualSearchSession = useEditorStore(s => s.setVisualSearchSession);
   const addMarker = useEditorStore(s => s.addMarker);
   const applyStoredAction = useEditorStore(s => s.applyAction);
   const recordAppliedAction = useEditorStore(s => s.recordAppliedAction);
@@ -2600,11 +2562,10 @@ export default function ChatSidebar() {
         }
       };
 
-      const { message = '', action, visualSearch, final: isFinal } = await postChatRequest({
+      const { message = '', action, final: isFinal } = await postChatRequest({
         messages: nextHistory,
         context: {
           projectId: freshState.currentProjectId,
-          visualSearchSession: freshState.visualSearchSession,
           videoDuration: getTimelineDuration(currentClips),
           clipCount: currentClips.length,
           clips: currentClips.map((c, i) => ({
@@ -2634,17 +2595,7 @@ export default function ChatSidebar() {
         },
       }, ctrl, onChunk);
 
-      setVisualSearchSession(visualSearch ?? null);
-      if (visualSearch) {
-        capture('visual_search_performed', {
-          query_length: latestUserInput.length,
-          has_results: (visualSearch.candidates?.length ?? 0) > 0,
-        });
-      }
       const markerAction = isMarkerMutationAction(action);
-      if (!markerAction) {
-        upsertMarkersFromVisualSearch(latestUserInput, visualSearch, addMarker);
-      }
       const assistantMessage = streamingAccumulated.trim() || message.trim() || getAssistantFallbackMessage(action);
       const duplicateCompletedAction = requestChainId && action && action.type !== 'none' && chainState
         ? chainState.completedActions.find((completedAction) => actionsMatch(completedAction, action)) ?? null
@@ -2726,7 +2677,6 @@ export default function ChatSidebar() {
         content: assistantMessage,
         requestChainId,
         action: action ?? undefined,
-        visualSearch: visualSearch ?? undefined,
         autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
         actionStatus: nextActionStatus as 'pending' | 'completed' | 'rejected' | undefined,
         actionResult: markerAction && action
@@ -2748,7 +2698,7 @@ export default function ChatSidebar() {
     }
 
     if (!producedVisibleResponse) {
-      const fallbackContent = 'I inspected that section but did not finish with a concrete edit. The frame search was too broad and needs a narrower visual target.';
+      const fallbackContent = 'I was unable to produce a concrete edit for that request.';
       if (streamingMessageId) {
         updateMessage(streamingMessageId, { content: fallbackContent, isStreaming: false });
       } else {
@@ -2759,7 +2709,7 @@ export default function ChatSidebar() {
         });
       }
     }
-  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, removeMessage, requestSeek, setVisualSearchSession, updateMessage, updateRequestChainState]);
+  }, [addMarker, addMessage, applyStoredAction, buildCurrentTranscript, initialIndexingReady, recordAppliedAction, recordCompletedChainAction, removeMessage, requestSeek, updateMessage, updateRequestChainState]);
 
   const continueRequestChain = useCallback(async (
     requestChainId: string,

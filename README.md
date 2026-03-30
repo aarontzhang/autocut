@@ -36,26 +36,14 @@ Web app and worker:
 
 Optional tuning:
 
-- `ANTHROPIC_FRAME_DESCRIPTION_MODEL`
-- `OPENAI_EMBEDDING_MODEL`
-- `ANALYSIS_WORKER_ID`
-- `ANALYSIS_WORKER_POLL_MS`
-- `ANALYSIS_WORKER_CONCURRENCY`
-- `ANALYSIS_INDEX_SEGMENT_CONCURRENCY`
-- `ANALYSIS_INDEX_DESCRIPTION_CONCURRENCY`
-- `ANALYSIS_VERIFY_FRAME_CONCURRENCY`
-- `ANALYSIS_INDEX_SHARD_SECONDS`
 - `BETA_MAX_CHAT_REQUESTS_PER_DAY`
 - `BETA_MAX_TRANSCRIBE_SECONDS_PER_DAY`
-- `BETA_MAX_FRAME_DESCRIPTIONS_PER_DAY`
-- `BETA_MAX_VISUAL_SEARCHES_PER_DAY`
 
 ## Supabase Setup
 
 Run the SQL migrations in `supabase/migrations/` against a fresh Supabase project. They create:
 
 - `projects`
-- visual-indexing tables and job queue tables
 - `beta_usage_daily`
 - the private `videos` storage bucket
 - RLS policies for projects, storage objects, and beta usage

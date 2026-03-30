@@ -20,8 +20,6 @@ type EventMap = {
   chat_action_applied:         { action_count: number; action_types: string[] };
   chat_request_failed:         { reason: string };
   chat_quota_hit:              Record<string, never>;
-  visual_search_performed:     { query_length: number; has_results: boolean };
-
   transcription_started:       Record<string, never>;
   transcription_completed:     { duration_ms: number };
   transcription_failed:        { reason: string };

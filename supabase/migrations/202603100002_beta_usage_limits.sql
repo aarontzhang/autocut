@@ -4,8 +4,7 @@ create table if not exists public.beta_usage_daily (
   metric text not null check (metric in (
     'chat_requests',
     'transcribe_seconds',
-    'frame_descriptions',
-    'visual_searches'
+    'frame_descriptions'
   )),
   used_amount bigint not null default 0 check (used_amount >= 0),
   created_at timestamptz not null default now(),

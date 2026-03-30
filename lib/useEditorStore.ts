@@ -20,7 +20,6 @@ import {
   TextOverlayEntry,
   TransitionEntry,
   VideoClip,
-  VisualSearchSession,
 } from './types';
 import {
   actionChangesTimelineStructure,
@@ -522,7 +521,6 @@ function buildBaseEditorState(input?: {
   | 'sourceTranscriptCaptions'
   | 'sourceIndexFreshBySourceId'
   | 'timelineProjectionFresh'
-  | 'visualSearchSession'
   | 'sourceIndex'
   | 'sourceIndexAnalysis'
   | 'sourceIndexAnalysisBySourceId'
@@ -570,7 +568,6 @@ function buildBaseEditorState(input?: {
     sourceTranscriptCaptions: null,
     sourceIndexFreshBySourceId: buildInitialSourceIndexState(input?.sources),
     timelineProjectionFresh: true,
-    visualSearchSession: null,
     sourceIndex: null,
     sourceIndexAnalysis: null,
     sourceIndexAnalysisBySourceId: {},
@@ -621,7 +618,6 @@ interface EditorState {
   sourceTranscriptCaptions: CaptionEntry[] | null;
   sourceIndexFreshBySourceId: SourceIndexStateMap;
   timelineProjectionFresh: boolean;
-  visualSearchSession: VisualSearchSession | null;
   sourceIndex: SourceIndex | null;
   sourceIndexAnalysis: SourceIndexAnalysisState | null;
   sourceIndexAnalysisBySourceId: SourceIndexAnalysisStateMap;
@@ -727,7 +723,6 @@ interface EditorState {
     analysisBySourceId?: SourceIndexAnalysisStateMap;
   }) => void;
   setSourceIndexAnalysis: (analysis: SourceIndexAnalysisState | null) => void;
-  setVisualSearchSession: (session: VisualSearchSession | null) => void;
   setSourceIndex: (index: SourceIndex | null) => void;
   addMarker: (marker: Omit<MarkerEntry, 'id' | 'number'> & { id?: string; number?: number }) => string;
   updateMarker: (id: string, patch: Partial<Omit<MarkerEntry, 'id'>>) => void;
@@ -1497,7 +1492,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   clearChatHistory: () => set(() => ({
     messages: [],
     appliedActions: [],
-    visualSearchSession: null,
     pendingAction: null,
     taggedMarkerIds: [],
     taggedClipIds: [],
@@ -1509,7 +1503,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return {
       messages: [],
       appliedActions: [],
-      visualSearchSession: null,
       pendingAction: null,
       clips: nextClips,
       captions: [],
@@ -2080,6 +2073,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
     const hasTranscriptCaptions = Boolean(sourceTranscriptCaptions && sourceTranscriptCaptions.length > 0);
+    const audioStates = Object.values(analysisBySourceId)
+      .map((a) => a.audio)
+      .filter((a): a is NonNullable<typeof a> => a != null);
     const hasQueuedOrRunningAudio = audioStates.some((entry) => entry.status === 'queued' || entry.status === 'running');
     const hasTerminalAudioFailure = audioStates.some((entry) => entry.status === 'failed' || entry.status === 'unavailable');
     const transcriptStatus = hasTranscriptCaptions
@@ -2110,8 +2106,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSourceIndexAnalysis: (analysis) => set({
     sourceIndexAnalysis: normalizeSourceIndexAnalysisState(analysis),
   }),
-
-  setVisualSearchSession: (session) => set({ visualSearchSession: session }),
 
   setSourceIndex: (index) => set({ sourceIndex: index }),
 }));

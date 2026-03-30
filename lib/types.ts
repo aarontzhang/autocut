@@ -131,7 +131,6 @@ export interface ChatMessage {
   timestamp: number;
   requestChainId?: string;
   action?: EditAction;
-  visualSearch?: VisualSearchSession | null;
   autoApplied?: boolean;
   actionStatus?: 'pending' | 'completed' | 'rejected';
   actionResult?: string;
@@ -232,67 +231,6 @@ export interface SourceIndexAnalysisState {
 }
 
 export type SourceIndexAnalysisStateMap = Record<string, SourceIndexAnalysisState>;
-
-export type VisualConfidenceBand = 'low' | 'medium' | 'high';
-
-export interface VisualQueryIntent {
-  rawQuery: string;
-  normalizedQuery: string;
-  actionType: 'delete' | 'locate' | 'inspect';
-  targetType: 'visual_motif' | 'text_on_screen' | 'scene' | 'unknown';
-  transcriptRelevance: 'low' | 'medium' | 'high';
-  visualEvidencePriority: 'low' | 'medium' | 'high';
-  expectedDurationSeconds: number;
-  confidenceThreshold: number;
-  allowRepeatDetection: boolean;
-}
-
-export interface VisualCandidateWindow {
-  id: string;
-  assetId: string;
-  sourceStart: number;
-  sourceEnd: number;
-  retrievalScore: number;
-  retrievalReasons: string[];
-  thumbnailPath?: string | null;
-  ocrText?: string | null;
-  verificationStatus?: 'not_requested' | 'queued' | 'verified' | 'rejected';
-  confidenceBand?: VisualConfidenceBand;
-}
-
-export interface VerifiedSourceRange {
-  assetId: string;
-  sourceStart: number;
-  sourceEnd: number;
-  frameStart: number;
-  frameEnd: number;
-  verificationConfidence: number;
-  boundaryConfidence: number;
-  evidence: string[];
-  candidateId?: string;
-}
-
-export interface VisualEditProposal {
-  assetId: string;
-  intent: VisualQueryIntent;
-  confidenceBand: VisualConfidenceBand;
-  sourceRanges: VerifiedSourceRange[];
-  timelineRanges: Array<{ timelineStart: number; timelineEnd: number }>;
-  followUpPrompt?: string;
-}
-
-export interface VisualSearchSession {
-  projectId: string;
-  assetId: string | null;
-  query: string;
-  confidenceBand: VisualConfidenceBand;
-  intent: VisualQueryIntent | null;
-  candidates: VisualCandidateWindow[];
-  proposal: VisualEditProposal | null;
-  followUpPrompt?: string;
-  verificationJobId?: string | null;
-  updatedAt: number;
-}
 
 export interface AIEditingSettings {
   silenceRemoval: {
