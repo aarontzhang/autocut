@@ -631,12 +631,7 @@ export default function Timeline({
               icon={<CutToolIcon />}
             />
             <TimelineActionButton
-              label="Add marker"
-              onClick={() => createMarkerAtTime(useEditorStore.getState().currentTime, { createdBy: 'human' })}
-              icon={<MarkerToolIcon />}
-            />
-            <TimelineActionButton
-              label="Add text"
+              label="Text"
               onClick={() => {
                 const time = useEditorStore.getState().currentTime;
                 useEditorStore.getState().addTextOverlayAtTime(time, 'Text', 5);
@@ -644,9 +639,14 @@ export default function Timeline({
               icon={<TextToolIcon />}
             />
             <TimelineActionButton
-              label="Add image"
+              label="Image"
               onClick={() => imageInputRef.current?.click()}
               icon={<ImageToolIcon />}
+            />
+            <TimelineActionButton
+              label="Marker"
+              onClick={() => createMarkerAtTime(useEditorStore.getState().currentTime, { createdBy: 'human' })}
+              icon={<MarkerToolIcon />}
             />
           </div>
         </div>
