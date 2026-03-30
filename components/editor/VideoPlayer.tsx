@@ -1069,7 +1069,15 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             overflow: 'hidden',
             cursor: 'pointer',
           }}
-          onClick={togglePlay}
+          onClick={() => {
+            if (selectedItem || editingCaptionId || editingTextOverlayId) {
+              setSelectedItem(null);
+              setEditingCaptionId(null);
+              setEditingTextOverlayId(null);
+              return;
+            }
+            togglePlay();
+          }}
         >
           <video
             ref={setPrimaryVideoElement}

@@ -18,7 +18,8 @@ import {
 const DEFAULT_MAX_CAPTION_CHARS_PER_LINE = 42;
 const DEFAULT_CAPTION_MAX_LINES = 2;
 const DEFAULT_CAPTION_PAUSE_BREAK_SECONDS = 0.65;
-const CAPTION_PUNCTUATION_BREAK = /[.!?]$|[,;:]$/;
+const CAPTION_SENTENCE_BREAK = /[.!?]$/;
+const CAPTION_CLAUSE_BREAK = /[,;:]$/;
 const CAPTION_SIMULTANEOUS_WORD_EPSILON = 0.0005;
 
 /**
@@ -587,7 +588,11 @@ export function buildCaptionEntriesFromWords(
       || candidateDuration > 6.2
       || candidateWouldOverflow
       || (
-        CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
+        CAPTION_SENTENCE_BREAK.test(activeWords[activeWords.length - 1].text)
+        && activeWords.length >= 2
+      )
+      || (
+        CAPTION_CLAUSE_BREAK.test(activeWords[activeWords.length - 1].text)
         && pauseSinceLast > 0.12
         && activeWords.length >= 3
       )
@@ -713,12 +718,19 @@ export function buildCaptionCues(
       : 0;
     const candidateWords = [...activeWords, word];
     const candidateDuration = candidateWords[candidateWords.length - 1].endTime - candidateWords[0].startTime;
+    const candidateWouldOverflow = activeWords.length > 0
+      && captionLinesExceedWindow(candidateWords, maxCharsPerLine, maxLines);
     const shouldFlush = activeWords.length > 0 && (
       pauseSinceLast > pauseBreakSeconds
       || candidateWords.length > 22
       || candidateDuration > 6.2
+      || candidateWouldOverflow
       || (
-        CAPTION_PUNCTUATION_BREAK.test(activeWords[activeWords.length - 1].text)
+        CAPTION_SENTENCE_BREAK.test(activeWords[activeWords.length - 1].text)
+        && activeWords.length >= 2
+      )
+      || (
+        CAPTION_CLAUSE_BREAK.test(activeWords[activeWords.length - 1].text)
         && pauseSinceLast > 0.12
         && activeWords.length >= 3
       )
