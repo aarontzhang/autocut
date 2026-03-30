@@ -173,6 +173,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
   const [hasDisplayedFrame, setHasDisplayedFrame] = useState(false);
+  const hasDisplayedFrameRef = useRef(false);
   const [leadLayer, setLeadLayer] = useState<LayerId>('primary');
 
   const primaryVideoElementRef = useRef<HTMLVideoElement | null>(null);
@@ -207,6 +208,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     },
   });
   const layerLoadTokenRef = useRef(0);
+  const missingSourceRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryMissingSourceRef = useRef<((sourceId: string) => void) | null>(null);
 
   const setSourceDuration = useEditorStore((s) => s.setSourceDuration);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
@@ -323,6 +326,10 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  useEffect(() => {
+    hasDisplayedFrameRef.current = hasDisplayedFrame;
+  }, [hasDisplayedFrame]);
 
   const getVideoElement = useCallback((layer: LayerId) => (
     layer === 'primary' ? primaryVideoElementRef.current : secondaryVideoRef.current
@@ -460,13 +467,35 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const activateMissingSourceState = useCallback((sourceId: string) => {
     playbackIntentRef.current = false;
-    clearLayer('primary');
-    clearLayer('secondary');
+
+    const currentLeadLayer = leadLayerRef.current;
+    const leadVideo = getVideoElement(currentLeadLayer);
+    const leadHasFrame = leadVideo && leadVideo.readyState >= 2 && !leadVideo.error;
+
+    // Always clear the spare layer (not visible)
+    clearLayer(getOtherLayer(currentLeadLayer));
+
+    // Only clear the lead layer if it doesn't have a valid frame — preserve
+    // the last displayed frame so the user doesn't see a blank preview
+    if (!leadHasFrame) {
+      clearLayer(currentLeadLayer);
+      setHasDisplayedFrame(false);
+      hasDisplayedFrameRef.current = false;
+    }
+
     setIsVideoReady(false);
-    setHasDisplayedFrame(false);
     setVideoLoadError(getSourceErrorMessage(sourceId));
     setPlaybackActive(false);
-  }, [clearLayer, getSourceErrorMessage, setPlaybackActive]);
+
+    // Schedule a retry to recover from transient missing sources
+    if (missingSourceRetryRef.current !== null) {
+      clearTimeout(missingSourceRetryRef.current);
+    }
+    missingSourceRetryRef.current = setTimeout(() => {
+      missingSourceRetryRef.current = null;
+      retryMissingSourceRef.current?.(sourceId);
+    }, 200);
+  }, [clearLayer, getSourceErrorMessage, getVideoElement, setPlaybackActive]);
 
   useEffect(() => {
     const validClipIds = new Set(renderTimeline.map((entry) => entry.clipId));
@@ -498,6 +527,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const ensureLayerSource = useCallback((layer: LayerId, sourceId: string, sourceUrl: string, clipId?: string | null) => {
     const video = getVideoElement(layer);
     if (!video || !sourceUrl) return false;
+
+    // If this is the lead layer, the source ID already matches, and we have a
+    // ready frame, skip the URL comparison to avoid reloading due to URL format
+    // changes (e.g., signed URL rotation for the same underlying media).
+    const isLeadLayer = layer === leadLayerRef.current;
+    const sourceIdAlreadyMatches = layerSourceIdRef.current[layer] === sourceId;
+    if (isLeadLayer && sourceIdAlreadyMatches && video.readyState >= 2 && !video.error) {
+      if (clipId !== undefined) {
+        layerClipIdRef.current[layer] = clipId;
+      }
+      return false;
+    }
+
     const changed = ensureVideoElementSource(video, sourceUrl);
     if (changed || layerSourceIdRef.current[layer] !== sourceId) {
       layerSourceIdRef.current[layer] = sourceId;
@@ -578,23 +620,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
     const currentLeadLayer = leadLayerRef.current;
     const currentLeadVideo = getVideoElement(currentLeadLayer);
-    const leadHasReadyFrame = Boolean(currentLeadVideo && currentLeadVideo.readyState >= 2 && !currentLeadVideo.error && hasDisplayedFrame);
+    const leadHasReadyFrame = Boolean(currentLeadVideo && currentLeadVideo.readyState >= 2 && !currentLeadVideo.error && hasDisplayedFrameRef.current);
     const leadMatchesPrimary = (
       layerSourceIdRef.current[currentLeadLayer] === primaryEntry.sourceId
       && layerClipIdRef.current[currentLeadLayer] === primaryEntry.clipId
     );
     if (!leadMatchesPrimary) {
-      const targetLayer = leadHasReadyFrame ? getOtherLayer(currentLeadLayer) : currentLeadLayer;
+      // If the lead has any source loaded, prepare on spare layer to avoid
+      // blanking the visible video. Only load directly on lead when it's
+      // completely empty (initial load) for fastest first-frame display.
+      const leadHasAnySource = Boolean(layerSourceIdRef.current[currentLeadLayer]);
+      const targetLayer = leadHasAnySource ? getOtherLayer(currentLeadLayer) : currentLeadLayer;
       const preparedPrimaryLayer = prepareLayerForEntry(targetLayer, primaryEntry, primarySourceTime);
       if (preparedPrimaryLayer.status === 'missing') {
         activateMissingSourceState(primaryEntry.sourceId);
         return;
       }
-      if (leadHasReadyFrame && targetLayer !== currentLeadLayer) {
+      if (targetLayer !== currentLeadLayer) {
         if (preparedPrimaryLayer.status === 'ready') {
           pauseVideo(currentLeadVideo);
           setLeadLayerSafely(targetLayer);
         }
+        // If 'loading', keep the current lead visible until spare is ready.
+        // syncAfterSourceLoad will re-trigger syncLayers when loading completes.
       }
     }
 
@@ -658,7 +706,25 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       primaryVideo.play().catch(() => {});
     }
     refreshLeadVideoState();
-  }, [activateMissingSourceState, applyClipEffects, clearLayer, clipById, ensureLayerSource, getResolvedPlayableUrl, getVideoElement, hasDisplayedFrame, maybePromotePreparedLayer, pauseVideo, prepareLayerForEntry, refreshLeadVideoState, renderTimeline, setLeadLayerSafely]);
+  }, [activateMissingSourceState, applyClipEffects, clearLayer, clipById, ensureLayerSource, getResolvedPlayableUrl, getVideoElement, maybePromotePreparedLayer, pauseVideo, prepareLayerForEntry, refreshLeadVideoState, renderTimeline, setLeadLayerSafely]);
+
+  useEffect(() => {
+    retryMissingSourceRef.current = (sourceId: string) => {
+      const url = getResolvedPlayableUrl(sourceId);
+      if (url) {
+        setVideoLoadError(null);
+        syncLayers(currentTimeRef.current, { allowPlay: playbackIntentRef.current });
+      }
+    };
+  }, [getResolvedPlayableUrl, syncLayers]);
+
+  useEffect(() => {
+    return () => {
+      if (missingSourceRetryRef.current !== null) {
+        clearTimeout(missingSourceRetryRef.current);
+      }
+    };
+  }, []);
 
   const syncAfterSourceLoad = useCallback((layer: LayerId, video: HTMLVideoElement | null) => {
     if (!video) return;
