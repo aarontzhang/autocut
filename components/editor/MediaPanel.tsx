@@ -31,6 +31,8 @@ export default function MediaPanel({
   const sourceIndexFreshBySourceId = useEditorStore((s) => s.sourceIndexFreshBySourceId);
   const sourceIndexAnalysisBySourceId = useEditorStore((s) => s.sourceIndexAnalysisBySourceId);
   const appendClipFromSource = useEditorStore((s) => s.appendClipFromSource);
+  const createImageOverlayAtTime = useEditorStore((s) => s.createImageOverlayAtTime);
+  const currentTime = useEditorStore((s) => s.currentTime);
 
   const sourceCards = useMemo(() => (
     sources.map((source) => {
@@ -85,7 +87,11 @@ export default function MediaPanel({
             draggable
             onDragStart={(event) => {
               event.dataTransfer.effectAllowed = 'copyMove';
-              event.dataTransfer.setData('application/x-autocut-source-id', source.id);
+              if (source.mediaType === 'image') {
+                event.dataTransfer.setData('application/x-autocut-image-source-id', source.id);
+              } else {
+                event.dataTransfer.setData('application/x-autocut-source-id', source.id);
+              }
               event.dataTransfer.setData('text/plain', source.fileName);
             }}
             style={{
@@ -104,16 +110,25 @@ export default function MediaPanel({
           >
             <div style={{ position: 'absolute', inset: 0, background: '#000' }}>
               {source.previewUrl ? (
-                <video
-                  src={source.previewUrl}
-                  draggable={false}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
-                  muted
-                  preload="metadata"
-                  playsInline
-                  disablePictureInPicture
-                  controls={false}
-                />
+                source.mediaType === 'image' ? (
+                  <img
+                    src={source.previewUrl}
+                    draggable={false}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
+                    alt={source.fileName}
+                  />
+                ) : (
+                  <video
+                    src={source.previewUrl}
+                    draggable={false}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
+                    muted
+                    preload="metadata"
+                    playsInline
+                    disablePictureInPicture
+                    controls={false}
+                  />
+                )
               ) : (
                 <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)' }}>
                   <span style={{ fontSize: 11, fontFamily: 'var(--font-serif)' }}>Waiting for media…</span>
@@ -133,7 +148,11 @@ export default function MediaPanel({
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
-                  appendClipFromSource(source.id);
+                  if (source.mediaType === 'image') {
+                    createImageOverlayAtTime(source.id, currentTime);
+                  } else {
+                    appendClipFromSource(source.id);
+                  }
                 }}
                 style={{
                   position: 'absolute',
@@ -200,14 +219,14 @@ export default function MediaPanel({
             fontSize: 12,
             textAlign: 'center',
           }}>
-            Import videos to build your source library.
+            Import videos or images to build your source library.
           </div>
         )}
 
         <input
           ref={inputRef}
           type="file"
-          accept="video/*"
+          accept="video/*,image/png,image/jpeg,image/gif,image/webp"
           multiple
           className="hidden"
           onChange={(event) => {

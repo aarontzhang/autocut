@@ -230,19 +230,45 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const liveCaptions = useEditorStore((s) => s.captions);
   const liveTransitions = useEditorStore((s) => s.transitions);
   const liveTextOverlays = useEditorStore((s) => s.textOverlays);
+  const liveImageOverlays = useEditorStore((s) => s.imageOverlays);
   const selectedItem = useEditorStore((s) => s.selectedItem);
   const setSelectedItem = useEditorStore((s) => s.setSelectedItem);
   const updateCaption = useEditorStore((s) => s.updateCaption);
+  const updateTextOverlay = useEditorStore((s) => s.updateTextOverlay);
+  const updateImageOverlay = useEditorStore((s) => s.updateImageOverlay);
 
   const [editingCaptionId, setEditingCaptionId] = useState<string | null>(null);
   const [isDraggingCaption, setIsDraggingCaption] = useState(false);
+  const [editingTextOverlayId, setEditingTextOverlayId] = useState<string | null>(null);
   const captionEditRef = useRef<HTMLDivElement>(null);
+  const textOverlayEditRef = useRef<HTMLDivElement>(null);
   const captionDragRef = useRef<{
     startX: number;
     startY: number;
     startPosX: number;
     startPosY: number;
     captionId: string;
+    moved: boolean;
+  } | null>(null);
+  const imageDragRef = useRef<{
+    startX: number;
+    startY: number;
+    startPosX: number;
+    startPosY: number;
+    overlayId: string;
+    moved: boolean;
+  } | null>(null);
+  const imageResizeRef = useRef<{
+    startX: number;
+    startWidth: number;
+    overlayId: string;
+  } | null>(null);
+  const textDragRef = useRef<{
+    startX: number;
+    startY: number;
+    startPosX: number;
+    startPosY: number;
+    overlayId: string;
     moved: boolean;
   } | null>(null);
 
@@ -321,6 +347,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const activeTextOverlays = useMemo(
     () => textOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime),
     [currentTime, textOverlays],
+  );
+  const imageOverlays = previewSnapshot?.imageOverlays ?? liveImageOverlays;
+  const activeImageOverlays = useMemo(
+    () => imageOverlays.filter((overlay) => currentTime >= overlay.startTime && currentTime < overlay.endTime),
+    [currentTime, imageOverlays],
   );
   const getSourceErrorMessage = useCallback((sourceId: string) => {
     const resolvedSource = sourceById.get(sourceId);
@@ -1219,7 +1250,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             </div>
           )}
 
-          {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0) && (
+          {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0 || activeImageOverlays.length > 0) && (
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
               {activeCaption && (() => {
                 const isSelected = selectedItem?.type === 'caption' && selectedItem.id === activeCaption.captionId;
@@ -1384,29 +1415,250 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
                 );
               })()}
 
-              {activeTextOverlays.map((overlay) => (
-                <div
-                  key={overlay.id ?? overlay.text}
-                  style={{
-                    position: 'absolute',
-                    left: '50%',
-                    maxWidth: '90%',
-                    color: '#fff',
-                    fontSize: getTextOverlayFontSize(overlay),
-                    fontWeight: 700,
-                    lineHeight: 1.3,
-                    textAlign: 'center',
-                    textShadow: '0 2px 8px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9)',
-                    padding: '4px 12px',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    ...getTextOverlayPreviewPositionStyle(overlay.position, videoDisplaySize.height),
-                  }}
-                >
-                  {overlay.text}
-                </div>
-              ))}
+              {activeTextOverlays.map((overlay) => {
+                const isTextSelected = selectedItem?.type === 'text' && selectedItem.id === overlay.id;
+                const isTextEditing = editingTextOverlayId === overlay.id;
+                const hasCustomPos = overlay.positionX != null && overlay.positionY != null;
+                const textPositionStyle: React.CSSProperties = hasCustomPos
+                  ? {
+                      position: 'absolute',
+                      left: `${overlay.positionX}%`,
+                      top: `${overlay.positionY}%`,
+                      transform: 'translate(-50%, -50%)',
+                      maxWidth: '90%',
+                    }
+                  : {
+                      position: 'absolute',
+                      left: '50%',
+                      maxWidth: '90%',
+                      ...getTextOverlayPreviewPositionStyle(overlay.position, videoDisplaySize.height, overlay.positionX, overlay.positionY),
+                    };
+                return (
+                  <div
+                    key={overlay.id ?? overlay.text}
+                    style={{
+                      ...textPositionStyle,
+                      color: '#fff',
+                      fontSize: getTextOverlayFontSize(overlay),
+                      fontWeight: 700,
+                      lineHeight: 1.3,
+                      textAlign: 'center',
+                      textShadow: '0 2px 8px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9)',
+                      padding: '4px 12px',
+                      whiteSpace: isTextEditing ? 'pre-wrap' : 'nowrap',
+                      overflow: isTextEditing ? 'visible' : 'hidden',
+                      textOverflow: isTextEditing ? 'unset' : 'ellipsis',
+                      pointerEvents: 'auto',
+                      cursor: isTextEditing ? 'text' : 'grab',
+                      outline: isTextSelected ? '2px solid rgba(33,212,255,0.7)' : 'none',
+                      outlineOffset: 4,
+                      borderRadius: 4,
+                      zIndex: isTextSelected ? 10 : 1,
+                      userSelect: isTextEditing ? 'text' : 'none',
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!isTextEditing) setSelectedItem({ type: 'text', id: overlay.id! });
+                    }}
+                    onPointerDown={(e) => {
+                      if (isTextEditing || !overlay.id) return;
+                      e.stopPropagation();
+                      const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                      const defaultPosX = overlay.positionX ?? 50;
+                      const defaultPosY = overlay.positionY ?? (
+                        overlay.position === 'top' ? 10 : overlay.position === 'center' ? 50 : 85
+                      );
+                      textDragRef.current = {
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        startPosX: defaultPosX,
+                        startPosY: defaultPosY,
+                        overlayId: overlay.id,
+                        moved: false,
+                      };
+                      const onMove = (ev: globalThis.PointerEvent) => {
+                        if (!textDragRef.current) return;
+                        const dx = ev.clientX - textDragRef.current.startX;
+                        const dy = ev.clientY - textDragRef.current.startY;
+                        if (!textDragRef.current.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+                        textDragRef.current.moved = true;
+                        const pctX = textDragRef.current.startPosX + (dx / rect.width) * 100;
+                        const pctY = textDragRef.current.startPosY + (dy / rect.height) * 100;
+                        updateTextOverlay(textDragRef.current.overlayId, {
+                          positionX: Math.max(5, Math.min(95, pctX)),
+                          positionY: Math.max(5, Math.min(95, pctY)),
+                        });
+                      };
+                      const onUp = () => {
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onUp);
+                        if (!textDragRef.current?.moved && overlay.id) {
+                          setSelectedItem({ type: 'text', id: overlay.id });
+                        }
+                        textDragRef.current = null;
+                      };
+                      window.addEventListener('pointermove', onMove);
+                      window.addEventListener('pointerup', onUp);
+                    }}
+                    onDoubleClick={() => {
+                      if (!overlay.id) return;
+                      setSelectedItem({ type: 'text', id: overlay.id });
+                      setEditingTextOverlayId(overlay.id);
+                      requestAnimationFrame(() => {
+                        if (textOverlayEditRef.current) {
+                          textOverlayEditRef.current.focus();
+                          const sel = window.getSelection();
+                          if (sel) {
+                            sel.selectAllChildren(textOverlayEditRef.current);
+                            sel.collapseToEnd();
+                          }
+                        }
+                      });
+                    }}
+                  >
+                    <div
+                      ref={isTextEditing ? textOverlayEditRef : undefined}
+                      contentEditable={isTextEditing}
+                      suppressContentEditableWarning
+                      onBlur={() => {
+                        if (!isTextEditing || !overlay.id) return;
+                        const newText = textOverlayEditRef.current?.innerText?.trim();
+                        if (newText && newText !== overlay.text) {
+                          updateTextOverlay(overlay.id, { text: newText });
+                        }
+                        setEditingTextOverlayId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (!isTextEditing) return;
+                        e.stopPropagation();
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          (e.target as HTMLElement).blur();
+                        }
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setEditingTextOverlayId(null);
+                        }
+                      }}
+                      style={{ caretColor: isTextEditing ? '#fff' : 'transparent' }}
+                    >
+                      {overlay.text}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {activeImageOverlays.map((overlay) => {
+                const runtime = sourceRuntimeById[overlay.sourceId];
+                const src = runtime?.objectUrl || runtime?.playerUrl || '';
+                if (!src) return null;
+                const isImgSelected = selectedItem?.type === 'image' && selectedItem.id === overlay.id;
+                return (
+                  <div
+                    key={overlay.id}
+                    style={{
+                      position: 'absolute',
+                      left: `${overlay.positionX}%`,
+                      top: `${overlay.positionY}%`,
+                      transform: 'translate(-50%, -50%)',
+                      width: `${overlay.widthPercent}%`,
+                      opacity: overlay.opacity,
+                      pointerEvents: 'auto',
+                      cursor: 'grab',
+                      outline: isImgSelected ? '2px solid rgba(33,212,255,0.7)' : 'none',
+                      outlineOffset: 2,
+                      zIndex: isImgSelected ? 10 : 1,
+                      userSelect: 'none',
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedItem({ type: 'image', id: overlay.id });
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                      imageDragRef.current = {
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        startPosX: overlay.positionX,
+                        startPosY: overlay.positionY,
+                        overlayId: overlay.id,
+                        moved: false,
+                      };
+                      const onMove = (ev: globalThis.PointerEvent) => {
+                        if (!imageDragRef.current) return;
+                        const dx = ev.clientX - imageDragRef.current.startX;
+                        const dy = ev.clientY - imageDragRef.current.startY;
+                        if (!imageDragRef.current.moved && Math.abs(dx) + Math.abs(dy) > 3) {
+                          imageDragRef.current.moved = true;
+                        }
+                        if (!imageDragRef.current.moved) return;
+                        const pctX = imageDragRef.current.startPosX + (dx / rect.width) * 100;
+                        const pctY = imageDragRef.current.startPosY + (dy / rect.height) * 100;
+                        updateImageOverlay(imageDragRef.current.overlayId, {
+                          positionX: Math.max(5, Math.min(95, pctX)),
+                          positionY: Math.max(5, Math.min(95, pctY)),
+                        });
+                      };
+                      const onUp = () => {
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onUp);
+                        if (!imageDragRef.current?.moved) {
+                          setSelectedItem({ type: 'image', id: overlay.id });
+                        }
+                        imageDragRef.current = null;
+                      };
+                      window.addEventListener('pointermove', onMove);
+                      window.addEventListener('pointerup', onUp);
+                    }}
+                  >
+                    <img
+                      src={src}
+                      draggable={false}
+                      style={{ width: '100%', height: 'auto', display: 'block', borderRadius: 4 }}
+                      alt=""
+                    />
+                    {isImgSelected && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          bottom: -4,
+                          right: -4,
+                          width: 12,
+                          height: 12,
+                          background: 'rgba(33,212,255,0.9)',
+                          borderRadius: 2,
+                          cursor: 'nwse-resize',
+                        }}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          const r = (e.currentTarget.parentElement!.parentElement as HTMLElement).getBoundingClientRect();
+                          imageResizeRef.current = {
+                            startX: e.clientX,
+                            startWidth: overlay.widthPercent,
+                            overlayId: overlay.id,
+                          };
+                          const onMove = (ev: globalThis.PointerEvent) => {
+                            if (!imageResizeRef.current) return;
+                            const dx = ev.clientX - imageResizeRef.current.startX;
+                            const pctDelta = (dx / r.width) * 100;
+                            updateImageOverlay(imageResizeRef.current.overlayId, {
+                              widthPercent: Math.max(5, Math.min(100, imageResizeRef.current.startWidth + pctDelta)),
+                            });
+                          };
+                          const onUp = () => {
+                            imageResizeRef.current = null;
+                            window.removeEventListener('pointermove', onMove);
+                            window.removeEventListener('pointerup', onUp);
+                          };
+                          window.addEventListener('pointermove', onMove);
+                          window.addEventListener('pointerup', onUp);
+                        }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

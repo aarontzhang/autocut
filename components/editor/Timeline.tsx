@@ -128,6 +128,9 @@ export default function Timeline({
   const createMarkerAtTime = useEditorStore(s => s.createMarkerAtTime);
   const requestSeek = useEditorStore(s => s.requestSeek);
   const insertClipFromSource = useEditorStore(s => s.insertClipFromSource);
+  const liveImageOverlays = useEditorStore(s => s.imageOverlays);
+  const sources = useEditorStore(s => s.sources);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const reviewPlaybackUsesBase = Boolean(
     activeReviewSession?.items.some((item) => item.action.type === 'delete_range'),
   );
@@ -140,12 +143,14 @@ export default function Timeline({
       transitions: liveTransitions,
       markers: liveMarkers,
       textOverlays: liveTextOverlays,
+      imageOverlays: liveImageOverlays,
     });
   const clips = timelineSnapshot?.clips ?? liveClips;
   const captions = timelineSnapshot?.captions ?? liveCaptions;
   const transitions = timelineSnapshot?.transitions ?? liveTransitions;
   const markers = timelineSnapshot?.markers ?? liveMarkers;
   const textOverlays = timelineSnapshot?.textOverlays ?? liveTextOverlays;
+  const imageOverlays = timelineSnapshot?.imageOverlays ?? liveImageOverlays;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -237,6 +242,7 @@ export default function Timeline({
   const hasTransitions = transitions.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'transition');
   const cutReviewOverlays = reviewOverlays.filter((overlay) => overlay.kind === 'cut');
   const hasTextOverlays = textOverlays.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'text');
+  const hasImageOverlays = imageOverlays.length > 0 || reviewOverlays.some((overlay) => overlay.kind === 'image');
 
   const waveform = useMemo(() => {
     if (videoDuration <= 0) return [];
@@ -359,6 +365,7 @@ export default function Timeline({
 
   const canHandleTimelineDrop = useCallback((dataTransfer: DataTransfer) => (
     Array.from(dataTransfer.types).includes('application/x-autocut-source-id')
+    || Array.from(dataTransfer.types).includes('application/x-autocut-image-source-id')
     || Array.from(dataTransfer.types).includes('Files')
     || dataTransfer.files.length > 0
   ), []);
@@ -369,6 +376,11 @@ export default function Timeline({
     event.preventDefault();
     event.stopPropagation();
     const timelineTime = pxToTimelineTime(event.clientX, container);
+    const imageSourceId = event.dataTransfer.getData('application/x-autocut-image-source-id');
+    if (imageSourceId) {
+      useEditorStore.getState().createImageOverlayAtTime(imageSourceId, timelineTime);
+      return;
+    }
     const sourceId = event.dataTransfer.getData('application/x-autocut-source-id');
     if (sourceId) {
       insertClipFromSource(sourceId, timelineTime);
@@ -562,6 +574,19 @@ export default function Timeline({
               onClick={() => createMarkerAtTime(useEditorStore.getState().currentTime, { createdBy: 'human' })}
               icon={<MarkerToolIcon />}
             />
+            <TimelineActionButton
+              label="Add text"
+              onClick={() => {
+                const time = useEditorStore.getState().currentTime;
+                useEditorStore.getState().addTextOverlayAtTime(time, 'Text', 5);
+              }}
+              icon={<TextToolIcon />}
+            />
+            <TimelineActionButton
+              label="Add image"
+              onClick={() => imageInputRef.current?.click()}
+              icon={<ImageToolIcon />}
+            />
           </div>
         </div>
 
@@ -620,6 +645,7 @@ export default function Timeline({
           <TrackHeader icon={<AudioIcon />} height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           {hasCaptions && <EffectHeader icon={<CaptionIcon />} color="var(--caption-clip)" />}
           {hasTextOverlays && <EffectHeader icon={<TextOverlayIcon />} color="var(--text-clip)" />}
+          {hasImageOverlays && <EffectHeader icon={<ImageTrackIcon />} color="rgba(34,197,94,0.8)" />}
           {hasTransitions && <EffectHeader icon={<TransitionIcon />} color="rgba(255,255,255,0.5)" />}
         </div>
 
@@ -1116,6 +1142,77 @@ export default function Timeline({
             </EffectTrackRow>
           )}
 
+          {hasImageOverlays && (
+            <EffectTrackRow height={EFFECT_TRACK_H}>
+              {imageOverlays.map((overlay) => {
+                const isSelected = selectedItem?.type === 'image' && selectedItem.id === overlay.id;
+                const source = sources.find((s) => s.id === overlay.sourceId);
+                return (
+                  <button
+                    key={overlay.id}
+                    type="button"
+                    title={source?.fileName ?? 'Image overlay'}
+                    style={{
+                      position: 'absolute',
+                      left: px(overlay.startTime),
+                      width: Math.max(4, px(overlay.endTime) - px(overlay.startTime)),
+                      top: 3,
+                      height: EFFECT_TRACK_H - 6,
+                      borderRadius: 3,
+                      overflow: 'hidden',
+                      border: isSelected ? '1.5px solid rgba(255,255,255,0.7)' : '1px solid rgba(255,255,255,0.12)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '0 5px',
+                      cursor: 'pointer',
+                      boxSizing: 'border-box',
+                      background: 'rgba(34,197,94,0.6)',
+                    }}
+                    onClick={e => {
+                      e.stopPropagation();
+                      setSelectedItem({ type: 'image', id: overlay.id });
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: 'rgba(255,255,255,0.9)',
+                        fontWeight: 500,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-serif)',
+                      }}
+                    >
+                      {source?.fileName ?? 'Image'}
+                    </span>
+                  </button>
+                );
+              })}
+              {reviewOverlays
+                .filter((overlay) => overlay.kind === 'image' && overlay.startTime !== undefined && overlay.endTime !== undefined)
+                .map((overlay) => {
+                  const isFocused = activeReviewFocusItemId === overlay.itemId;
+                  return (
+                    <div
+                      key={overlay.id}
+                      style={{
+                        position: 'absolute',
+                        left: px(overlay.startTime!),
+                        width: Math.max(4, px(overlay.endTime!) - px(overlay.startTime!)),
+                        top: 3,
+                        height: EFFECT_TRACK_H - 6,
+                        borderRadius: 3,
+                        border: isFocused ? '1.5px solid rgba(255,255,255,0.92)' : '1px dashed rgba(255,255,255,0.5)',
+                        background: isFocused ? 'rgba(34,197,94,0.52)' : 'rgba(34,197,94,0.24)',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  );
+                })}
+            </EffectTrackRow>
+          )}
+
           {hasTransitions && (
             <EffectTrackRow height={EFFECT_TRACK_H}>
               {transitions.map((transition) => {
@@ -1203,6 +1300,33 @@ export default function Timeline({
           />
         </div>
       </div>
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        className="hidden"
+        style={{ display: 'none' }}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          event.target.value = '';
+          const url = URL.createObjectURL(file);
+          const store = useEditorStore.getState();
+          const addedSources = store.importSources([{
+            fileName: file.name,
+            duration: 5,
+            isPrimary: false,
+            status: 'ready',
+            runtime: { file, objectUrl: url, playerUrl: url, processingUrl: url },
+          }], { shouldAppendClips: false });
+          if (addedSources.length > 0) {
+            const newSource = addedSources[0];
+            // Mark as image source
+            store.updateSource(newSource.id, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+            store.createImageOverlayAtTime(newSource.id, store.currentTime);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -1485,6 +1609,34 @@ function MarkerToolIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 21l-7-4V5a2 2 0 012-2h10a2 2 0 012 2v12z" />
+    </svg>
+  );
+}
+
+function TextToolIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M6 4h12M12 4v16" />
+    </svg>
+  );
+}
+
+function ImageToolIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8" cy="10" r="2" />
+      <path d="M21 15l-5-5-8 8" />
+    </svg>
+  );
+}
+
+function ImageTrackIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8" cy="10" r="2" />
+      <path d="M21 15l-5-5-8 8" />
     </svg>
   );
 }

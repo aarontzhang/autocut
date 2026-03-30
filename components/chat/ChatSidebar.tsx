@@ -2862,6 +2862,10 @@ export default function ChatSidebar() {
             note: marker.note ?? null,
           })),
           textOverlayCount: freshState.textOverlays.length,
+          imageOverlayCount: freshState.imageOverlays.length,
+          imageSources: freshState.sources
+            .filter((s) => s.mediaType === 'image')
+            .map((s) => ({ id: s.id, fileName: s.fileName })),
           transcript: currentTranscript,
           transcriptAvailability,
           silenceCandidates,
