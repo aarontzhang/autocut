@@ -424,6 +424,8 @@ type ExportCaptionWindow = {
   startTime: number;
   endTime: number;
   lines: string[];
+  positionX?: number;
+  positionY?: number;
 };
 
 type ExportTextOverlay = {
@@ -446,6 +448,8 @@ function buildExportCaptionWindows(params: {
       startTime: window.startTime,
       endTime: window.endTime,
       lines: window.lines,
+      positionX: window.positionX,
+      positionY: window.positionY,
     }))
     .filter((window) => window.endTime > window.startTime && window.lines.length > 0)
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
@@ -477,10 +481,17 @@ async function writeCaptionTextFiles(
     const window = captionWindows[windowIndex];
     const fileName = `caption_${windowIndex}.txt`;
     await ffmpeg.writeFile(fileName, encoder.encode(window.lines.join('\n')));
+    const hasCustomPos = window.positionX != null && window.positionY != null;
+    const xExpr = hasCustomPos
+      ? `w*${(window.positionX! / 100).toFixed(4)}-text_w/2`
+      : '(w-text_w)/2';
+    const yExpr = hasCustomPos
+      ? `h*${(window.positionY! / 100).toFixed(4)}-text_h/2`
+      : 'h-(h*0.14)-text_h';
     drawTextFilters.push(
       `drawtext=textfile=${fileName}:fontfile=${fontFileName}:reload=0:fontcolor=white:fontsize=h*0.036:line_spacing=10:` +
       `borderw=3:bordercolor=black:shadowcolor=black@0.45:shadowx=0:shadowy=3:` +
-      `x=(w-text_w)/2:y=h-(h*0.14)-text_h:` +
+      `x=${xExpr}:y=${yExpr}:` +
       `enable='gte(t,${window.startTime.toFixed(3)})*lt(t,${window.endTime.toFixed(3)})'`,
     );
   }

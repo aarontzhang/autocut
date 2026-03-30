@@ -39,6 +39,10 @@ export interface CaptionEntry {
   text: string;
   words?: CaptionWordTiming[];
   renderStyle?: CaptionRenderStyle;
+  // Custom position as percentage of video frame (0-100).
+  // When absent, defaults to bottom-center (positionX=50, positionY≈85).
+  positionX?: number;
+  positionY?: number;
 }
 
 export interface SourceRangeRef {

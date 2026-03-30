@@ -195,6 +195,8 @@ function normalizeCaptionEntry(
     renderStyle: entry.renderStyle === 'rolling_word' || entry.renderStyle === 'static'
       ? entry.renderStyle
       : undefined,
+    positionX: Number.isFinite(entry.positionX) ? entry.positionX : undefined,
+    positionY: Number.isFinite(entry.positionY) ? entry.positionY : undefined,
   };
 }
 
@@ -739,7 +741,7 @@ interface EditorState {
   setActiveReviewSession: (session: EditReviewGroup | null) => void;
   setActiveReviewFocusItemId: (itemId: string | null) => void;
   deleteSelectedItem: () => void;
-  updateCaption: (id: string, patch: { startTime?: number; endTime?: number }) => void;
+  updateCaption: (id: string, patch: { startTime?: number; endTime?: number; text?: string; positionX?: number; positionY?: number; words?: CaptionEntry['words'] }) => void;
   updateTextOverlay: (id: string, patch: { startTime?: number; endTime?: number }) => void;
   updateTransition: (id: string, patch: Partial<TransitionEntry>) => void;
 }

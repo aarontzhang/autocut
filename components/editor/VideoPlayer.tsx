@@ -1,6 +1,6 @@
 'use client';
 
-import { forwardRef, useImperativeHandle, useCallback, useRef, useEffect, useMemo, useState } from 'react';
+import { forwardRef, useImperativeHandle, useCallback, useRef, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import {
   buildRenderTimeline,
@@ -230,6 +230,21 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   const liveCaptions = useEditorStore((s) => s.captions);
   const liveTransitions = useEditorStore((s) => s.transitions);
   const liveTextOverlays = useEditorStore((s) => s.textOverlays);
+  const selectedItem = useEditorStore((s) => s.selectedItem);
+  const setSelectedItem = useEditorStore((s) => s.setSelectedItem);
+  const updateCaption = useEditorStore((s) => s.updateCaption);
+
+  const [editingCaptionId, setEditingCaptionId] = useState<string | null>(null);
+  const [isDraggingCaption, setIsDraggingCaption] = useState(false);
+  const captionEditRef = useRef<HTMLDivElement>(null);
+  const captionDragRef = useRef<{
+    startX: number;
+    startY: number;
+    startPosX: number;
+    startPosY: number;
+    captionId: string;
+    moved: boolean;
+  } | null>(null);
 
   const reviewPlaybackUsesBase = Boolean(
     activeReviewSession?.items.some((item) => item.action.type === 'delete_range'),
@@ -1206,39 +1221,158 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
           {videoDisplaySize.width > 0 && (activeCaption || activeTextOverlays.length > 0) && (
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-              {activeCaption && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: Math.max(18, videoDisplaySize.height * 0.065),
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    width: videoDisplaySize.width,
-                    padding: `0 ${Math.max(20, videoDisplaySize.width * 0.07)}px`,
-                    boxSizing: 'border-box',
-                  }}
-                >
+              {activeCaption && (() => {
+                const isSelected = selectedItem?.type === 'caption' && selectedItem.id === activeCaption.captionId;
+                const isEditing = editingCaptionId === activeCaption.captionId;
+                const hasCustomPosition = activeCaption.positionX != null && activeCaption.positionY != null;
+
+                const positionStyle: React.CSSProperties = hasCustomPosition
+                  ? {
+                      position: 'absolute',
+                      left: `${activeCaption.positionX}%`,
+                      top: `${activeCaption.positionY}%`,
+                      transform: 'translate(-50%, -50%)',
+                      maxWidth: `${videoDisplaySize.width * 0.86}px`,
+                      boxSizing: 'border-box',
+                    }
+                  : {
+                      position: 'absolute',
+                      bottom: Math.max(18, videoDisplaySize.height * 0.065),
+                      left: '50%',
+                      transform: 'translateX(-50%)',
+                      width: videoDisplaySize.width,
+                      padding: `0 ${Math.max(20, videoDisplaySize.width * 0.07)}px`,
+                      boxSizing: 'border-box',
+                    };
+
+                const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+                  if (isEditing || !activeCaption.captionId) return;
+                  e.stopPropagation();
+                  const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                  captionDragRef.current = {
+                    startX: e.clientX,
+                    startY: e.clientY,
+                    startPosX: activeCaption.positionX ?? 50,
+                    startPosY: hasCustomPosition
+                      ? activeCaption.positionY!
+                      : ((1 - 0.065) * 100),
+                    captionId: activeCaption.captionId,
+                    moved: false,
+                  };
+
+                  const handlePointerMove = (ev: globalThis.PointerEvent) => {
+                    if (!captionDragRef.current) return;
+                    const dx = ev.clientX - captionDragRef.current.startX;
+                    const dy = ev.clientY - captionDragRef.current.startY;
+                    if (!captionDragRef.current.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+                    captionDragRef.current.moved = true;
+                    setIsDraggingCaption(true);
+                    const pctX = captionDragRef.current.startPosX + (dx / rect.width) * 100;
+                    const pctY = captionDragRef.current.startPosY + (dy / rect.height) * 100;
+                    const clampedX = Math.max(5, Math.min(95, pctX));
+                    const clampedY = Math.max(5, Math.min(95, pctY));
+                    updateCaption(captionDragRef.current.captionId, {
+                      positionX: clampedX,
+                      positionY: clampedY,
+                    });
+                  };
+
+                  const handlePointerUp = () => {
+                    window.removeEventListener('pointermove', handlePointerMove);
+                    window.removeEventListener('pointerup', handlePointerUp);
+                    const wasDrag = captionDragRef.current?.moved;
+                    captionDragRef.current = null;
+                    setIsDraggingCaption(false);
+                    if (!wasDrag && activeCaption.captionId) {
+                      setSelectedItem({ type: 'caption', id: activeCaption.captionId });
+                    }
+                  };
+
+                  window.addEventListener('pointermove', handlePointerMove);
+                  window.addEventListener('pointerup', handlePointerUp);
+                };
+
+                const handleDoubleClick = () => {
+                  if (!activeCaption.captionId) return;
+                  setSelectedItem({ type: 'caption', id: activeCaption.captionId });
+                  setEditingCaptionId(activeCaption.captionId);
+                  requestAnimationFrame(() => {
+                    if (captionEditRef.current) {
+                      captionEditRef.current.focus();
+                      const sel = window.getSelection();
+                      if (sel) {
+                        sel.selectAllChildren(captionEditRef.current);
+                        sel.collapseToEnd();
+                      }
+                    }
+                  });
+                };
+
+                const handleBlur = () => {
+                  if (!isEditing || !activeCaption.captionId) return;
+                  const newText = captionEditRef.current?.innerText?.trim();
+                  if (newText && newText !== activeCaption.text) {
+                    updateCaption(activeCaption.captionId, { text: newText, words: undefined });
+                  }
+                  setEditingCaptionId(null);
+                };
+
+                const handleKeyDown = (e: React.KeyboardEvent) => {
+                  if (!isEditing) return;
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    (e.target as HTMLElement).blur();
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    if (captionEditRef.current) {
+                      captionEditRef.current.innerText = activeCaption.text;
+                    }
+                    setEditingCaptionId(null);
+                  }
+                };
+
+                return (
                   <div
                     style={{
-                      width: '100%',
-                      color: '#fff',
-                      fontSize: captionFontSize,
-                      fontWeight: 900,
-                      lineHeight: 1.12,
-                      textAlign: 'center',
-                      textShadow: '0 2px 8px rgba(0,0,0,0.45)',
-                      WebkitTextStroke: `${captionStrokeWidth}px #000`,
-                      paintOrder: 'stroke fill',
-                      whiteSpace: 'pre-wrap',
-                      overflowWrap: 'break-word',
-                      wordBreak: 'break-word',
-                      boxSizing: 'border-box',
+                      ...positionStyle,
+                      pointerEvents: 'auto',
+                      cursor: isEditing ? 'text' : isDraggingCaption ? 'grabbing' : 'grab',
                     }}
+                    onPointerDown={handlePointerDown}
+                    onDoubleClick={handleDoubleClick}
                   >
-                    {activeCaption.text}
+                    <div
+                      ref={isEditing ? captionEditRef : undefined}
+                      contentEditable={isEditing}
+                      suppressContentEditableWarning
+                      onBlur={handleBlur}
+                      onKeyDown={handleKeyDown}
+                      style={{
+                        width: '100%',
+                        color: '#fff',
+                        fontSize: captionFontSize,
+                        fontWeight: 900,
+                        lineHeight: 1.12,
+                        textAlign: 'center',
+                        textShadow: '0 2px 8px rgba(0,0,0,0.45)',
+                        WebkitTextStroke: `${captionStrokeWidth}px #000`,
+                        paintOrder: 'stroke fill',
+                        whiteSpace: 'pre-wrap',
+                        overflowWrap: 'break-word',
+                        wordBreak: 'break-word',
+                        boxSizing: 'border-box',
+                        outline: isSelected ? '2px solid rgba(33,212,255,0.7)' : 'none',
+                        outlineOffset: 4,
+                        borderRadius: 4,
+                        caretColor: isEditing ? '#fff' : 'transparent',
+                      }}
+                    >
+                      {activeCaption.text}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {activeTextOverlays.map((overlay) => (
                 <div

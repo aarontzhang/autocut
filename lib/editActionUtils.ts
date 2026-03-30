@@ -107,10 +107,22 @@ function buildResolvedCaptionAction(
   if (action.type !== 'add_captions') return action;
 
   if (Array.isArray(action.captions) && action.captions.length > 0) {
-    return {
-      ...action,
-      captions: action.captions.map((caption) => withCaptionStyle(caption, action)),
-    };
+    // Re-segment oversized caption entries that have word-level data
+    const resegmented: CaptionEntry[] = [];
+    for (const caption of action.captions) {
+      const hasWords = Array.isArray(caption.words) && caption.words.length > 0;
+      const isOversized = hasWords && (
+        caption.words!.length > 22
+        || (caption.endTime - caption.startTime) > 6.2
+      );
+      if (isOversized) {
+        const segments = buildCaptionEntriesFromWords(caption.words!);
+        resegmented.push(...segments.map((seg) => withCaptionStyle(seg, action)));
+      } else {
+        resegmented.push(withCaptionStyle(caption, action));
+      }
+    }
+    return { ...action, captions: resegmented };
   }
 
   if (!action.transcriptRange || !sourceTranscriptCaptions || sourceTranscriptCaptions.length === 0) {
@@ -838,6 +850,22 @@ export function collapseReviewItemsToAction(group: EditReviewGroup): EditAction 
   }
 
   return checkedItems[0]?.action ?? null;
+}
+
+export function updateReviewItemAction(
+  item: EditReviewItem,
+  actionPatch: Partial<EditAction>,
+): EditReviewItem {
+  const nextAction = { ...item.action, ...actionPatch };
+  const label = getReviewItemLabel(nextAction, item.index);
+  return {
+    ...item,
+    action: nextAction,
+    label: label.label,
+    summary: label.summary,
+    anchorTime: getReviewItemAnchorTime(nextAction),
+    overlay: getReviewItemDescriptor(item.id, nextAction),
+  };
 }
 
 export function getReviewOverlayDescriptors(group: EditReviewGroup): ReviewOverlayDescriptor[] {

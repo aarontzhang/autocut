@@ -13,13 +13,14 @@ import {
   SourceIndexAnalysisStateMap,
   SourceIndexTaskState,
 } from '@/lib/types';
-import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, projectCaptionWordsToTimeline } from '@/lib/timelineUtils';
+import { buildTimelineSilenceCandidates, formatTime, formatTimePrecise, parseTimePrecise, getSourceSegmentsForTimelineRange, buildTranscriptContext, getTimelineDuration, sourceRangesForAction, projectCaptionWordsToTimeline } from '@/lib/timelineUtils';
 import {
   buildReviewGroupWithUpdatedItems,
   buildReviewPreviewSnapshot,
   collapseReviewItemsToAction,
   createReviewGroup,
   EditSnapshot,
+  updateReviewItemAction,
 } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
@@ -1145,6 +1146,265 @@ function ReviewCheckboxButton({
   );
 }
 
+// ─── Inline edit components for review items ─────────────────────────────────
+
+const reviewInputStyle: React.CSSProperties = {
+  fontSize: 11,
+  fontFamily: 'var(--font-serif)',
+  color: 'var(--fg-primary)',
+  background: 'rgba(255,255,255,0.05)',
+  border: '1px solid rgba(255,255,255,0.1)',
+  borderRadius: 4,
+  padding: '3px 6px',
+  outline: 'none',
+  width: '100%',
+};
+
+function ReviewItemTimeInput({
+  value,
+  onChange,
+  label,
+}: {
+  value: number;
+  onChange: (seconds: number) => void;
+  label: string;
+}) {
+  const [draft, setDraft] = useState(formatTimePrecise(value));
+  useEffect(() => { setDraft(formatTimePrecise(value)); }, [value]);
+
+  const commit = () => {
+    const parsed = parseTimePrecise(draft);
+    if (parsed !== null && parsed !== value) onChange(parsed);
+    else setDraft(formatTimePrecise(value));
+  };
+
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+      <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</span>
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+        style={reviewInputStyle}
+      />
+    </label>
+  );
+}
+
+function ReviewItemTextInput({
+  value,
+  onChange,
+  label,
+}: {
+  value: string;
+  onChange: (text: string) => void;
+  label: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== value) onChange(trimmed);
+    else setDraft(value);
+  };
+
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 2, width: '100%' }}>
+      <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</span>
+      <textarea
+        rows={2}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); } }}
+        style={{ ...reviewInputStyle, resize: 'vertical', lineHeight: 1.45 }}
+      />
+    </label>
+  );
+}
+
+function ReviewItemNumberInput({
+  value,
+  onChange,
+  label,
+  min,
+  max,
+  step,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  label: string;
+  min?: number;
+  max?: number;
+  step?: number;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => { setDraft(String(value)); }, [value]);
+
+  const commit = () => {
+    const parsed = parseFloat(draft);
+    if (Number.isFinite(parsed)) {
+      const clamped = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, parsed));
+      if (clamped !== value) onChange(clamped);
+      else setDraft(String(value));
+    } else {
+      setDraft(String(value));
+    }
+  };
+
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+      <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+        style={reviewInputStyle}
+      />
+    </label>
+  );
+}
+
+function ReviewItemPositionSelect({
+  value,
+  onChange,
+}: {
+  value: 'top' | 'center' | 'bottom';
+  onChange: (position: 'top' | 'center' | 'bottom') => void;
+}) {
+  const options: Array<'top' | 'center' | 'bottom'> = ['top', 'center', 'bottom'];
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 2, width: '100%' }}>
+      <span style={{ fontSize: 9, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Position</span>
+      <div style={{ display: 'flex', gap: 0, borderRadius: 4, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
+        {options.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onChange(opt)}
+            style={{
+              flex: 1,
+              padding: '3px 0',
+              fontSize: 10,
+              fontFamily: 'var(--font-serif)',
+              border: 'none',
+              cursor: 'pointer',
+              background: opt === value ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.03)',
+              color: opt === value ? 'var(--fg-primary)' : 'var(--fg-muted)',
+              fontWeight: opt === value ? 600 : 400,
+              transition: 'all 0.12s',
+              borderRight: opt !== 'bottom' ? '1px solid rgba(255,255,255,0.06)' : 'none',
+            }}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+    </label>
+  );
+}
+
+function ReviewItemEditForm({
+  item,
+  onEdit,
+}: {
+  item: { action: EditAction };
+  onEdit: (patch: Partial<EditAction>) => void;
+}) {
+  const { action } = item;
+  const formStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 12px 10px', marginLeft: 34 };
+
+  if (action.type === 'delete_range') {
+    return (
+      <div style={formStyle}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <ReviewItemTimeInput label="Start" value={action.deleteStartTime ?? 0} onChange={(v) => onEdit({ deleteStartTime: v })} />
+          <ReviewItemTimeInput label="End" value={action.deleteEndTime ?? 0} onChange={(v) => onEdit({ deleteEndTime: v })} />
+        </div>
+      </div>
+    );
+  }
+
+  if (action.type === 'add_captions') {
+    return null;
+  }
+
+  if (action.type === 'add_marker') {
+    const marker = action.marker;
+    if (!marker) return null;
+    return (
+      <div style={formStyle}>
+        <ReviewItemTimeInput label="Time" value={marker.timelineTime ?? 0} onChange={(v) => onEdit({ marker: { ...marker, timelineTime: v } })} />
+        <ReviewItemTextInput label="Label" value={marker.label ?? ''} onChange={(label) => onEdit({ marker: { ...marker, label } })} />
+      </div>
+    );
+  }
+
+  if (action.type === 'add_text_overlay') {
+    const overlay = action.textOverlays?.[0];
+    if (!overlay) return null;
+    return (
+      <div style={formStyle}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <ReviewItemTimeInput label="Start" value={overlay.startTime} onChange={(v) => onEdit({ textOverlays: [{ ...overlay, startTime: v }] })} />
+          <ReviewItemTimeInput label="End" value={overlay.endTime} onChange={(v) => onEdit({ textOverlays: [{ ...overlay, endTime: v }] })} />
+        </div>
+        <ReviewItemTextInput label="Text" value={overlay.text} onChange={(text) => onEdit({ textOverlays: [{ ...overlay, text }] })} />
+        <ReviewItemPositionSelect value={overlay.position} onChange={(position) => onEdit({ textOverlays: [{ ...overlay, position }] })} />
+      </div>
+    );
+  }
+
+  if (action.type === 'add_transition') {
+    const transition = action.transitions?.[0];
+    if (!transition) return null;
+    return (
+      <div style={formStyle}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <ReviewItemTimeInput label="Time" value={transition.atTime} onChange={(v) => onEdit({ transitions: [{ ...transition, atTime: v }] })} />
+          <ReviewItemNumberInput label="Duration (s)" value={transition.duration} onChange={(v) => onEdit({ transitions: [{ ...transition, duration: v }] })} min={0.1} max={5} step={0.1} />
+        </div>
+      </div>
+    );
+  }
+
+  if (action.type === 'split_clip') {
+    return (
+      <div style={formStyle}>
+        <ReviewItemTimeInput label="Split at" value={action.splitTime ?? 0} onChange={(v) => onEdit({ splitTime: v })} />
+      </div>
+    );
+  }
+
+  if (action.type === 'set_clip_speed') {
+    return (
+      <div style={formStyle}>
+        <ReviewItemNumberInput label="Speed" value={action.speed ?? 1} onChange={(v) => onEdit({ speed: v })} min={0.1} max={16} step={0.1} />
+      </div>
+    );
+  }
+
+  if (action.type === 'set_clip_volume') {
+    return (
+      <div style={formStyle}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <ReviewItemNumberInput label="Volume" value={action.volume ?? 1} onChange={(v) => onEdit({ volume: v })} min={0} max={2} step={0.05} />
+          <ReviewItemNumberInput label="Fade in (s)" value={action.fadeIn ?? 0} onChange={(v) => onEdit({ fadeIn: v })} min={0} max={10} step={0.1} />
+          <ReviewItemNumberInput label="Fade out (s)" value={action.fadeOut ?? 0} onChange={(v) => onEdit({ fadeOut: v })} min={0} max={10} step={0.1} />
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function ActionDetails({ action }: { action: EditAction }) {
   if (action.type === 'delete_ranges') {
     const ranges = action.ranges ?? [];
@@ -1545,6 +1805,7 @@ function AssistantMessage({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [reviewResult, setReviewResult] = useState<string | null>(null);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [transcriptionDone, setTranscriptionDone] = useState(false);
 
   const setBackgroundTranscript = useEditorStore(s => s.setBackgroundTranscript);
@@ -1641,6 +1902,7 @@ function AssistantMessage({
   const cancelReview = useCallback(() => {
     setActiveReviewSession(null);
     setReviewResult(null);
+    setEditingItemId(null);
   }, [setActiveReviewSession]);
 
   const toggleReviewAll = useCallback((checked: boolean) => {
@@ -1687,6 +1949,17 @@ function AssistantMessage({
     }
   }, [requestSeek, reviewSessionForMessage, setActiveReviewFocusItemId]);
 
+  const editReviewItemAction = useCallback((itemId: string, actionPatch: Partial<EditAction>) => {
+    if (!reviewSessionForMessage) return;
+    const nextGroup = buildReviewGroupWithUpdatedItems(
+      reviewSessionForMessage,
+      (items) => items.map((item) =>
+        item.id === itemId ? updateReviewItemAction(item, actionPatch) : item
+      ),
+    );
+    setActiveReviewSession(nextGroup);
+  }, [reviewSessionForMessage, setActiveReviewSession]);
+
   const handleApplyReviewedAction = useCallback(() => {
     if (!reviewSessionForMessage || !reviewedAction) return;
     const nextSnapshot = buildReviewPreviewSnapshot(reviewSessionForMessage);
@@ -1710,6 +1983,7 @@ function AssistantMessage({
     }
     setActiveReviewSession(null);
     setActiveReviewFocusItemId(null);
+    setEditingItemId(null);
     setReviewResult(result);
     void onActionResolved(msg.id, reviewedAction, result);
   }, [checkedReviewCount, commitPreviewSnapshot, msg.id, msg.requestChainId, onActionResolved, recordAppliedAction, reviewSessionForMessage, reviewedAction, setActiveReviewFocusItemId, setActiveReviewSession, updateMessage]);
@@ -1881,62 +2155,108 @@ function AssistantMessage({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {reviewSteps.map((item) => {
                     const isFocused = activeReviewFocusItemId === item.id;
+                    const isEditing = editingItemId === item.id;
                     return (
-                      <div
-                        key={item.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 10,
-                          padding: '10px 12px',
-                          borderRadius: 12,
-                          border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
-                          background: isFocused
-                            ? 'linear-gradient(180deg, rgba(33,212,255,0.12), rgba(255,255,255,0.04))'
-                            : 'linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02))',
-                          boxShadow: isFocused ? '0 0 0 1px rgba(33,212,255,0.08)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
-                        }}
-                      >
-                        <ReviewCheckboxButton
-                          checked={item.checked}
-                          onChange={(checked) => toggleReviewItem(item.id, checked)}
-                          ariaLabel={`${item.checked ? 'Deselect' : 'Select'} ${item.label}`}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => focusReviewItem(item.id)}
+                      <div key={item.id} style={{ display: 'flex', flexDirection: 'column' }}>
+                        <div
                           style={{
                             display: 'flex',
                             alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 8,
-                            flex: 1,
-                            background: 'transparent',
-                            border: 'none',
-                            padding: 0,
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                            color: 'inherit',
-                            fontFamily: 'inherit',
+                            gap: 10,
+                            padding: '10px 12px',
+                            borderRadius: isEditing ? '12px 12px 0 0' : 12,
+                            border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                            borderBottom: isEditing ? '1px solid rgba(255,255,255,0.05)' : undefined,
+                            background: isFocused
+                              ? 'linear-gradient(180deg, rgba(33,212,255,0.12), rgba(255,255,255,0.04))'
+                              : 'linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02))',
+                            boxShadow: isFocused ? '0 0 0 1px rgba(33,212,255,0.08)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
                           }}
                         >
-                          <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                            <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontWeight: 600, fontFamily: 'var(--font-serif)' }}>
-                              {item.label}
+                          <ReviewCheckboxButton
+                            checked={item.checked}
+                            onChange={(checked) => toggleReviewItem(item.id, checked)}
+                            ariaLabel={`${item.checked ? 'Deselect' : 'Select'} ${item.label}`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => focusReviewItem(item.id)}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 8,
+                              flex: 1,
+                              background: 'transparent',
+                              border: 'none',
+                              padding: 0,
+                              cursor: 'pointer',
+                              textAlign: 'left',
+                              color: 'inherit',
+                              fontFamily: 'inherit',
+                            }}
+                          >
+                            <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                              <span style={{ fontSize: 11, color: 'var(--fg-primary)', fontWeight: 600, fontFamily: 'var(--font-serif)' }}>
+                                {item.label}
+                              </span>
+                              <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
+                                {item.summary || item.action.message}
+                              </span>
                             </span>
-                            <span style={{ fontSize: 10, color: 'var(--fg-muted)', fontFamily: 'var(--font-serif)', lineHeight: 1.45 }}>
-                              {item.summary || item.action.message}
+                            <span style={{
+                              fontSize: 10,
+                              color: isFocused ? 'var(--accent-strong)' : 'var(--fg-muted)',
+                              fontFamily: 'var(--font-serif)',
+                              flexShrink: 0,
+                            }}>
+                              {isFocused ? 'Previewing' : 'Preview'}
                             </span>
-                          </span>
-                          <span style={{
-                            fontSize: 10,
-                            color: isFocused ? 'var(--accent-strong)' : 'var(--fg-muted)',
-                            fontFamily: 'var(--font-serif)',
-                            flexShrink: 0,
+                          </button>
+                          {item.action.type !== 'add_captions' && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingItemId(isEditing ? null : item.id);
+                            }}
+                            aria-label={`Edit ${item.label}`}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              width: 24,
+                              height: 24,
+                              flexShrink: 0,
+                              background: 'transparent',
+                              border: 'none',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              color: isEditing ? 'var(--accent)' : 'var(--fg-muted)',
+                              transition: 'color 0.12s',
+                              padding: 0,
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                              <path d="M11.5 1.5L14.5 4.5L5 14H2V11L11.5 1.5Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                              <path d="M9.5 3.5L12.5 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                          )}
+                        </div>
+                        {isEditing && (
+                          <div style={{
+                            border: isFocused ? '1px solid rgba(33,212,255,0.34)' : '1px solid rgba(255,255,255,0.08)',
+                            borderTop: 'none',
+                            borderRadius: '0 0 12px 12px',
+                            background: 'rgba(255,255,255,0.02)',
                           }}>
-                            {isFocused ? 'Previewing' : 'Preview'}
-                          </span>
-                        </button>
+                            <ReviewItemEditForm
+                              item={item}
+                              onEdit={(patch) => editReviewItemAction(item.id, patch)}
+                            />
+                          </div>
+                        )}
                       </div>
                     );
                   })}

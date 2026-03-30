@@ -108,6 +108,16 @@ export function formatTimePrecise(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 }
 
+export function parseTimePrecise(value: string): number | null {
+  const match = value.trim().match(/^(?:(\d+):)?(\d+(?:\.\d*)?)$/);
+  if (!match) return null;
+  const minutes = match[1] ? parseInt(match[1], 10) : 0;
+  const seconds = parseFloat(match[2]);
+  if (!Number.isFinite(minutes) || !Number.isFinite(seconds)) return null;
+  const total = minutes * 60 + seconds;
+  return total >= 0 ? total : null;
+}
+
 export function formatTimeShort(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -498,6 +508,9 @@ export type CaptionRenderWindow = {
   endTime: number;
   text: string;
   lines: string[];
+  captionId?: string;
+  positionX?: number;
+  positionY?: number;
 };
 
 function buildStaticCaptionLines(
@@ -634,6 +647,9 @@ export function buildCaptionRenderWindows(
             endTime,
             text: lines.join('\n'),
             lines,
+            captionId: caption.id,
+            positionX: caption.positionX,
+            positionY: caption.positionY,
           }];
         });
       }
@@ -646,6 +662,9 @@ export function buildCaptionRenderWindows(
         endTime: caption.endTime,
         text: lines.join('\n'),
         lines,
+        captionId: caption.id,
+        positionX: caption.positionX,
+        positionY: caption.positionY,
       }];
     });
 }
