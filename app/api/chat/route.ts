@@ -1213,7 +1213,7 @@ function inferMarkerActionFromEvidence(
   evidence: LatestAssistantEvidence | null,
   videoDuration: number,
 ): EditAction | null {
-  if (!isLikelyActionableRequest(latestUserMessage)) return null;
+  if (!isLikelyMarkerLikeIntent(latestUserMessage)) return null;
 
   const narratedRanges = extractExplicitTimeRanges(message, videoDuration);
   const narratedRange = narratedRanges.length > 0 ? narratedRanges[narratedRanges.length - 1] : null;
