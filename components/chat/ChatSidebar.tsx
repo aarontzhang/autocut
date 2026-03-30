@@ -2183,16 +2183,12 @@ function AssistantMessage({
                               {isFocused ? 'Previewing' : 'Preview'}
                             </span>
                           </button>
-                          {item.action.type !== 'add_captions' && (
+                          {item.action.type !== 'add_captions' && item.action.type !== 'delete_range' && (
                           <button
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (item.action.type === 'delete_range') {
-                                focusReviewItem(item.id);
-                              } else {
-                                setEditingItemId(isEditing ? null : item.id);
-                              }
+                              setEditingItemId(isEditing ? null : item.id);
                             }}
                             aria-label={`Edit ${item.label}`}
                             style={{
@@ -2206,7 +2202,7 @@ function AssistantMessage({
                               border: 'none',
                               borderRadius: 4,
                               cursor: 'pointer',
-                              color: (isEditing || (item.action.type === 'delete_range' && isFocused)) ? 'var(--accent)' : 'var(--fg-muted)',
+                              color: isEditing ? 'var(--accent)' : 'var(--fg-muted)',
                               transition: 'color 0.12s',
                               padding: 0,
                             }}

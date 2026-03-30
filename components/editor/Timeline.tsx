@@ -791,7 +791,8 @@ export default function Timeline({
               if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
               const isFocused = activeReviewFocusItemId === overlay.itemId;
               const overlayWidth = Math.max(3, px(overlay.endTime) - px(overlay.startTime));
-              const HANDLE_W = 8;
+              const HANDLE_W = 14;
+              const handleColor = isFocused ? 'rgba(248,113,113,1)' : 'rgba(248,113,113,0.55)';
               return (
                 <div
                   key={overlay.id}
@@ -806,73 +807,81 @@ export default function Timeline({
                     background: isFocused
                       ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.45), rgba(248,113,113,0.45) 6px, rgba(248,113,113,0.18) 6px, rgba(248,113,113,0.18) 12px)'
                       : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.24), rgba(248,113,113,0.24) 6px, rgba(248,113,113,0.1) 6px, rgba(248,113,113,0.1) 12px)',
-                    pointerEvents: isFocused ? 'auto' : 'none',
+                    pointerEvents: 'auto',
                     zIndex: isFocused ? 3 : 1,
+                    cursor: 'pointer',
                   }}
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    useEditorStore.getState().setActiveReviewFocusItemId(overlay.itemId);
+                  }}
                 >
-                  {isFocused && (
-                    <div
-                      className="cut-edge-handle"
-                      style={{
-                        position: 'absolute',
-                        left: -HANDLE_W / 2,
-                        top: 0,
-                        bottom: 0,
-                        width: HANDLE_W,
-                        cursor: 'ew-resize',
-                        zIndex: 4,
-                        touchAction: 'none',
-                      }}
-                      onPointerDown={(e) => {
-                        if (e.button !== 0) return;
-                        e.stopPropagation();
-                        e.preventDefault();
-                        beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'start', overlay.startTime!, overlay.endTime!);
-                      }}
-                    >
-                      <div style={{
-                        position: 'absolute',
-                        left: HANDLE_W / 2 - 1,
-                        top: '20%',
-                        bottom: '20%',
-                        width: 2,
-                        borderRadius: 1,
-                        background: 'rgba(248,113,113,0.85)',
-                      }} />
-                    </div>
-                  )}
-                  {isFocused && (
-                    <div
-                      className="cut-edge-handle"
-                      style={{
-                        position: 'absolute',
-                        right: -HANDLE_W / 2,
-                        top: 0,
-                        bottom: 0,
-                        width: HANDLE_W,
-                        cursor: 'ew-resize',
-                        zIndex: 4,
-                        touchAction: 'none',
-                      }}
-                      onPointerDown={(e) => {
-                        if (e.button !== 0) return;
-                        e.stopPropagation();
-                        e.preventDefault();
-                        beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'end', overlay.startTime!, overlay.endTime!);
-                      }}
-                    >
-                      <div style={{
-                        position: 'absolute',
-                        right: HANDLE_W / 2 - 1,
-                        top: '20%',
-                        bottom: '20%',
-                        width: 2,
-                        borderRadius: 1,
-                        background: 'rgba(248,113,113,0.85)',
-                      }} />
-                    </div>
-                  )}
+                  {/* Left edge handle */}
+                  <div
+                    className="cut-edge-handle"
+                    style={{
+                      position: 'absolute',
+                      left: -HANDLE_W / 2,
+                      top: -2,
+                      bottom: -2,
+                      width: HANDLE_W,
+                      cursor: 'ew-resize',
+                      zIndex: 4,
+                      touchAction: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.stopPropagation();
+                      e.preventDefault();
+                      beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'start', overlay.startTime!, overlay.endTime!);
+                    }}
+                  >
+                    <div style={{
+                      width: 4,
+                      height: '50%',
+                      minHeight: 12,
+                      maxHeight: 28,
+                      borderRadius: 2,
+                      background: handleColor,
+                      transition: 'background 0.15s',
+                    }} />
+                  </div>
+                  {/* Right edge handle */}
+                  <div
+                    className="cut-edge-handle"
+                    style={{
+                      position: 'absolute',
+                      right: -HANDLE_W / 2,
+                      top: -2,
+                      bottom: -2,
+                      width: HANDLE_W,
+                      cursor: 'ew-resize',
+                      zIndex: 4,
+                      touchAction: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.stopPropagation();
+                      e.preventDefault();
+                      beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'end', overlay.startTime!, overlay.endTime!);
+                    }}
+                  >
+                    <div style={{
+                      width: 4,
+                      height: '50%',
+                      minHeight: 12,
+                      maxHeight: 28,
+                      borderRadius: 2,
+                      background: handleColor,
+                      transition: 'background 0.15s',
+                    }} />
+                  </div>
                 </div>
               );
             })}
