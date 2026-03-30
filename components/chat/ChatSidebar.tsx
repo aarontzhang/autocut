@@ -2182,7 +2182,12 @@ function ProgressStatusCard({
   tone?: ProgressCardTone;
   showProgressBar?: boolean;
 }) {
-  const targetProgress = getProgressValue(progress);
+  const rawProgress = getProgressValue(progress);
+  const highWaterMarkRef = useRef(0);
+  if (rawProgress !== null) {
+    highWaterMarkRef.current = Math.max(highWaterMarkRef.current, rawProgress);
+  }
+  const targetProgress = rawProgress !== null ? highWaterMarkRef.current : null;
   const isCompleted = tone === 'completed';
 
   return (

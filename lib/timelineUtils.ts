@@ -604,7 +604,7 @@ export function buildCaptionRenderWindows(
   return [...rawCaptions]
     .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime)
     .flatMap((caption, captionIndex) => {
-      const renderStyle = caption.renderStyle ?? 'static';
+      const renderStyle = caption.renderStyle ?? (Array.isArray(caption.words) && caption.words.length > 0 ? 'rolling_word' : 'static');
       const cueId = caption.id ?? `caption_${captionIndex}_${Math.round(caption.startTime * 1000)}`;
       if (renderStyle === 'rolling_word' && Array.isArray(caption.words) && caption.words.length > 0) {
         const words = caption.words
