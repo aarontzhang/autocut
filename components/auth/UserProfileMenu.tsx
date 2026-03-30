@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
-import { useRouter } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
 
 const AVATAR_COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#06b6d4'];
@@ -30,7 +29,6 @@ export default function UserProfileMenu({
   const [open, setOpen] = useState(false);
   const [imgError, setImgError] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const router = useRouter();
 
   useEffect(() => {
     if (!open) return;
@@ -56,7 +54,7 @@ export default function UserProfileMenu({
 
   const handleSignOut = async () => {
     await getSupabaseBrowser().auth.signOut();
-    router.push('/auth/login');
+    window.location.href = '/auth/login';
   };
 
   return (
@@ -186,7 +184,7 @@ export default function UserProfileMenu({
           <button
             onClick={() => {
               setOpen(false);
-              router.push('/projects');
+              window.location.href = '/projects';
             }}
             style={{
               display: 'flex',
