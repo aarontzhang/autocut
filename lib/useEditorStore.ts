@@ -17,10 +17,12 @@ import {
   SourceIndexAnalysisStateMap,
   SourceIndexTaskState,
   SourceIndexState,
+  ImageOverlayEntry,
   TextOverlayEntry,
   TransitionEntry,
   VideoClip,
 } from './types';
+import { normalizeImageOverlayEntry } from './imageOverlays';
 import {
   actionChangesTimelineStructure,
   applyActionToSnapshot,
@@ -69,7 +71,7 @@ export type FFmpegJob =
   | { status: 'error'; message: string };
 
 export type SelectedItem = {
-  type: 'clip' | 'caption' | 'text' | 'transition' | 'marker';
+  type: 'clip' | 'caption' | 'text' | 'transition' | 'marker' | 'image';
   id: string;
 } | null;
 
@@ -440,6 +442,7 @@ function normalizeSelectedItem(
   captions?: CaptionEntry[],
   textOverlays?: TextOverlayEntry[],
   transitions?: TransitionEntry[],
+  imageOverlays?: ImageOverlayEntry[],
 ): SelectedItem {
   if (!selectedItem) return selectedItem;
   if (selectedItem.type === 'marker') {
@@ -456,6 +459,9 @@ function normalizeSelectedItem(
   }
   if (selectedItem.type === 'transition') {
     return (transitions ?? []).some((transition) => transition.id === selectedItem.id) ? selectedItem : null;
+  }
+  if (selectedItem.type === 'image') {
+    return (imageOverlays ?? []).some((overlay) => overlay.id === selectedItem.id) ? selectedItem : null;
   }
   return selectedItem;
 }
@@ -497,6 +503,7 @@ function buildBaseEditorState(input?: {
   | 'transitions'
   | 'markers'
   | 'textOverlays'
+  | 'imageOverlays'
   | 'previewSnapshot'
   | 'previewOwnerId'
   | 'selectedItem'
@@ -544,6 +551,7 @@ function buildBaseEditorState(input?: {
     transitions: [],
     markers: [],
     textOverlays: [],
+    imageOverlays: [],
     previewSnapshot: null,
     previewOwnerId: null,
     selectedItem: null,
@@ -593,6 +601,7 @@ interface EditorState {
   transitions: TransitionEntry[];
   markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
+  imageOverlays: ImageOverlayEntry[];
   previewSnapshot: EditSnapshot | null;
   previewOwnerId: string | null;
   selectedItem: SelectedItem;
@@ -681,6 +690,7 @@ interface EditorState {
       transitions?: unknown[];
       markers?: unknown[];
       textOverlays?: unknown[];
+      imageOverlays?: unknown[];
       messages?: unknown[];
       appliedActions?: unknown[];
       aiSettings?: unknown;
@@ -843,6 +853,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       transitions: s.transitions,
       markers: s.markers,
       textOverlays: s.textOverlays,
+      imageOverlays: s.imageOverlays,
       appliedActions: s.appliedActions,
     };
   },
@@ -918,6 +929,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         state.captions,
         state.textOverlays,
         nextTransitions,
+        state.imageOverlays,
       ),
       ...clearReviewStatePatch(),
       sourceIndexFreshBySourceId: nextSourceIndexState,
@@ -946,7 +958,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
-      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, current.captions, current.textOverlays, nextTransitions),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, current.captions, current.textOverlays, nextTransitions, current.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         nextClips,
@@ -975,7 +987,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
-      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, current.captions, current.textOverlays, nextTransitions),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, current.captions, current.textOverlays, nextTransitions, current.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         nextClips,
@@ -1109,7 +1121,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...state.history, current],
       future: [],
       pendingAction: null,
-      selectedItem: normalizeSelectedItem(state.selectedItem, snapshot.markers, snapshot.clips, snapshot.captions, snapshot.textOverlays, snapshot.transitions),
+      selectedItem: normalizeSelectedItem(state.selectedItem, snapshot.markers, snapshot.clips, snapshot.captions, snapshot.textOverlays, snapshot.transitions, snapshot.imageOverlays),
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, snapshot.markers),
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, snapshot.clips),
       ...buildClampedTimelineControlState(
@@ -1147,7 +1159,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions),
+      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         newClips,
@@ -1175,7 +1187,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions),
+      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         newClips,
@@ -1226,7 +1238,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions),
+      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         nextClips,
@@ -1250,7 +1262,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         markers: [],
         taggedMarkerIds: [],
         taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions),
+        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
         ...clearReviewStatePatch(),
         ...buildDerivedIndexState(
           nextClips,
@@ -1278,7 +1290,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         markers: [],
         taggedMarkerIds: [],
         taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions),
+        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
         ...clearReviewStatePatch(),
         ...buildDerivedIndexState(
           nextClips,
@@ -1306,7 +1318,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         markers: [],
         taggedMarkerIds: [],
         taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions),
+        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
         ...clearReviewStatePatch(),
         ...buildDerivedIndexState(
           nextClips,
@@ -1391,6 +1403,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         next.captions,
         next.textOverlays,
         next.transitions,
+        next.imageOverlays,
       ),
       taggedMarkerIds: filterTaggedMarkerIds(state.taggedMarkerIds, next.markers),
       taggedClipIds: filterTaggedClipIds(state.taggedClipIds, next.clips),
@@ -1511,6 +1524,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       transitions: [],
       markers: [],
       textOverlays: [],
+      imageOverlays: [],
       selectedItem: null,
       taggedMarkerIds: [],
       taggedClipIds: [],
@@ -1747,6 +1761,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       textOverlays: ((editState.textOverlays as Partial<TextOverlayEntry>[] | undefined) ?? [])
         .map((entry) => normalizeTextOverlayEntry(entry))
         .filter((entry): entry is TextOverlayEntry => !!entry),
+      imageOverlays: ((editState.imageOverlays as Partial<ImageOverlayEntry>[] | undefined) ?? [])
+        .map((entry) => normalizeImageOverlayEntry(entry))
+        .filter((entry): entry is ImageOverlayEntry => !!entry),
       messages: ((editState.messages as ChatMessage[] | undefined) ?? []).map((message) => ({
         ...message,
         requestChainId: typeof message.requestChainId === 'string' ? message.requestChainId : undefined,
@@ -1866,6 +1883,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       return;
     }
+    if (type === 'image') {
+      const imageOverlays = state.imageOverlays.filter((entry) => entry.id !== id);
+      set({
+        history: newHistory,
+        future: [],
+        imageOverlays,
+        selectedItem: null,
+        ...clearReviewStatePatch(),
+      });
+      return;
+    }
     if (type === 'transition') {
       const nextTransitions = normalizeTransitionState(
         state.clips,
@@ -1908,6 +1936,81 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     )),
     ...clearReviewStatePatch(),
   })),
+
+  addImageOverlay: (overlay: Omit<ImageOverlayEntry, 'id'>) => {
+    const id = uuidv4();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    set((state) => ({
+      history: [...state.history, snap],
+      future: [],
+      imageOverlays: [...state.imageOverlays, { ...overlay, id }],
+      selectedItem: { type: 'image', id },
+      ...clearReviewStatePatch(),
+    }));
+    return id;
+  },
+
+  updateImageOverlay: (id: string, patch: Partial<ImageOverlayEntry>) => set((state) => ({
+    imageOverlays: state.imageOverlays.map((overlay) => (
+      overlay.id === id ? { ...overlay, ...patch } : overlay
+    )),
+    ...clearReviewStatePatch(),
+  })),
+
+  removeImageOverlay: (id: string) => {
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    set((state) => ({
+      history: [...state.history, snap],
+      future: [],
+      imageOverlays: state.imageOverlays.filter((overlay) => overlay.id !== id),
+      selectedItem: state.selectedItem?.type === 'image' && state.selectedItem.id === id ? null : state.selectedItem,
+      ...clearReviewStatePatch(),
+    }));
+  },
+
+  addTextOverlayAtTime: (time: number, text: string, duration: number) => {
+    const id = uuidv4();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const entry: TextOverlayEntry = {
+      id,
+      startTime: time,
+      endTime: time + duration,
+      text,
+      position: 'bottom',
+      fontSize: 16,
+    };
+    set((state) => ({
+      history: [...state.history, snap],
+      future: [],
+      textOverlays: [...state.textOverlays, entry],
+      selectedItem: { type: 'text', id },
+      ...clearReviewStatePatch(),
+    }));
+    return id;
+  },
+
+  createImageOverlayAtTime: (sourceId: string, timelineTime: number) => {
+    const id = uuidv4();
+    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const entry: ImageOverlayEntry = {
+      id,
+      sourceId,
+      startTime: timelineTime,
+      endTime: timelineTime + 5,
+      positionX: 50,
+      positionY: 50,
+      widthPercent: 25,
+      opacity: 1,
+    };
+    set((state) => ({
+      history: [...state.history, snap],
+      future: [],
+      imageOverlays: [...state.imageOverlays, entry],
+      selectedItem: { type: 'image', id },
+      ...clearReviewStatePatch(),
+    }));
+    return id;
+  },
 
   updateTransition: (id, patch) => set((state) => {
     const nextTransitions = normalizeTransitionState(

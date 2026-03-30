@@ -6,11 +6,13 @@ import type {
   AppliedActionRecord,
   CaptionEntry,
   EditAction,
+  ImageOverlayEntry,
   MarkerEntry,
   TextOverlayEntry,
   TransitionEntry,
   VideoClip,
 } from './types';
+import { normalizeImageOverlayEntry } from './imageOverlays';
 
 export interface EditSnapshot {
   clips: VideoClip[];
@@ -18,13 +20,14 @@ export interface EditSnapshot {
   transitions: TransitionEntry[];
   markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
+  imageOverlays: ImageOverlayEntry[];
   appliedActions?: AppliedActionRecord[];
 }
 
 export interface ReviewOverlayDescriptor {
   id: string;
   itemId: string;
-  kind: 'cut' | 'caption' | 'transition' | 'marker' | 'text';
+  kind: 'cut' | 'caption' | 'transition' | 'marker' | 'text' | 'image';
   startTime?: number;
   endTime?: number;
   atTime?: number;
@@ -552,6 +555,39 @@ export function applyActionToSnapshot(
     return { ...snapshot, textOverlays };
   }
 
+  if (resolvedAction.type === 'add_image_overlay') {
+    return {
+      ...snapshot,
+      imageOverlays: [
+        ...snapshot.imageOverlays,
+        ...(resolvedAction.imageOverlays ?? [])
+          .map((overlay) => normalizeImageOverlayEntry(overlay))
+          .filter((overlay): overlay is ImageOverlayEntry => !!overlay)
+          .map((overlay) => ({ ...overlay, id: overlay.id || uuidv4() })),
+      ],
+    };
+  }
+
+  if (resolvedAction.type === 'update_image_overlay') {
+    if (!resolvedAction.imageOverlayId) return snapshot;
+    return {
+      ...snapshot,
+      imageOverlays: snapshot.imageOverlays.map((overlay) => (
+        overlay.id === resolvedAction.imageOverlayId
+          ? { ...overlay, ...resolvedAction.imageOverlayPatch }
+          : overlay
+      )),
+    };
+  }
+
+  if (resolvedAction.type === 'remove_image_overlay') {
+    if (!resolvedAction.imageOverlayId) return snapshot;
+    return {
+      ...snapshot,
+      imageOverlays: snapshot.imageOverlays.filter((overlay) => overlay.id !== resolvedAction.imageOverlayId),
+    };
+  }
+
   return snapshot;
 }
 
@@ -602,6 +638,14 @@ export function expandActionForReview(action: EditAction): EditAction[] {
     }));
   }
 
+  if (action.type === 'add_image_overlay') {
+    return (action.imageOverlays ?? []).map(imageOverlay => ({
+      type: 'add_image_overlay' as const,
+      imageOverlays: [imageOverlay],
+      message: action.message,
+    }));
+  }
+
   return [action];
 }
 
@@ -614,6 +658,7 @@ function getReviewItemAnchorTime(action: EditAction): number | null {
   if (action.type === 'add_transition') return action.transitions?.[0]?.atTime ?? null;
   if (action.type === 'add_marker') return action.marker?.timelineTime ?? null;
   if (action.type === 'add_text_overlay') return action.textOverlays?.[0]?.startTime ?? null;
+  if (action.type === 'add_image_overlay') return action.imageOverlays?.[0]?.startTime ?? null;
   return null;
 }
 
@@ -678,6 +723,19 @@ function getReviewItemDescriptor(itemId: string, action: EditAction): ReviewOver
     };
   }
 
+  if (action.type === 'add_image_overlay') {
+    const overlay = action.imageOverlays?.[0];
+    if (!overlay) return null;
+    return {
+      id: `${itemId}:image`,
+      itemId,
+      kind: 'image',
+      startTime: overlay.startTime,
+      endTime: overlay.endTime,
+      label: 'Image overlay',
+    };
+  }
+
   return null;
 }
 
@@ -723,6 +781,14 @@ function getReviewItemLabel(action: EditAction, index: number): { label: string;
     return {
       label: `Text ${index + 1}`,
       summary: overlay?.text ?? 'Text overlay preview',
+    };
+  }
+
+  if (action.type === 'add_image_overlay') {
+    const overlay = action.imageOverlays?.[0];
+    return {
+      label: `Image ${index + 1}`,
+      summary: overlay ? `${overlay.startTime.toFixed(3)}s - ${overlay.endTime.toFixed(3)}s` : 'Image overlay preview',
     };
   }
 
@@ -847,6 +913,11 @@ export function collapseReviewItemsToAction(group: EditReviewGroup): EditAction 
   if (originalAction.type === 'add_text_overlay') {
     const textOverlays = checkedItems.flatMap((item) => item.action.textOverlays ?? []);
     return textOverlays.length > 0 ? { type: 'add_text_overlay', textOverlays, message } : null;
+  }
+
+  if (originalAction.type === 'add_image_overlay') {
+    const imageOverlays = checkedItems.flatMap((item) => item.action.imageOverlays ?? []);
+    return imageOverlays.length > 0 ? { type: 'add_image_overlay', imageOverlays, message } : null;
   }
 
   return checkedItems[0]?.action ?? null;

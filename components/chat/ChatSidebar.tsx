@@ -1888,6 +1888,7 @@ function AssistantMessage({
       transitions: state.transitions,
       markers: state.markers,
       textOverlays: state.textOverlays,
+      imageOverlays: state.imageOverlays,
     };
     const nextReviewGroup = createReviewGroup(msg.id, action, baseSnapshot, {
       sourceTranscriptCaptions: existingSourceTranscriptCaptions,

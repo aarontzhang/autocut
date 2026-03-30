@@ -121,6 +121,19 @@ export interface TextOverlayEntry {
   text: string;
   position: 'top' | 'center' | 'bottom';
   fontSize?: number;
+  positionX?: number;
+  positionY?: number;
+}
+
+export interface ImageOverlayEntry {
+  id: string;
+  sourceId: string;
+  startTime: number;
+  endTime: number;
+  positionX: number;
+  positionY: number;
+  widthPercent: number;
+  opacity: number;
 }
 
 export interface ColorFilter {
@@ -161,6 +174,7 @@ export interface ProjectSource {
   duration: number;
   status: MediaAssetStatus;
   isPrimary: boolean;
+  mediaType?: 'video' | 'image';
 }
 
 export interface MediaAsset {
@@ -276,6 +290,9 @@ export interface EditAction {
     | 'remove_marker'
     | 'add_text_overlay'
     | 'replace_text_overlay'
+    | 'add_image_overlay'
+    | 'update_image_overlay'
+    | 'remove_image_overlay'
     | 'update_ai_settings'
     | 'none';
   // split_clip
@@ -315,6 +332,10 @@ export interface EditAction {
   textOverlays?: TextOverlayEntry[];
   // replace_text_overlay
   overlayIndex?: number;
+  // image overlays
+  imageOverlays?: ImageOverlayEntry[];
+  imageOverlayId?: string;
+  imageOverlayPatch?: Partial<ImageOverlayEntry>;
   // update_ai_settings
   settings?: Partial<AIEditingSettings>;
   message: string;

@@ -25,6 +25,8 @@ export function normalizeTextOverlayEntry(entry: Partial<TextOverlayEntry>): Tex
       ? entry.position
       : 'bottom',
     fontSize: Number.isFinite(entry.fontSize) ? Math.max(10, Number(entry.fontSize)) : undefined,
+    positionX: Number.isFinite(entry.positionX) ? Math.max(0, Math.min(100, Number(entry.positionX))) : undefined,
+    positionY: Number.isFinite(entry.positionY) ? Math.max(0, Math.min(100, Number(entry.positionY))) : undefined,
   };
 }
 
@@ -45,7 +47,16 @@ export function getTextOverlayInset(position: TextOverlayEntry['position'], fram
 export function getTextOverlayPreviewPositionStyle(
   position: TextOverlayEntry['position'],
   frameHeight: number,
+  positionX?: number,
+  positionY?: number,
 ) {
+  if (positionX != null && positionY != null) {
+    return {
+      left: `${positionX}%`,
+      top: `${positionY}%`,
+      transform: 'translate(-50%, -50%)',
+    };
+  }
   if (position === 'top') {
     return {
       top: getTextOverlayInset('top', frameHeight),
@@ -64,7 +75,10 @@ export function getTextOverlayPreviewPositionStyle(
   };
 }
 
-export function getTextOverlayExportY(position: TextOverlayEntry['position'], frameHeight: number) {
+export function getTextOverlayExportY(position: TextOverlayEntry['position'], frameHeight: number, positionY?: number) {
+  if (positionY != null) {
+    return `h*${(positionY / 100).toFixed(4)}-text_h/2`;
+  }
   if (position === 'top') {
     return `${getTextOverlayInset('top', frameHeight)}`;
   }
