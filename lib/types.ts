@@ -293,7 +293,6 @@ export interface EditAction {
     | 'add_image_overlay'
     | 'update_image_overlay'
     | 'remove_image_overlay'
-    | 'update_ai_settings'
     | 'none';
   // split_clip
   splitTime?: number;
@@ -336,8 +335,6 @@ export interface EditAction {
   imageOverlays?: ImageOverlayEntry[];
   imageOverlayId?: string;
   imageOverlayPatch?: Partial<ImageOverlayEntry>;
-  // update_ai_settings
-  settings?: Partial<AIEditingSettings>;
   message: string;
 }
 

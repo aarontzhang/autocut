@@ -2,6 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
+import { DEFAULT_AI_EDITING_SETTINGS } from '@/lib/aiSettings';
 import {
   AnalysisProgress,
   AppliedActionRecord,
@@ -572,7 +573,7 @@ function buildSilenceCandidatePayload(): SilenceCandidate[] {
   const rawCaptions = state.sourceTranscriptCaptions;
   if (!rawCaptions || rawCaptions.length === 0) return [];
 
-  return buildTimelineSilenceCandidates(state.clips, rawCaptions, state.aiSettings.silenceRemoval);
+  return buildTimelineSilenceCandidates(state.clips, rawCaptions, DEFAULT_AI_EDITING_SETTINGS.silenceRemoval);
 }
 
 function buildWordBoundaryPayload(): Array<{ start: number; end: number }> {
@@ -1038,12 +1039,6 @@ function getActionMeta(action: EditAction): { label: string; color: string; summ
         summary: seg ? `${formatChatTime(seg.startTime)} → ${formatChatTime(seg.endTime)}` : '',
       };
     }
-    case 'update_ai_settings':
-      return {
-        label: 'Update AI settings',
-        color: '#facc15',
-        summary: 'Defaults updated',
-      };
     case 'add_captions':
       {
         const summary = action.transcriptRange
@@ -1526,24 +1521,6 @@ function ActionDetails({ action }: { action: EditAction }) {
     );
   }
 
-  if (action.type === 'update_ai_settings') {
-    const settings = action.settings;
-    const details = [
-      settings?.silenceRemoval?.paddingSeconds !== undefined ? `silence padding ${settings.silenceRemoval.paddingSeconds}s` : '',
-      settings?.silenceRemoval?.minDurationSeconds !== undefined ? `min silence ${settings.silenceRemoval.minDurationSeconds}s` : '',
-      settings?.captions?.wordsPerCaption !== undefined ? `${settings.captions.wordsPerCaption} words per caption` : '',
-      settings?.transitions?.defaultDuration !== undefined ? `${settings.transitions.defaultDuration}s transitions` : '',
-      settings?.textOverlays?.defaultFontSize !== undefined ? `${settings.textOverlays.defaultFontSize}px text` : '',
-    ].filter(Boolean);
-    return (
-      <div style={{ padding: '6px 12px 8px' }}>
-        <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10, color: 'var(--fg-secondary)' }}>
-          {details.length > 0 ? details.join(', ') : 'AI editing defaults updated for future requests.'}
-        </span>
-      </div>
-    );
-  }
-
   if (action.type === 'add_transition') {
     return (
       <div style={{ padding: '6px 12px 8px' }}>
@@ -1842,8 +1819,7 @@ function AssistantMessage({
     || liveActionState.actionStatus === 'rejected';
   const reviewableAction = !!action
     && action.type !== 'none'
-    && action.type !== 'transcribe_request'
-    && action.type !== 'update_ai_settings';
+    && action.type !== 'transcribe_request';
   const batchReviewActive = !!reviewSessionForMessage && reviewableAction;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const reviewableItemCount = getReviewItemCount(action);
@@ -2023,7 +1999,7 @@ function AssistantMessage({
         const captionsForSource = await transcribeSourceRanges(
           sourceEntry.source,
           ranges,
-          state.aiSettings.captions.wordsPerCaption,
+          DEFAULT_AI_EDITING_SETTINGS.captions.wordsPerCaption,
           {
             sourceId,
             onProgress: ({ completed }) => {
@@ -2052,15 +2028,6 @@ function AssistantMessage({
       setIsTranscribing(false);
     }
   }, [action, addMessage, availableSourcesById, clips, existingSourceTranscriptCaptions, msg.id, msg.requestChainId, onTranscriptReady, setBackgroundTranscript, setTranscriptProgress, updateMessage]);
-
-  const handleApplySettings = useCallback(() => {
-    if (!action || action.type !== 'update_ai_settings') return;
-    applyStoredAction(action);
-    recordAppliedAction(action, action.message, { requestChainId: msg.requestChainId });
-    updateMessage(msg.id, { actionStatus: 'completed', actionResult: 'AI settings updated.' });
-    setReviewResult('AI settings updated.');
-    void onActionResolved(msg.id, action, 'AI settings updated.');
-  }, [action, applyStoredAction, msg.id, msg.requestChainId, onActionResolved, recordAppliedAction, updateMessage]);
 
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', gap: 10, width: '100%', marginBottom: 10 }}>
@@ -2307,23 +2274,7 @@ function AssistantMessage({
                     Finish the active review before opening another one.
                   </p>
                 )}
-                {action?.type === 'update_ai_settings' ? (
-                  <button
-                    onClick={handleApplySettings}
-                    style={{
-                      width: '100%', padding: '5px 0',
-                      fontSize: 12, fontWeight: 500,
-                      background: 'var(--accent)',
-                      border: 'none',
-                      color: '#000',
-                      borderRadius: 4, cursor: 'pointer',
-                      fontFamily: 'var(--font-serif)',
-                      transition: 'all 0.15s',
-                    }}
-                  >
-                    Apply settings
-                  </button>
-                ) : action?.type === 'transcribe_request' ? (
+                {action?.type === 'transcribe_request' ? (
                   <>
                     {transcribeError && (
                       <p style={{ fontSize: 11, color: '#f87171', margin: '0 0 6px', fontFamily: 'var(--font-serif)' }}>
@@ -2915,7 +2866,6 @@ export default function ChatSidebar() {
           transcriptAvailability,
           silenceCandidates,
           wordBoundaries: buildWordBoundaryPayload(),
-          settings: freshState.aiSettings,
           appliedActions: freshState.appliedActions,
         },
       }, ctrl, onChunk);

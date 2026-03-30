@@ -6,7 +6,7 @@ import {
   EditAction,
   SilenceCandidate,
 } from '@/lib/types';
-import { resolveAIEditingSettings } from '@/lib/aiSettings';
+import { DEFAULT_AI_EDITING_SETTINGS } from '@/lib/aiSettings';
 import { formatTimePrecise } from '@/lib/timelineUtils';
 import {
   getRequestChainEffectiveObjective,
@@ -139,15 +139,19 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Add text/title overlays that appear on screen at specific timeline times
 - Position: "top", "center", or "bottom"
 - fontSize: optional number in pixels (default 16). Use smaller values (12–14) for single-line overlays
+- positionX/positionY: optional 0-100 percentage for free positioning on frame
 - Use add_text_overlay when user says: "add a title", "put text saying X", "add lower thirds", etc.
 - Use replace_text_overlay when user says: "change the text overlay", "move it to top", "make the font smaller", "edit the title" — i.e. modifying an existing overlay. Include overlayIndex (0-based) to identify which overlay to replace.
 - Use the text-overlay defaults from context unless the user asks for something different.
 
-### 11. Update AI Defaults (update_ai_settings)
-- Update the project's AI editing defaults for future requests
-- settings: partial settings object containing only the values that should change
-- Use when the user asks to change default editing behavior, such as silence padding, silence cutoff, default transition duration/type, frame inspection density, or text overlay defaults
-- If the user asks to change a default and also wants an edit right now, update the settings first
+### 11. Image Overlays (add_image_overlay)
+- Add image overlays to display imported images over the video at specific timeline times
+- sourceId: ID of an imported image source (provided in context as "Image sources")
+- startTime/endTime: when the overlay appears/disappears (seconds)
+- positionX/positionY: 0-100 percentage position on frame (default 50,50 = center)
+- widthPercent: size as percentage of frame width (5-100, default 25)
+- opacity: 0.0 to 1.0 (default 1.0)
+- Use when user says: "add the logo", "put an image here", "overlay the watermark", "add image at 5 seconds", etc.
 
 ## Response format
 
@@ -209,8 +213,8 @@ Captions:
 Replace/edit existing text overlay (index 0):
 <action>{"type":"replace_text_overlay","overlayIndex":0,"textOverlays":[{"startTime":0,"endTime":60,"text":"Look what Claude Code can do","position":"top","fontSize":14}],"message":"I can update the text overlay.","final":true}</action>
 
-Update AI settings:
-<action>{"type":"update_ai_settings","settings":{"silenceRemoval":{"paddingSeconds":1,"minDurationSeconds":3}},"message":"Updated the silence-removal defaults.","final":true}</action>
+Image overlay:
+<action>{"type":"add_image_overlay","imageOverlays":[{"sourceId":"img_src_id","startTime":0,"endTime":10,"positionX":50,"positionY":50,"widthPercent":25,"opacity":1}],"message":"Added image overlay.","final":true}</action>
 
 No action:
 <action>{"type":"none","message":"Just a note."}</action>
@@ -988,7 +992,6 @@ function isReviewGatedAction(action: EditAction | null | undefined): action is E
   if (!action) return false;
   return action.type !== 'none'
     && action.type !== 'transcribe_request'
-    && action.type !== 'update_ai_settings'
     && action.type !== 'add_marker'
     && action.type !== 'add_markers'
     && action.type !== 'update_marker'
@@ -1505,7 +1508,7 @@ export async function POST(req: NextRequest) {
       });
     }
     const taskState = buildConversationTaskState(richMessages);
-    const settings = resolveAIEditingSettings(context?.settings as Partial<AIEditingSettings> | undefined);
+    const settings = DEFAULT_AI_EDITING_SETTINGS;
     const systemPrompt = `${BASE_SYSTEM_PROMPT}${PROMPT_INJECTION_RULES}
 
 ## Current AI Editing Defaults

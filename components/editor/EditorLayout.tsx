@@ -4,6 +4,7 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/useEditorStore';
 import type { CaptionEntry, SourceIndexAnalysisStateMap } from '@/lib/types';
 import { buildOverlappingRanges, transcribeSourceRanges } from '@/lib/transcriptionUtils';
+import { DEFAULT_AI_EDITING_SETTINGS } from '@/lib/aiSettings';
 import TopBar from './TopBar';
 import VideoPlayer, { VideoPlayerHandle } from './VideoPlayer';
 import MediaPanel from './MediaPanel';
@@ -106,7 +107,6 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   const setTranscriptProgress = useEditorStore(s => s.setTranscriptProgress);
   const sourceIndexFreshBySourceId = useEditorStore(s => s.sourceIndexFreshBySourceId);
   const playbackActive = useEditorStore(s => s.playbackActive);
-  const aiSettings = useEditorStore(s => s.aiSettings);
   const loadProject = useEditorStore(s => s.loadProject);
   const hydrateSourceIndex = useEditorStore(s => s.hydrateSourceIndex);
   const resetEditor = useEditorStore(s => s.resetEditor);
@@ -298,7 +298,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           const rawWords: CaptionEntry[] = await transcribeSourceRanges(
             entry.source,
             entry.ranges,
-            aiSettings.captions.wordsPerCaption,
+            DEFAULT_AI_EDITING_SETTINGS.captions.wordsPerCaption,
             {
               sourceId: entry.sourceId,
               onProgress: (progress) => {
@@ -331,7 +331,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         );
       }
     })();
-  }, [aiSettings.captions.wordsPerCaption, currentProjectId, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
+  }, [currentProjectId, playbackActive, processingVideoUrl, setBackgroundTranscript, setTranscriptProgress, sourceIndexAnalysisBySourceId, sourceIndexFreshBySourceId, sourceRuntimeById, sources, transcriptStatus, videoData, videoDuration, videoFile, videoUrl]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -494,6 +494,26 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     insertAtTime?: number,
   ) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+
+    // Handle image imports — add as image sources without creating clips
+    if (imageFiles.length > 0) {
+      const store = useEditorStore.getState();
+      for (const file of imageFiles) {
+        const objectUrl = URL.createObjectURL(file);
+        const addedSources = store.importSources([{
+          fileName: file.name,
+          duration: 5,
+          isPrimary: false,
+          status: 'ready',
+          runtime: { file, objectUrl, playerUrl: objectUrl, processingUrl: objectUrl },
+        }], { shouldAppendClips: false });
+        if (addedSources.length > 0) {
+          store.updateSource(addedSources[0].id, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+        }
+      }
+    }
+
     if (videoFiles.length === 0) return;
     const targetProjectId = useEditorStore.getState().currentProjectId ?? projectId;
     if (!targetProjectId) return;

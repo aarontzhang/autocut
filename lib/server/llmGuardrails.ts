@@ -1,4 +1,4 @@
-import { AIEditingSettings, ColorFilter, EditAction, MarkerEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
+import { ColorFilter, EditAction, ImageOverlayEntry, MarkerEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -272,56 +272,9 @@ function sanitizeTextOverlay(overlay: unknown, videoDuration: number): TextOverl
     text,
     position,
     fontSize: isFiniteNumber(candidate.fontSize) ? clamp(candidate.fontSize, 10, 128) : undefined,
+    positionX: isFiniteNumber(candidate.positionX) ? clamp(candidate.positionX, 0, 100) : undefined,
+    positionY: isFiniteNumber(candidate.positionY) ? clamp(candidate.positionY, 0, 100) : undefined,
   };
-}
-
-function sanitizeSettings(settings: unknown): Partial<AIEditingSettings> | null {
-  if (!settings || typeof settings !== 'object') return null;
-  const candidate = settings as Record<string, unknown>;
-  const next: Partial<AIEditingSettings> = {};
-
-  if (candidate.silenceRemoval && typeof candidate.silenceRemoval === 'object') {
-    const silence = candidate.silenceRemoval as Record<string, unknown>;
-    const partial: Partial<AIEditingSettings['silenceRemoval']> = {};
-    if (isFiniteNumber(silence.paddingSeconds)) partial.paddingSeconds = clamp(silence.paddingSeconds, 0, 2);
-    if (isFiniteNumber(silence.minDurationSeconds)) partial.minDurationSeconds = clamp(silence.minDurationSeconds, 0.05, 10);
-    if (typeof silence.preserveShortPauses === 'boolean') partial.preserveShortPauses = silence.preserveShortPauses;
-    if (typeof silence.requireSpeakerAbsence === 'boolean') partial.requireSpeakerAbsence = silence.requireSpeakerAbsence;
-    if (Object.keys(partial).length > 0) next.silenceRemoval = partial as AIEditingSettings['silenceRemoval'];
-  }
-
-  if (candidate.captions && typeof candidate.captions === 'object') {
-    const captions = candidate.captions as Record<string, unknown>;
-    if (Number.isInteger(captions.wordsPerCaption)) {
-      next.captions = {
-        wordsPerCaption: clamp(Number(captions.wordsPerCaption), 1, 12),
-      };
-    }
-  }
-
-  if (candidate.transitions && typeof candidate.transitions === 'object') {
-    const transitions = candidate.transitions as Record<string, unknown>;
-    const defaultType = transitions.defaultType;
-    const partial: Partial<AIEditingSettings['transitions']> = {};
-    if (isFiniteNumber(transitions.defaultDuration)) partial.defaultDuration = clamp(transitions.defaultDuration, 0.1, 10);
-    if (defaultType === 'fade_black') {
-      partial.defaultType = 'fade_black';
-    }
-    if (Object.keys(partial).length > 0) next.transitions = partial as AIEditingSettings['transitions'];
-  }
-
-  if (candidate.textOverlays && typeof candidate.textOverlays === 'object') {
-    const textOverlays = candidate.textOverlays as Record<string, unknown>;
-    const defaultPosition = textOverlays.defaultPosition;
-    const partial: Partial<AIEditingSettings['textOverlays']> = {};
-    if (defaultPosition === 'top' || defaultPosition === 'center' || defaultPosition === 'bottom') {
-      partial.defaultPosition = defaultPosition;
-    }
-    if (isFiniteNumber(textOverlays.defaultFontSize)) partial.defaultFontSize = clamp(textOverlays.defaultFontSize, 10, 128);
-    if (Object.keys(partial).length > 0) next.textOverlays = partial as AIEditingSettings['textOverlays'];
-  }
-
-  return Object.keys(next).length > 0 ? next : null;
 }
 
 export function normalizeChatTurns(value: unknown): NormalizedChatTurn[] {
@@ -623,10 +576,40 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
     return { ...base, type, overlayIndex, textOverlays: [replacement] };
   }
 
-  if (type === 'update_ai_settings') {
-    const settings = sanitizeSettings(action.settings);
-    if (!settings) return null;
-    return { ...base, type, settings };
+  if (type === 'add_image_overlay') {
+    if (!Array.isArray(action.imageOverlays)) return null;
+    const imageOverlays = action.imageOverlays
+      .slice(0, 10)
+      .flatMap((overlay: Record<string, unknown>) => {
+        if (!overlay || typeof overlay !== 'object') return [];
+        const startTime = typeof overlay.startTime === 'number' ? Math.max(0, Math.min(safeDuration, overlay.startTime)) : null;
+        const endTime = typeof overlay.endTime === 'number' ? Math.max(0, Math.min(safeDuration, overlay.endTime)) : null;
+        if (startTime === null || endTime === null || endTime <= startTime) return [];
+        const sourceId = typeof overlay.sourceId === 'string' ? overlay.sourceId : null;
+        if (!sourceId) return [];
+        return [{
+          id: '',
+          sourceId,
+          startTime,
+          endTime,
+          positionX: typeof overlay.positionX === 'number' ? Math.max(0, Math.min(100, overlay.positionX)) : 50,
+          positionY: typeof overlay.positionY === 'number' ? Math.max(0, Math.min(100, overlay.positionY)) : 50,
+          widthPercent: typeof overlay.widthPercent === 'number' ? Math.max(5, Math.min(100, overlay.widthPercent)) : 25,
+          opacity: typeof overlay.opacity === 'number' ? Math.max(0, Math.min(1, overlay.opacity)) : 1,
+        }];
+      });
+    if (imageOverlays.length === 0) return null;
+    return { ...base, type, imageOverlays };
+  }
+
+  if (type === 'update_image_overlay') {
+    if (typeof action.imageOverlayId !== 'string') return null;
+    return { ...base, type, imageOverlayId: action.imageOverlayId, imageOverlayPatch: action.imageOverlayPatch ?? {} };
+  }
+
+  if (type === 'remove_image_overlay') {
+    if (typeof action.imageOverlayId !== 'string') return null;
+    return { ...base, type, imageOverlayId: action.imageOverlayId };
   }
 
   return null;

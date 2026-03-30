@@ -13,7 +13,6 @@ export function buildProjectEditState(state: ReturnType<typeof useEditorStore.ge
     imageOverlays: state.imageOverlays,
     messages: state.messages,
     appliedActions: state.appliedActions,
-    aiSettings: state.aiSettings,
     backgroundTranscript: state.backgroundTranscript,
     transcriptStatus: state.transcriptStatus,
     transcriptError: state.transcriptError,
@@ -49,7 +48,6 @@ export function useAutoSave() {
   const imageOverlays = useEditorStore(s => s.imageOverlays);
   const messages = useEditorStore(s => s.messages);
   const appliedActions = useEditorStore(s => s.appliedActions);
-  const aiSettings = useEditorStore(s => s.aiSettings);
   const backgroundTranscript = useEditorStore(s => s.backgroundTranscript);
   const transcriptStatus = useEditorStore(s => s.transcriptStatus);
   const transcriptError = useEditorStore(s => s.transcriptError);
@@ -90,5 +88,5 @@ export function useAutoSave() {
     }, 1500);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [clips, captions, transitions, markers, textOverlays, imageOverlays, messages, appliedActions, aiSettings, backgroundTranscript, transcriptStatus, transcriptError, sources, sourceTranscriptCaptions, sourceIndexFreshBySourceId, sourceIndex, videoDuration, currentProjectId, setSaveStatus]);
+  }, [clips, captions, transitions, markers, textOverlays, imageOverlays, messages, appliedActions, backgroundTranscript, transcriptStatus, transcriptError, sources, sourceTranscriptCaptions, sourceIndexFreshBySourceId, sourceIndex, videoDuration, currentProjectId, setSaveStatus]);
 }

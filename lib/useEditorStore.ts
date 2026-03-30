@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   AnalysisProgress,
   AppliedActionRecord,
-  AIEditingSettings,
   CaptionEntry,
   ChatMessage,
   ColorFilter,
@@ -33,11 +32,6 @@ import {
   sanitizeTimelineClips,
   splitClipsAtTime,
 } from './editActionUtils';
-import {
-  DEFAULT_AI_EDITING_SETTINGS,
-  mergeAISettings,
-  resolveAIEditingSettings,
-} from './aiSettings';
 import {
   buildTranscriptContext,
   formatTimePrecise,
@@ -514,7 +508,6 @@ function buildBaseEditorState(input?: {
   | 'history'
   | 'future'
   | 'isChatLoading'
-  | 'aiSettings'
   | 'appliedActions'
   | 'ffmpegJob'
   | 'currentProjectId'
@@ -562,7 +555,6 @@ function buildBaseEditorState(input?: {
     history: [],
     future: [],
     isChatLoading: false,
-    aiSettings: DEFAULT_AI_EDITING_SETTINGS,
     appliedActions: [],
     ffmpegJob: { status: 'idle' },
     currentProjectId: input?.currentProjectId ?? null,
@@ -613,7 +605,6 @@ interface EditorState {
   future: EditSnapshot[];
   messages: ChatMessage[];
   isChatLoading: boolean;
-  aiSettings: AIEditingSettings;
   appliedActions: AppliedActionRecord[];
   ffmpegJob: FFmpegJob;
   currentProjectId: string | null;
@@ -671,7 +662,6 @@ interface EditorState {
   setIsChatLoading: (v: boolean) => void;
   clearChatHistory: () => void;
   clearMessages: () => void;
-  setAISettings: (settings: Partial<AIEditingSettings>) => void;
   recordAppliedAction: (
     action: EditAction,
     summary: string,
@@ -693,7 +683,6 @@ interface EditorState {
       imageOverlays?: unknown[];
       messages?: unknown[];
       appliedActions?: unknown[];
-      aiSettings?: unknown;
       backgroundTranscript?: unknown;
       transcriptStatus?: unknown;
       transcriptError?: unknown;
@@ -752,8 +741,13 @@ interface EditorState {
   setActiveReviewFocusItemId: (itemId: string | null) => void;
   deleteSelectedItem: () => void;
   updateCaption: (id: string, patch: { startTime?: number; endTime?: number; text?: string; positionX?: number; positionY?: number; words?: CaptionEntry['words'] }) => void;
-  updateTextOverlay: (id: string, patch: { startTime?: number; endTime?: number }) => void;
+  updateTextOverlay: (id: string, patch: { startTime?: number; endTime?: number; text?: string; positionX?: number; positionY?: number; fontSize?: number }) => void;
   updateTransition: (id: string, patch: Partial<TransitionEntry>) => void;
+  addImageOverlay: (overlay: Omit<ImageOverlayEntry, 'id'>) => string;
+  updateImageOverlay: (id: string, patch: Partial<ImageOverlayEntry>) => void;
+  removeImageOverlay: (id: string) => void;
+  addTextOverlayAtTime: (time: number, text: string, duration: number) => string;
+  createImageOverlayAtTime: (sourceId: string, timelineTime: number) => string;
 }
 
 type EditorStoreWithSnapshot = EditorState & {
@@ -1373,22 +1367,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (action.type === 'none') return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const sourceTranscriptCaptions = get().sourceTranscriptCaptions;
-    if (action.type === 'update_ai_settings') {
-      set((state) => {
-        const aiSettings = mergeAISettings(state.aiSettings, action.settings);
-        return {
-          aiSettings,
-          pendingAction: null,
-          ...clearReviewStatePatch(),
-          ...buildDerivedIndexState(
-            state.clips,
-            state.transitions,
-            state.sourceTranscriptCaptions,
-          ),
-        };
-      });
-      return;
-    }
     const next = applyActionToSnapshot(snap, action, { sourceTranscriptCaptions });
     if (next === snap) return;
     set((state) => ({
@@ -1532,18 +1510,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...buildDerivedIndexState(
         nextClips,
         [],
-        state.sourceTranscriptCaptions,
-      ),
-    };
-  }),
-
-  setAISettings: (settings) => set((state) => {
-    const aiSettings = mergeAISettings(state.aiSettings, settings);
-    return {
-      aiSettings,
-      ...buildDerivedIndexState(
-        state.clips,
-        state.transitions,
         state.sourceTranscriptCaptions,
       ),
     };
@@ -1724,7 +1690,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
     }
 
-    const aiSettings = resolveAIEditingSettings(editState.aiSettings as Partial<AIEditingSettings> | undefined);
     const normalizedTransitions = normalizeTransitionState(
       hydratedClips,
       (editState.transitions as Array<Partial<TransitionEntry>> | undefined) ?? [],
@@ -1776,7 +1741,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           sourceId: canonicalizeProjectSourceId(range.sourceId, sourceIdAliases, MAIN_SOURCE_ID) ?? MAIN_SOURCE_ID,
         })),
       })),
-      aiSettings,
       backgroundTranscript: derivedIndexState.backgroundTranscript ?? (
         typeof editState.backgroundTranscript === 'string' ? editState.backgroundTranscript : null
       ),

@@ -356,8 +356,7 @@ export function applyActionToSnapshot(
   if (
     resolvedAction.type === 'none' ||
     resolvedAction.type === 'transcribe_request' ||
-    resolvedAction.type === 'request_frames' ||
-    resolvedAction.type === 'update_ai_settings'
+    resolvedAction.type === 'request_frames'
   ) return snapshot;
 
   if (resolvedAction.type === 'split_clip') {
