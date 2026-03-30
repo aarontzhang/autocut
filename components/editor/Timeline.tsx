@@ -948,7 +948,7 @@ export default function Timeline({
               const isFocused = activeReviewFocusItemId === overlay.itemId;
               const overlayWidth = Math.max(3, px(overlay.endTime) - px(overlay.startTime));
               const HANDLE_W = 14;
-              const handleColor = isFocused ? 'rgba(248,113,113,1)' : 'rgba(248,113,113,0.55)';
+              const handleColor = isFocused ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.6)';
               return (
                 <div
                   key={overlay.id}
@@ -996,12 +996,13 @@ export default function Timeline({
                     }}
                   >
                     <div style={{
-                      width: 4,
+                      width: 5,
                       height: '50%',
                       minHeight: 12,
                       maxHeight: 28,
                       borderRadius: 2,
                       background: handleColor,
+                      boxShadow: '0 0 4px rgba(0,0,0,0.5)',
                       transition: 'background 0.15s',
                     }} />
                   </div>
@@ -1029,12 +1030,13 @@ export default function Timeline({
                     }}
                   >
                     <div style={{
-                      width: 4,
+                      width: 5,
                       height: '50%',
                       minHeight: 12,
                       maxHeight: 28,
                       borderRadius: 2,
                       background: handleColor,
+                      boxShadow: '0 0 4px rgba(0,0,0,0.5)',
                       transition: 'background 0.15s',
                     }} />
                   </div>
