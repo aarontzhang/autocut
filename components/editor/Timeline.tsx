@@ -546,11 +546,11 @@ export default function Timeline({
           }}
         >
           <div style={{ height: RULER_H, borderBottom: '1px solid var(--border)' }} />
-          <TrackHeader icon={<VideoIcon />} label="V1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
-          <TrackHeader icon={<AudioIcon />} label="A1" height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
-          {hasCaptions && <EffectHeader label="CC" color="var(--caption-clip)" />}
-          {hasTextOverlays && <EffectHeader label="Text" color="var(--text-clip)" />}
-          {hasTransitions && <EffectHeader label="Trans." color="rgba(255,255,255,0.5)" />}
+          <TrackHeader icon={<VideoIcon />} height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
+          <TrackHeader icon={<AudioIcon />} height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
+          {hasCaptions && <EffectHeader icon={<CaptionIcon />} color="var(--caption-clip)" />}
+          {hasTextOverlays && <EffectHeader icon={<TextOverlayIcon />} color="var(--text-clip)" />}
+          {hasTransitions && <EffectHeader icon={<TransitionIcon />} color="rgba(255,255,255,0.5)" />}
         </div>
 
         <div
@@ -1218,9 +1218,8 @@ const TimelinePlayheadOverlay = memo(function TimelinePlayheadOverlay({
   );
 });
 
-function TrackHeader({ icon, label, height, color }: {
+function TrackHeader({ icon, height, color }: {
   icon: ReactNode;
-  label: string;
   height: number;
   color: string;
 }) {
@@ -1229,32 +1228,28 @@ function TrackHeader({ icon, label, height, color }: {
       height,
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      justifyContent: 'center',
       padding: '0 12px',
       borderBottom: '1px solid var(--border)',
-      color: 'var(--fg-secondary)',
-      fontSize: 11,
-      fontFamily: 'var(--font-serif)',
+      color,
     }}>
-      <span style={{ color }}>{icon}</span>
-      <span>{label}</span>
+      {icon}
     </div>
   );
 }
 
-function EffectHeader({ label, color }: { label: string; color: string }) {
+function EffectHeader({ icon, color }: { icon: ReactNode; color: string }) {
   return (
     <div style={{
       height: EFFECT_TRACK_H,
       display: 'flex',
       alignItems: 'center',
+      justifyContent: 'center',
       padding: '0 12px',
       borderBottom: '1px solid var(--border)',
       color,
-      fontSize: 10,
-      fontFamily: 'var(--font-serif)',
     }}>
-      {label}
+      {icon}
     </div>
   );
 }
@@ -1304,6 +1299,36 @@ function AudioIcon() {
       <path d="M11 5L6 9H3v6h3l5 4z" />
       <path d="M15.5 8.5a5 5 0 010 7" />
       <path d="M18.5 5.5a9 9 0 010 13" />
+    </svg>
+  );
+}
+
+function CaptionIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="3" />
+      <path d="M7 15h4" />
+      <path d="M13 15h4" />
+    </svg>
+  );
+}
+
+function TransitionIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="9" height="16" rx="2" />
+      <rect x="13" y="4" width="9" height="16" rx="2" />
+      <path d="M11 8l2 4-2 4" />
+    </svg>
+  );
+}
+
+function TextOverlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 4h12" />
+      <path d="M12 4v16" />
+      <path d="M8 20h8" />
     </svg>
   );
 }
