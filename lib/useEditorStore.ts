@@ -820,18 +820,18 @@ function insertClipsAtTimelineTime(
   sourceById: Map<string, ProjectSource>,
   timelineTime: number,
 ): VideoClip[] {
-  const splitClips = splitClipsAtTime(clips, timelineTime);
-  const insertionIndex = findInsertionIndex(splitClips, transitions, timelineTime);
+  const normalizedClips = sanitizeTimelineClips(clips);
+  const insertionIndex = findInsertionIndex(normalizedClips, transitions, timelineTime);
   const insertedClips = sourceIds
     .map((sourceId) => sourceById.get(sourceId))
     .filter((source): source is ProjectSource => !!source && source.duration > 0)
     .map((source) => makeClip(source.id, 0, source.duration));
 
-  if (insertedClips.length === 0) return splitClips;
+  if (insertedClips.length === 0) return normalizedClips;
   return [
-    ...splitClips.slice(0, insertionIndex),
+    ...normalizedClips.slice(0, insertionIndex),
     ...insertedClips,
-    ...splitClips.slice(insertionIndex),
+    ...normalizedClips.slice(insertionIndex),
   ];
 }
 
