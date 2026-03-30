@@ -13,7 +13,7 @@ import {
 } from '@/lib/timelineUtils';
 import { buildClipSchedule, findTimelineEntryAtTime, getTimelineDuration } from '@/lib/playbackEngine';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
-import { getReviewOverlayDescriptors } from '@/lib/editActionUtils';
+import { getReviewOverlayDescriptors, buildReviewGroupWithUpdatedItems, updateReviewItemAction, MIN_CLIP_DURATION_SECONDS } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
 import type { VideoPlayerHandle } from './VideoPlayer';
 
@@ -26,6 +26,15 @@ type PlayheadDragInfo = {
   pointerId: number;
   totalW: number;
   totalDuration: number;
+};
+
+type CutEdgeDragInfo = {
+  pointerId: number;
+  itemId: string;
+  edge: 'start' | 'end';
+  totalW: number;
+  totalDuration: number;
+  otherEdgeTime: number;
 };
 
 type ClipVisualLayout = {
@@ -96,6 +105,7 @@ export default function Timeline({
   const scrollRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean } | null>(null);
   const playheadDragRef = useRef<PlayheadDragInfo | null>(null);
+  const cutEdgeDragRef = useRef<CutEdgeDragInfo | null>(null);
 
   const [trackWidth, setTrackWidth] = useState(800);
 
@@ -397,6 +407,55 @@ export default function Timeline({
     scrubPlayhead(clientX, dragInfo);
   }, [scrubPlayhead, totalTimelineDuration, totalW]);
 
+  const updateCutEdge = useCallback((clientX: number, dragInfo: CutEdgeDragInfo) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const newTime = pxToTimelineTime(clientX, el);
+    const session = useEditorStore.getState().activeReviewSession;
+    if (!session) return;
+
+    let clampedTime: number;
+    if (dragInfo.edge === 'start') {
+      clampedTime = Math.max(0, Math.min(newTime, dragInfo.otherEdgeTime - MIN_CLIP_DURATION_SECONDS));
+    } else {
+      clampedTime = Math.max(dragInfo.otherEdgeTime + MIN_CLIP_DURATION_SECONDS, Math.min(newTime, contentDuration));
+    }
+
+    const patch = dragInfo.edge === 'start'
+      ? { deleteStartTime: clampedTime }
+      : { deleteEndTime: clampedTime };
+
+    const nextGroup = buildReviewGroupWithUpdatedItems(
+      session,
+      (items) => items.map((item) =>
+        item.id === dragInfo.itemId ? updateReviewItemAction(item, patch) : item
+      ),
+    );
+    useEditorStore.getState().setActiveReviewSession(nextGroup);
+  }, [contentDuration, pxToTimelineTime]);
+
+  const beginCutEdgeDrag = useCallback((
+    clientX: number,
+    pointerId: number,
+    itemId: string,
+    edge: 'start' | 'end',
+    startTime: number,
+    endTime: number,
+  ) => {
+    const dragInfo: CutEdgeDragInfo = {
+      pointerId,
+      itemId,
+      edge,
+      totalW,
+      totalDuration: totalTimelineDuration,
+      otherEdgeTime: edge === 'start' ? endTime : startTime,
+    };
+    cutEdgeDragRef.current = dragInfo;
+    document.body.style.cursor = 'ew-resize';
+    useEditorStore.getState().setActiveReviewFocusItemId(itemId);
+    updateCutEdge(clientX, dragInfo);
+  }, [totalTimelineDuration, totalW, updateCutEdge]);
+
   const endInteractions = useCallback((pointerId?: number) => {
     const playheadDrag = playheadDragRef.current;
     if (playheadDrag && (pointerId === undefined || playheadDrag.pointerId === pointerId)) {
@@ -408,7 +467,12 @@ export default function Timeline({
       panRef.current = null;
     }
 
-    if (!playheadDragRef.current && !panRef.current) {
+    const cutEdgeDrag = cutEdgeDragRef.current;
+    if (cutEdgeDrag && (pointerId === undefined || cutEdgeDrag.pointerId === pointerId)) {
+      cutEdgeDragRef.current = null;
+    }
+
+    if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current) {
       document.body.style.cursor = '';
     }
   }, []);
@@ -418,6 +482,12 @@ export default function Timeline({
       const playheadDrag = playheadDragRef.current;
       if (playheadDrag && playheadDrag.pointerId === e.pointerId) {
         scrubPlayhead(e.clientX, playheadDrag);
+        return;
+      }
+
+      const cutEdgeDrag = cutEdgeDragRef.current;
+      if (cutEdgeDrag && cutEdgeDrag.pointerId === e.pointerId) {
+        updateCutEdge(e.clientX, cutEdgeDrag);
         return;
       }
 
@@ -444,7 +514,7 @@ export default function Timeline({
       window.removeEventListener('pointercancel', onPointerEnd);
       endInteractions();
     };
-  }, [endInteractions, scrubPlayhead]);
+  }, [endInteractions, scrubPlayhead, updateCutEdge]);
 
   const px = (time: number) => tPx(time);
   const clipLayoutById = useMemo(
@@ -522,7 +592,7 @@ export default function Timeline({
         className="no-select"
         onPointerDown={e => {
           if (e.button !== 0) return;
-          if ((e.target as HTMLElement).closest('.playhead-hitbox, .playhead-dot')) return;
+          if ((e.target as HTMLElement).closest('.playhead-hitbox, .playhead-dot, .cut-edge-handle')) return;
           panRef.current = {
             pointerId: e.pointerId,
             startX: e.clientX,
@@ -694,13 +764,15 @@ export default function Timeline({
             {cutReviewOverlays.map((overlay) => {
               if (overlay.startTime === undefined || overlay.endTime === undefined) return null;
               const isFocused = activeReviewFocusItemId === overlay.itemId;
+              const overlayWidth = Math.max(3, px(overlay.endTime) - px(overlay.startTime));
+              const HANDLE_W = 8;
               return (
                 <div
                   key={overlay.id}
                   style={{
                     position: 'absolute',
                     left: px(overlay.startTime),
-                    width: Math.max(3, px(overlay.endTime) - px(overlay.startTime)),
+                    width: overlayWidth,
                     top: 4,
                     bottom: 4,
                     borderRadius: 4,
@@ -708,10 +780,74 @@ export default function Timeline({
                     background: isFocused
                       ? 'repeating-linear-gradient(135deg, rgba(248,113,113,0.45), rgba(248,113,113,0.45) 6px, rgba(248,113,113,0.18) 6px, rgba(248,113,113,0.18) 12px)'
                       : 'repeating-linear-gradient(135deg, rgba(248,113,113,0.24), rgba(248,113,113,0.24) 6px, rgba(248,113,113,0.1) 6px, rgba(248,113,113,0.1) 12px)',
-                    pointerEvents: 'none',
-                    zIndex: 1,
+                    pointerEvents: isFocused ? 'auto' : 'none',
+                    zIndex: isFocused ? 3 : 1,
                   }}
-                />
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {isFocused && (
+                    <div
+                      className="cut-edge-handle"
+                      style={{
+                        position: 'absolute',
+                        left: -HANDLE_W / 2,
+                        top: 0,
+                        bottom: 0,
+                        width: HANDLE_W,
+                        cursor: 'ew-resize',
+                        zIndex: 4,
+                        touchAction: 'none',
+                      }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'start', overlay.startTime!, overlay.endTime!);
+                      }}
+                    >
+                      <div style={{
+                        position: 'absolute',
+                        left: HANDLE_W / 2 - 1,
+                        top: '20%',
+                        bottom: '20%',
+                        width: 2,
+                        borderRadius: 1,
+                        background: 'rgba(248,113,113,0.85)',
+                      }} />
+                    </div>
+                  )}
+                  {isFocused && (
+                    <div
+                      className="cut-edge-handle"
+                      style={{
+                        position: 'absolute',
+                        right: -HANDLE_W / 2,
+                        top: 0,
+                        bottom: 0,
+                        width: HANDLE_W,
+                        cursor: 'ew-resize',
+                        zIndex: 4,
+                        touchAction: 'none',
+                      }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        beginCutEdgeDrag(e.clientX, e.pointerId, overlay.itemId, 'end', overlay.startTime!, overlay.endTime!);
+                      }}
+                    >
+                      <div style={{
+                        position: 'absolute',
+                        right: HANDLE_W / 2 - 1,
+                        top: '20%',
+                        bottom: '20%',
+                        width: 2,
+                        borderRadius: 1,
+                        background: 'rgba(248,113,113,0.85)',
+                      }} />
+                    </div>
+                  )}
+                </div>
               );
             })}
             {videoDuration > 0 && schedule.map((entry, index) => {
