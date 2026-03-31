@@ -209,6 +209,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   });
   const layerLoadTokenRef = useRef(0);
   const missingSourceRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const missingSourceRetryCountRef = useRef(0);
   const retryMissingSourceRef = useRef<((sourceId: string) => void) | null>(null);
 
   const setSourceDuration = useEditorStore((s) => s.setSourceDuration);
@@ -533,14 +534,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     setVideoLoadError(getSourceErrorMessage(sourceId));
     setPlaybackActive(false);
 
-    // Schedule a retry to recover from transient missing sources
+    // Schedule a retry with backoff to recover from transient missing sources
+    // (e.g. runtime URLs not yet populated after reload)
+    const MISSING_SOURCE_RETRY_DELAYS = [200, 600, 1400, 3000];
     if (missingSourceRetryRef.current !== null) {
       clearTimeout(missingSourceRetryRef.current);
     }
-    missingSourceRetryRef.current = setTimeout(() => {
-      missingSourceRetryRef.current = null;
-      retryMissingSourceRef.current?.(sourceId);
-    }, 200);
+    const retryIndex = missingSourceRetryCountRef.current;
+    if (retryIndex < MISSING_SOURCE_RETRY_DELAYS.length) {
+      missingSourceRetryRef.current = setTimeout(() => {
+        missingSourceRetryRef.current = null;
+        retryMissingSourceRef.current?.(sourceId);
+      }, MISSING_SOURCE_RETRY_DELAYS[retryIndex]);
+    }
   }, [clearLayer, getSourceErrorMessage, getVideoElement, setPlaybackActive]);
 
   useEffect(() => {
@@ -758,14 +764,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     retryMissingSourceRef.current = (sourceId: string) => {
       const url = getResolvedPlayableUrl(sourceId);
       if (url) {
+        missingSourceRetryCountRef.current = 0;
         setVideoLoadError(null);
         syncLayers(currentTimeRef.current, { allowPlay: playbackIntentRef.current });
+      } else {
+        missingSourceRetryCountRef.current++;
+        activateMissingSourceState(sourceId);
       }
     };
-  }, [getResolvedPlayableUrl, syncLayers]);
+  }, [activateMissingSourceState, getResolvedPlayableUrl, syncLayers]);
 
   useEffect(() => {
     return () => {
+      missingSourceRetryCountRef.current = 0;
       if (missingSourceRetryRef.current !== null) {
         clearTimeout(missingSourceRetryRef.current);
       }

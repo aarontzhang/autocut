@@ -438,6 +438,19 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           window.clearInterval(intervalId);
           intervalId = null;
         }
+
+        // Ensure sources with storage paths have runtime URLs populated
+        if (!cancelled) {
+          const currentState = useEditorStore.getState();
+          const hasSourcesMissingUrls = currentState.sources.some((source) => {
+            if (!source.storagePath) return false;
+            const runtime = currentState.sourceRuntimeById[source.id];
+            return !runtime?.playerUrl;
+          });
+          if (hasSourcesMissingUrls) {
+            await refreshSignedMediaUrls(projectId);
+          }
+        }
       } catch (error) {
         if (!cancelled) {
           console.warn('Failed to refresh source index:', error);
@@ -462,7 +475,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         window.clearInterval(intervalId);
       }
     };
-  }, [projectId, refreshSourceIndex]);
+  }, [projectId, refreshSignedMediaUrls, refreshSourceIndex]);
 
   useEffect(() => {
     if (!projectId) return;
