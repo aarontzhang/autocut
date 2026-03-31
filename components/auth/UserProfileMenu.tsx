@@ -219,11 +219,9 @@ export default function UserProfileMenu({
 
           {isSubscribed && !isManual && (
             <button
-              onClick={async () => {
+              onClick={() => {
                 setOpen(false);
-                const res = await fetch('/api/stripe/portal', { method: 'POST' });
-                const { url } = await res.json();
-                if (url) window.location.href = url;
+                window.location.href = '/subscription';
               }}
               style={{
                 display: 'flex',

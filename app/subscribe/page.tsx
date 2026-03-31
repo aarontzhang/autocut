@@ -304,19 +304,6 @@ function SuccessPanel() {
 /* ── Right panel: already subscribed ─────────────────────────── */
 
 function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
-  const [loading, setLoading] = useState(false);
-
-  const handleManage = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/stripe/portal', { method: 'POST' });
-      const { url } = await res.json();
-      if (url) window.location.href = url;
-    } catch {
-      setLoading(false);
-    }
-  };
-
   return (
     <div style={{ width: '100%', maxWidth: 380 }}>
       <Link href="/" className="sub-back" style={{ marginBottom: 40, display: 'inline-flex' }}>
@@ -361,22 +348,22 @@ function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
       </p>
 
       {!hideManage && (
-        <button
-          onClick={handleManage}
-          disabled={loading}
+        <Link
+          href="/subscription"
           className="iridescent-button"
           style={{
+            display: 'inline-flex',
             padding: '11px 28px',
             borderRadius: 10,
             fontSize: 14,
             fontWeight: 600,
-            cursor: loading ? 'default' : 'pointer',
+            textDecoration: 'none',
             fontFamily: 'inherit',
             transition: 'filter 0.15s, box-shadow 0.15s',
           }}
         >
-          {loading ? 'Please wait\u2026' : 'Manage Subscription'}
-        </button>
+          Manage Subscription
+        </Link>
       )}
     </div>
   );
