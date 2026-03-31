@@ -80,7 +80,7 @@ function SuccessView() {
   );
 }
 
-function SubscribedView() {
+function SubscribedView({ hideManage }: { hideManage?: boolean }) {
   const [loading, setLoading] = useState(false);
 
   const handleManage = async () => {
@@ -138,23 +138,25 @@ function SubscribedView() {
         </p>
       </div>
 
-      <button
-        onClick={handleManage}
-        disabled={loading}
-        className="iridescent-button"
-        style={{
-          padding: '11px 28px',
-          borderRadius: 10,
-          fontSize: 14,
-          fontWeight: 600,
-          cursor: loading ? 'default' : 'pointer',
-          fontFamily: 'inherit',
-          transition: 'filter 0.15s, box-shadow 0.15s',
-          marginTop: 4,
-        }}
-      >
-        {loading ? 'Please wait\u2026' : 'Manage Subscription'}
-      </button>
+      {!hideManage && (
+        <button
+          onClick={handleManage}
+          disabled={loading}
+          className="iridescent-button"
+          style={{
+            padding: '11px 28px',
+            borderRadius: 10,
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: loading ? 'default' : 'pointer',
+            fontFamily: 'inherit',
+            transition: 'filter 0.15s, box-shadow 0.15s',
+            marginTop: 4,
+          }}
+        >
+          {loading ? 'Please wait\u2026' : 'Manage Subscription'}
+        </button>
+      )}
     </div>
   );
 }
@@ -373,7 +375,7 @@ function PricingCard() {
 
 function SubscribeContent() {
   const { user, initialized } = useAuth();
-  const { isSubscribed, loading: subLoading } = useSubscription();
+  const { isSubscribed, isManual, loading: subLoading } = useSubscription();
   const searchParams = useSearchParams();
   const success = searchParams.get('success') === 'true';
 
@@ -472,7 +474,7 @@ function SubscribeContent() {
         {showSuccess ? (
           <SuccessView />
         ) : showSubscribed ? (
-          <SubscribedView />
+          <SubscribedView hideManage={isManual} />
         ) : (
           <PricingCard />
         )}

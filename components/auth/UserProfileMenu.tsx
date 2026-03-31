@@ -30,7 +30,7 @@ export default function UserProfileMenu({
   const [open, setOpen] = useState(false);
   const [imgError, setImgError] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const { isSubscribed } = useSubscription();
+  const { isSubscribed, isManual } = useSubscription();
 
   useEffect(() => {
     if (!open) return;
@@ -217,7 +217,7 @@ export default function UserProfileMenu({
             {dashboardLabel}
           </button>
 
-          {isSubscribed && (
+          {isSubscribed && !isManual && (
             <button
               onClick={async () => {
                 setOpen(false);

@@ -6,6 +6,7 @@ import { getSupabaseBrowser } from '@/lib/supabase/client';
 
 type SubscriptionState = {
   isSubscribed: boolean;
+  isManual: boolean;
   status: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
@@ -13,6 +14,7 @@ type SubscriptionState = {
 
 const SubscriptionContext = createContext<SubscriptionState>({
   isSubscribed: false,
+  isManual: false,
   status: null,
   loading: true,
   refresh: async () => {},
@@ -27,13 +29,23 @@ const ACTIVE = new Set(['active', 'trialing']);
 export default function SubscriptionProvider({ children }: { children: React.ReactNode }) {
   const { user, initialized } = useAuth();
   const [isSubscribed, setIsSubscribed] = useState(false);
+  const [isManual, setIsManual] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     if (!user) {
       setIsSubscribed(false);
+      setIsManual(false);
       setStatus(null);
+      setLoading(false);
+      return;
+    }
+
+    if (user.app_metadata?.manually_subscribed) {
+      setIsSubscribed(true);
+      setIsManual(true);
+      setStatus('active');
       setLoading(false);
       return;
     }
@@ -48,6 +60,7 @@ export default function SubscriptionProvider({ children }: { children: React.Rea
       .maybeSingle();
 
     setIsSubscribed(data ? ACTIVE.has(data.status) : false);
+    setIsManual(false);
     setStatus(data?.status ?? null);
     setLoading(false);
   }, [user]);
@@ -58,7 +71,7 @@ export default function SubscriptionProvider({ children }: { children: React.Rea
   }, [initialized, refresh]);
 
   return (
-    <SubscriptionContext.Provider value={{ isSubscribed, status, loading, refresh }}>
+    <SubscriptionContext.Provider value={{ isSubscribed, isManual, status, loading, refresh }}>
       {children}
     </SubscriptionContext.Provider>
   );

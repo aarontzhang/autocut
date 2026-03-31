@@ -74,7 +74,7 @@ export async function proxy(req: NextRequest) {
   }
 
   // Subscription gating — redirect to /subscribe if no active subscription
-  if (isProtectedPage(pathname)) {
+  if (isProtectedPage(pathname) && !user.app_metadata?.manually_subscribed) {
     const { data: sub } = await supabase
       .from('subscriptions')
       .select('status')
