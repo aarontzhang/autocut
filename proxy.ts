@@ -73,20 +73,29 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Check subscription status (uses user's session — RLS allows reading own rows)
-  const { data: subscription } = await supabase
-    .from('subscriptions')
-    .select('status')
+  // Skip paywall for existing users (already have projects in the system)
+  const { count: projectCount } = await supabase
+    .from('projects')
+    .select('id', { count: 'exact', head: true })
     .eq('user_id', user.id)
-    .in('status', ['active', 'trialing'])
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
 
-  if (!subscription) {
-    if (isProtectedApi(pathname)) {
-      return NextResponse.json({ error: 'Active subscription required' }, { status: 403 });
+  if (!projectCount) {
+    // New user — require active subscription
+    const { data: subscription } = await supabase
+      .from('subscriptions')
+      .select('status')
+      .eq('user_id', user.id)
+      .in('status', ['active', 'trialing'])
+      .limit(1)
+      .maybeSingle();
+
+    if (!subscription) {
+      if (isProtectedApi(pathname)) {
+        return NextResponse.json({ error: 'Active subscription required' }, { status: 403 });
+      }
+      return NextResponse.redirect(new URL('/subscribe', req.url));
     }
-    return NextResponse.redirect(new URL('/subscribe', req.url));
   }
 
   return response;
