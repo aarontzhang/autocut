@@ -14,6 +14,7 @@ let progressHandler: ((progress: number) => void) | null = null;
 let activeJobCancel: (() => void) | null = null;
 const remoteMediaInputCache = new Map<string, Promise<Uint8Array>>();
 const fileDataCache = new WeakMap<File, Promise<Uint8Array>>();
+const audioTrackCache = new Map<string, Promise<Uint8Array>>();
 let lastWrittenInputKey: string | null = null;
 let captionFontDataPromise: Promise<Uint8Array> | null = null;
 let recentFFmpegLogs: string[] = [];
@@ -59,6 +60,7 @@ export function resetFFmpeg() {
   progressHandler = null;
   lastWrittenInputKey = null;
   recentFFmpegLogs = [];
+  audioTrackCache.clear();
 }
 
 async function getFFmpeg(onProgress?: (progress: number) => void): Promise<FFmpeg> {
@@ -108,7 +110,19 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
   if (fileOrUrl instanceof File) {
     let pending = fileDataCache.get(fileOrUrl);
     if (!pending) {
-      pending = fileOrUrl.arrayBuffer().then((buf) => new Uint8Array(buf as ArrayBuffer));
+      pending = fileOrUrl.arrayBuffer().then(
+        (buf) => new Uint8Array(buf as ArrayBuffer),
+        (error) => {
+          // Remove cached rejection so future attempts can retry (e.g. after re-adding the file).
+          fileDataCache.delete(fileOrUrl);
+          const isNotReadable = error instanceof DOMException && error.name === 'NotReadableError';
+          throw new Error(
+            isNotReadable
+              ? `Could not read "${fileOrUrl.name}". The file may have been moved or the browser lost access. Try refreshing the page.`
+              : `Failed to read "${fileOrUrl.name}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      );
       fileDataCache.set(fileOrUrl, pending);
     }
     return pending;
@@ -587,18 +601,91 @@ export function isFFmpegAbortError(error: unknown): boolean {
   return typeof error === 'string' && error.includes('FFmpeg.terminate()');
 }
 
+/**
+ * Extract and cache the full audio track from a video source.
+ *
+ * For a 2-hour video the audio-only MP3 is typically ~100-140 MB —
+ * far smaller than the multi-GB video.  Caching the audio track
+ * avoids keeping the full video in FFmpeg's WASM memory for the
+ * duration of the transcription run.
+ */
+async function getOrExtractAudioTrack(
+  fileOrUrl: Uint8Array | File | string,
+): Promise<Uint8Array> {
+  const sourceKey = getSourceKey(fileOrUrl);
+  const cacheKey = sourceKey ? `audio:${sourceKey}` : null;
+
+  if (cacheKey) {
+    const cached = audioTrackCache.get(cacheKey);
+    if (cached) return cached;
+  }
+
+  const pending = (async () => {
+    const ffmpeg = await getFFmpeg();
+    const inputBytes = await readMediaInput(fileOrUrl);
+
+    // Write the full video source to a temporary VFS file.
+    try { await ffmpeg.deleteFile('_aud_src'); } catch { /* ok */ }
+    await ffmpeg.writeFile('_aud_src', cloneWritableBytes(inputBytes));
+
+    // Extract mono 16 kHz MP3 audio track (no video/subtitle/data streams).
+    try { await ffmpeg.deleteFile('_aud_full.mp3'); } catch { /* ok */ }
+    await execOrThrow(ffmpeg, [
+      '-i', '_aud_src',
+      '-vn', '-sn', '-dn',
+      '-ar', '16000',
+      '-ac', '1',
+      '-q:a', '5',
+      '-f', 'mp3',
+      '_aud_full.mp3',
+    ]);
+
+    const audioData = new Uint8Array(
+      (await ffmpeg.readFile('_aud_full.mp3')) as unknown as ArrayBuffer,
+    );
+
+    // Clean up the large video file from the WASM filesystem.
+    try { await ffmpeg.deleteFile('_aud_src'); } catch { /* ok */ }
+    try { await ffmpeg.deleteFile('_aud_full.mp3'); } catch { /* ok */ }
+
+    // Free the original video bytes from the URL download cache so they
+    // can be garbage-collected while the much smaller audio stays cached.
+    if (typeof fileOrUrl === 'string') {
+      remoteMediaInputCache.delete(fileOrUrl);
+    }
+
+    return audioData;
+  })();
+
+  if (cacheKey) {
+    audioTrackCache.set(cacheKey, pending);
+  }
+
+  try {
+    return await pending;
+  } catch (error) {
+    if (cacheKey) audioTrackCache.delete(cacheKey);
+    throw error;
+  }
+}
+
 export async function extractAudioSegment(
   fileOrUrl: Uint8Array | File | string,
   startTime: number,
   endTime: number,
 ): Promise<Blob> {
+  // Use the cached audio-only track instead of the full video.
+  // This keeps WASM memory usage at ~100 MB instead of multiple GB.
+  const audioTrack = await getOrExtractAudioTrack(fileOrUrl);
+
   const ffmpeg = await getFFmpeg();
-  const inputKey = getSourceKey(fileOrUrl);
-  if (inputKey === null || inputKey !== lastWrittenInputKey) {
-    const inputBytes = await readMediaInput(fileOrUrl);
+  const sourceKey = getSourceKey(fileOrUrl);
+  const audioInputKey = sourceKey ? `audio:${sourceKey}` : null;
+
+  if (audioInputKey === null || audioInputKey !== lastWrittenInputKey) {
     try { await ffmpeg.deleteFile('input_audio'); } catch { /* doesn't exist, fine */ }
-    await ffmpeg.writeFile('input_audio', cloneWritableBytes(inputBytes));
-    lastWrittenInputKey = inputKey;
+    await ffmpeg.writeFile('input_audio', cloneWritableBytes(audioTrack));
+    lastWrittenInputKey = audioInputKey;
   }
   try { await ffmpeg.deleteFile('audio_out.mp3'); } catch { /* doesn't exist, fine */ }
 

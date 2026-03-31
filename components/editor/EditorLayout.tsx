@@ -282,7 +282,10 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
 
     const workPlan = sourcesToTranscribe.map((entry) => ({
       sourceId: entry.sourceId,
-      source: entry.source!,
+      // Prefer the server URL over a local File reference for transcription.
+      // File objects can become stale during long processing (browser sandbox
+      // permissions expire), causing NotReadableError on large videos.
+      source: (entry.processingUrl || entry.source)!,
       ranges: buildOverlappingRanges(0, entry.duration),
     }));
     const totalRanges = workPlan.reduce((total, entry) => total + Math.max(entry.ranges.length, 1), 0);

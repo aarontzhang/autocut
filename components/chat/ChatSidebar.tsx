@@ -1997,7 +1997,7 @@ function AssistantMessage({
           throw new Error(`Missing media source for transcript request (${sourceId}).`);
         }
         const captionsForSource = await transcribeSourceRanges(
-          sourceEntry.source,
+          sourceEntry.processingUrl || sourceEntry.source,
           ranges,
           DEFAULT_AI_EDITING_SETTINGS.captions.wordsPerCaption,
           {
