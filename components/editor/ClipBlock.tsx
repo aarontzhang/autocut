@@ -27,7 +27,7 @@ export default function ClipBlock({
   clip, left, width, height, top, isSelected, isTagged,
   onPointerDown, isDragging, index, title,
 }: ClipBlockProps) {
-  const clipNumber = index + 1;
+  const clipNumber = clip.displayNumber ?? (index + 1);
   const color = CLIP_COLOR;
 
   // Timeline duration = sourceDuration / speed

@@ -288,7 +288,8 @@ export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): Vide
   if (firstDuration < MIN_CLIP_DURATION_SECONDS || secondDuration < MIN_CLIP_DURATION_SECONDS) return normalizedClips;
 
   const firstClip: VideoClip = { ...clip, sourceDuration: firstDuration };
-  const secondClip: VideoClip = { ...clip, id: uuidv4(), sourceStart: secondStart, sourceDuration: secondDuration };
+  const nextDn = Math.max(...normalizedClips.map(c => c.displayNumber ?? 0)) + 1;
+  const secondClip: VideoClip = { ...clip, id: uuidv4(), sourceStart: secondStart, sourceDuration: secondDuration, displayNumber: nextDn };
   const index = normalizedClips.findIndex(item => item.id === clip.id);
   return [...normalizedClips.slice(0, index), firstClip, secondClip, ...normalizedClips.slice(index + 1)];
 }
@@ -323,11 +324,13 @@ export function deleteRangeFromClips(clips: VideoClip[], startTime: number, endT
       const secondDuration = clip.sourceDuration - secondOffset;
       if (firstDuration >= MIN_CLIP_DURATION_SECONDS) nextClips.push({ ...clip, sourceDuration: firstDuration });
       if (secondDuration >= MIN_CLIP_DURATION_SECONDS) {
+        const splitDn = Math.max(...normalizedClips.map(c => c.displayNumber ?? 0), ...nextClips.map(c => c.displayNumber ?? 0)) + 1;
         nextClips.push({
           ...clip,
           id: uuidv4(),
           sourceStart: clip.sourceStart + secondOffset,
           sourceDuration: secondDuration,
+          displayNumber: splitDn,
         });
       }
       continue;

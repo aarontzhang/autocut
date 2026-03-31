@@ -17,6 +17,7 @@ export interface VideoClip {
   filter: ColorFilter | null;
   fadeIn: number;        // seconds
   fadeOut: number;       // seconds
+  displayNumber: number; // stable identity number, persists across reorder
 }
 
 export interface ClipScheduleEntry {

@@ -96,7 +96,12 @@ function remapOverlaysAndCaptions(
   };
 }
 
-function makeClip(sourceId: string, sourceStart: number, sourceDuration: number): VideoClip {
+function deriveNextDisplayNumber(clips: VideoClip[]): number {
+  if (clips.length === 0) return 1;
+  return Math.max(...clips.map(c => c.displayNumber ?? 0)) + 1;
+}
+
+function makeClip(sourceId: string, sourceStart: number, sourceDuration: number, displayNumber: number): VideoClip {
   return {
     id: uuidv4(),
     sourceId,
@@ -107,6 +112,7 @@ function makeClip(sourceId: string, sourceStart: number, sourceDuration: number)
     filter: null,
     fadeIn: 0,
     fadeOut: 0,
+    displayNumber,
   };
 }
 
@@ -165,6 +171,7 @@ function normalizeLoadedClip(
     filter: clip.filter ?? null,
     fadeIn: Number.isFinite(clip.fadeIn) ? clip.fadeIn! : 0,
     fadeOut: Number.isFinite(clip.fadeOut) ? clip.fadeOut! : 0,
+    displayNumber: Number.isFinite(clip.displayNumber) && clip.displayNumber! > 0 ? clip.displayNumber! : 0,
   };
 }
 
@@ -509,6 +516,7 @@ function buildBaseEditorState(input?: {
   | 'requestedSeekTime'
   | 'pendingAction'
   | 'clips'
+  | 'nextClipDisplayNumber'
   | 'captions'
   | 'transitions'
   | 'markers'
@@ -557,6 +565,7 @@ function buildBaseEditorState(input?: {
     requestedSeekTime: null,
     pendingAction: null,
     clips: [],
+    nextClipDisplayNumber: 1,
     captions: [],
     transitions: [],
     markers: [],
@@ -607,6 +616,7 @@ interface EditorState {
   requestedSeekTime: number | null;
   pendingAction: EditAction | null;
   clips: VideoClip[];
+  nextClipDisplayNumber: number;
   captions: CaptionEntry[];
   transitions: TransitionEntry[];
   markers: MarkerEntry[];
@@ -839,13 +849,15 @@ function insertClipsAtTimelineTime(
   sourceIds: string[],
   sourceById: Map<string, ProjectSource>,
   timelineTime: number,
+  startDisplayNumber: number,
 ): VideoClip[] {
   const normalizedClips = sanitizeTimelineClips(clips);
   const insertionIndex = findInsertionIndex(normalizedClips, transitions, timelineTime);
+  let dn = startDisplayNumber;
   const insertedClips = sourceIds
     .map((sourceId) => sourceById.get(sourceId))
     .filter((source): source is ProjectSource => !!source && source.duration > 0)
-    .map((source) => makeClip(source.id, 0, source.duration));
+    .map((source) => makeClip(source.id, 0, source.duration, dn++));
 
   if (insertedClips.length === 0) return normalizedClips;
   return [
@@ -913,13 +925,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const sourceById = new Map(nextSources.map((source) => [source.id, source]));
     const insertedSourceIds = addedSources.map((source) => source.id);
     const shouldAppendClips = options?.shouldAppendClips !== false;
+    let dn = deriveNextDisplayNumber(currentState.clips);
     const nextClips = shouldAppendClips
       ? (Number.isFinite(options?.insertAtTime)
-          ? insertClipsAtTimelineTime(currentState.clips, currentState.transitions, insertedSourceIds, sourceById, options!.insertAtTime!)
+          ? insertClipsAtTimelineTime(currentState.clips, currentState.transitions, insertedSourceIds, sourceById, options!.insertAtTime!, dn)
           : [...currentState.clips, ...insertedSourceIds
               .map((sourceId) => sourceById.get(sourceId))
               .filter((source): source is ProjectSource => !!source && source.duration > 0)
-              .map((source) => makeClip(source.id, 0, source.duration))])
+              .map((source) => makeClip(source.id, 0, source.duration, dn++))])
       : currentState.clips;
     const nextTransitions = shouldAppendClips
       ? normalizeTransitionState(nextClips, currentState.transitions)
@@ -930,6 +943,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => ({
       ...primaryMirror,
       clips: nextClips,
+      nextClipDisplayNumber: deriveNextDisplayNumber(nextClips),
       transitions: nextTransitions,
       history: shouldAppendClips && state.clips.length > 0 ? [...state.history, snap] : state.history,
       future: shouldAppendClips ? [] : state.future,
@@ -962,12 +976,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const source = state.sources.find((entry) => entry.id === sourceId);
     if (!source || source.duration <= 0) return;
     const snap = (state as EditorStoreWithSnapshot)._snapshot();
-    const nextClips = [...state.clips, makeClip(source.id, 0, source.duration)];
+    const dn = deriveNextDisplayNumber(state.clips);
+    const nextClips = [...state.clips, makeClip(source.id, 0, source.duration, dn)];
     const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
     set((current) => ({
       history: [...current.history, snap],
       future: [],
       clips: nextClips,
+      nextClipDisplayNumber: dn + 1,
       transitions: nextTransitions,
       markers: [],
       taggedMarkerIds: [],
@@ -989,7 +1005,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   insertClipsFromSources: (sourceIds, timelineTime) => {
     const state = get();
     const sourceById = new Map(state.sources.map((source) => [source.id, source]));
-    const nextClips = insertClipsAtTimelineTime(state.clips, state.transitions, sourceIds, sourceById, timelineTime);
+    const nextClips = insertClipsAtTimelineTime(state.clips, state.transitions, sourceIds, sourceById, timelineTime, deriveNextDisplayNumber(state.clips));
     if (nextClips === state.clips) return;
     const snap = (state as EditorStoreWithSnapshot)._snapshot();
     const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
@@ -998,6 +1014,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...current.history, snap],
       future: [],
       clips: nextClips,
+      nextClipDisplayNumber: deriveNextDisplayNumber(nextClips),
       transitions: nextTransitions,
       ...remapped,
       markers: [],
@@ -1094,11 +1111,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     ));
     const primaryMirror = buildPrimaryMirrorState(nextSources, state.sourceRuntimeById, state.currentProjectId);
     const clipsAreEmpty = state.clips.length === 0 && sourceId === MAIN_SOURCE_ID && duration > 0;
-    const nextClips = clipsAreEmpty ? [makeClip(MAIN_SOURCE_ID, 0, duration)] : state.clips;
+    const nextClips = clipsAreEmpty ? [makeClip(MAIN_SOURCE_ID, 0, duration, 1)] : state.clips;
     const nextTransitions = clipsAreEmpty ? normalizeTransitionState(nextClips, state.transitions) : state.transitions;
     return {
       ...primaryMirror,
       clips: nextClips,
+      ...(clipsAreEmpty ? { nextClipDisplayNumber: 2 } : {}),
       transitions: nextTransitions,
       ...buildDerivedIndexState(
         nextClips,
@@ -1173,6 +1191,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...current.history, snap],
       future: [],
       clips: newClips,
+      nextClipDisplayNumber: deriveNextDisplayNumber(newClips),
       transitions: nextTransitions,
       ...remapped,
       markers: [],
@@ -1204,6 +1223,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       history: [...current.history, snap],
       future: [],
       clips: newClips,
+      nextClipDisplayNumber: deriveNextDisplayNumber(newClips),
       transitions: nextTransitions,
       ...remapped,
       markers: [],
@@ -1446,6 +1466,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...prev,
       history: history.slice(0, -1),
       future: [snap, ...future],
+      nextClipDisplayNumber: deriveNextDisplayNumber(prev.clips),
       appliedActions: prev.appliedActions ?? get().appliedActions,
       pendingAction: null,
       selectedItem: null,
@@ -1475,6 +1496,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...next,
       history: [...history, snap],
       future: future.slice(1),
+      nextClipDisplayNumber: deriveNextDisplayNumber(next.clips),
       appliedActions: next.appliedActions ?? get().appliedActions,
       pendingAction: null,
       selectedItem: null,
@@ -1527,12 +1549,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   })),
 
   clearMessages: () => set((state) => {
-    const nextClips = state.videoDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, state.videoDuration)] : [];
+    const nextClips = state.videoDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, state.videoDuration, 1)] : [];
     return {
       messages: [],
       appliedActions: [],
       pendingAction: null,
       clips: nextClips,
+      nextClipDisplayNumber: nextClips.length > 0 ? 2 : 1,
       captions: [],
       transitions: [],
       markers: [],
@@ -1683,9 +1706,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         sourceIdAliases,
       ))
       .filter((clip): clip is VideoClip => !!clip));
+    // Backward compat: assign sequential displayNumbers to clips loaded without one
+    let loadDn = 1;
+    for (const clip of clips) {
+      if (clip.displayNumber === 0) {
+        clip.displayNumber = loadDn;
+      }
+      loadDn = Math.max(loadDn, clip.displayNumber + 1);
+    }
     const hydratedClips = clips.length > 0
       ? clips
-      : (effectiveDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, effectiveDuration)] : []);
+      : (effectiveDuration > 0 ? [makeClip(MAIN_SOURCE_ID, 0, effectiveDuration, 1)] : []);
 
     const rawTranscriptCaptions = Array.isArray(editState.sourceTranscriptCaptions)
       ? editState.sourceTranscriptCaptions
@@ -1753,6 +1784,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...primaryMirror,
       }),
       clips: hydratedClips,
+      nextClipDisplayNumber: deriveNextDisplayNumber(hydratedClips),
       captions: ((editState.captions as Partial<CaptionEntry>[] | undefined) ?? [])
         .map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))
         .filter((entry): entry is CaptionEntry => !!entry),

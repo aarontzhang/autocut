@@ -146,7 +146,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Use replace_text_overlay when user says: "change the text overlay", "move it to top", "make the font smaller", "edit the title" — i.e. modifying an existing overlay. Include overlayIndex (0-based) to identify which overlay to replace.
 - Use the text-overlay defaults from context unless the user asks for something different.
 
-### 11. Image Overlays (add_image_overlay)
+### 11. Image Overlays (add_image_overlay / update_image_overlay / remove_image_overlay)
 - Add image overlays to display imported images over the video at specific timeline times
 - sourceId: ID of an imported image source (provided in context as "Image sources")
 - startTime/endTime: when the overlay appears/disappears (seconds)
@@ -157,6 +157,11 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Image sources in context may include a description of what the image shows. Use these descriptions to match user requests to the right image (e.g., "add the logo" → find the source described as a logo).
 - When the user asks for smart or automatic image placement, cross-reference image descriptions with the transcript to find contextually relevant timestamps. For example, if an image shows a product and the speaker mentions that product at a specific time, suggest placing the overlay there.
 - When suggesting placements, pick a reasonable duration (3-10 seconds) based on context and position the image appropriately (e.g., corner for logos, center for feature images).
+- Use update_image_overlay to modify an existing image overlay. Provide imageOverlayId (from context) and imageOverlayPatch with only the fields to change (startTime, endTime, positionX, positionY, widthPercent, opacity).
+- Use when user says: "move the image", "resize the logo", "change opacity", "shift the overlay earlier", "make it bigger", etc.
+- Use remove_image_overlay to delete an existing image overlay. Provide imageOverlayId (from context).
+- Use when user says: "remove the image", "delete the overlay", "take off the watermark", etc.
+- IMPORTANT: When the user asks to move or modify an existing overlay, use update_image_overlay — do NOT use add_image_overlay, which would create a duplicate.
 
 ## Response format
 
@@ -220,6 +225,12 @@ Replace/edit existing text overlay (index 0):
 
 Image overlay:
 <action>{"type":"add_image_overlay","imageOverlays":[{"sourceId":"img_src_id","startTime":0,"endTime":10,"positionX":50,"positionY":50,"widthPercent":25,"opacity":1}],"message":"Added image overlay.","final":true}</action>
+
+Update existing image overlay (move to new time):
+<action>{"type":"update_image_overlay","imageOverlayId":"overlay-uuid","imageOverlayPatch":{"startTime":5,"endTime":15},"message":"Moved the image overlay.","final":true}</action>
+
+Remove image overlay:
+<action>{"type":"remove_image_overlay","imageOverlayId":"overlay-uuid","message":"Removed the image overlay.","final":true}</action>
 
 No action:
 <action>{"type":"none","message":"Just a note."}</action>
@@ -1688,6 +1699,25 @@ Honor these defaults unless the user explicitly asks for something different in 
           imageSourceEntries.map((s) => {
             const desc = s.description ? ` — ${s.description}` : '';
             return `- sourceId: "${s.id}", file: "${s.fileName}"${desc}`;
+          }).join('\n')
+        );
+      }
+    }
+
+    // Include existing image overlays so the AI can update/remove them
+    if (context?.imageOverlays && Array.isArray(context.imageOverlays) && context.imageOverlays.length > 0) {
+      const overlayEntries = (context.imageOverlays as Array<{
+        id?: string; sourceId?: string; startTime?: number; endTime?: number;
+        positionX?: number; positionY?: number; widthPercent?: number; opacity?: number;
+      }>).filter(o => o.id);
+      if (overlayEntries.length > 0) {
+        const imgSources = (context.imageSources as Array<{ id?: string; fileName?: string }>) ?? [];
+        contextLines.push(
+          `\nCurrent image overlays on timeline:\n` +
+          overlayEntries.map(o => {
+            const src = imgSources.find(s => s.id === o.sourceId);
+            const fileName = src?.fileName ?? o.sourceId ?? 'unknown';
+            return `- id: "${o.id}", source: "${fileName}", ${formatTimePrecise(o.startTime ?? 0)}-${formatTimePrecise(o.endTime ?? 0)}, pos (${o.positionX ?? 50},${o.positionY ?? 50}), width ${o.widthPercent ?? 25}%, opacity ${o.opacity ?? 1}`;
           }).join('\n')
         );
       }

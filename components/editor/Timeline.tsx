@@ -124,7 +124,8 @@ export default function Timeline({
 
   const [trackWidth, setTrackWidth] = useState(800);
   const [clipDropIndicator, setClipDropIndicator] = useState<{ xPx: number; targetIndex: number } | null>(null);
-  const [dragGhost, setDragGhost] = useState<{ clipId: string; clientX: number; clientY: number; width: number; height: number } | null>(null);
+  const [dragGhost, setDragGhost] = useState<{ clipId: string; clientX: number; clientY: number; width: number; height: number; waveformSlice: number[] } | null>(null);
+  const waveformRef = useRef<number[]>([]);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
@@ -267,6 +268,7 @@ export default function Timeline({
     const bars = Math.max(100, Math.floor(totalW / 4));
     return generateWaveform(videoDuration, bars);
   }, [videoDuration, totalW]);
+  waveformRef.current = waveform;
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -510,7 +512,23 @@ export default function Timeline({
   const updateImageEdge = useCallback((clientX: number, drag: { overlayId: string; edge: 'start' | 'end'; otherEdgeTime: number }) => {
     const el = scrollRef.current;
     if (!el) return;
-    const newTime = pxToTimelineTime(clientX, el);
+    let newTime = pxToTimelineTime(clientX, el);
+
+    // Magnetic snapping to clip boundaries and playhead
+    if (totalW > 0 && totalTimelineDuration > 0) {
+      const snapThreshold = 8 / totalW * totalTimelineDuration;
+      const state = useEditorStore.getState();
+      const snapPoints: number[] = [state.currentTime];
+      const currentSchedule = buildClipSchedule(state.clips, state.transitions);
+      for (const entry of currentSchedule) {
+        snapPoints.push(entry.timelineStart);
+        snapPoints.push(entry.timelineEnd);
+      }
+      for (const sp of snapPoints) {
+        if (Math.abs(newTime - sp) < snapThreshold) { newTime = sp; break; }
+      }
+    }
+
     let clamped: number;
     if (drag.edge === 'start') {
       clamped = Math.max(0, Math.min(newTime, drag.otherEdgeTime - MIN_CLIP_DURATION_SECONDS));
@@ -519,7 +537,7 @@ export default function Timeline({
     }
     const patch = drag.edge === 'start' ? { startTime: clamped } : { endTime: clamped };
     useEditorStore.getState().updateImageOverlay(drag.overlayId, patch);
-  }, [contentDuration, pxToTimelineTime]);
+  }, [contentDuration, pxToTimelineTime, totalW, totalTimelineDuration]);
 
   const beginImageEdgeDrag = useCallback((
     clientX: number,
@@ -544,10 +562,32 @@ export default function Timeline({
     const timeDelta = cursorTime - startCursorTime;
     let newStart = drag.originalStartTime + timeDelta;
     let newEnd = drag.originalEndTime + timeDelta;
+
+    // Magnetic snapping to clip boundaries and playhead
+    if (totalW > 0 && totalTimelineDuration > 0) {
+      const snapThreshold = 8 / totalW * totalTimelineDuration;
+      const state = useEditorStore.getState();
+      const snapPoints: number[] = [state.currentTime];
+      const currentSchedule = buildClipSchedule(state.clips, state.transitions);
+      for (const entry of currentSchedule) {
+        snapPoints.push(entry.timelineStart);
+        snapPoints.push(entry.timelineEnd);
+      }
+      let bestDist = snapThreshold;
+      let bestDelta = 0;
+      for (const sp of snapPoints) {
+        const dStart = Math.abs(newStart - sp);
+        if (dStart < bestDist) { bestDist = dStart; bestDelta = sp - newStart; }
+        const dEnd = Math.abs(newEnd - sp);
+        if (dEnd < bestDist) { bestDist = dEnd; bestDelta = sp - newEnd; }
+      }
+      if (bestDist < snapThreshold) { newStart += bestDelta; newEnd += bestDelta; }
+    }
+
     if (newStart < 0) { newStart = 0; newEnd = duration; }
     if (newEnd > contentDuration) { newEnd = contentDuration; newStart = contentDuration - duration; }
     useEditorStore.getState().updateImageOverlay(drag.overlayId, { startTime: newStart, endTime: newEnd });
-  }, [contentDuration, pxToTimelineTime]);
+  }, [contentDuration, pxToTimelineTime, totalW, totalTimelineDuration]);
 
   const beginClipReorderDrag = useCallback((
     e: React.PointerEvent,
@@ -701,12 +741,28 @@ export default function Timeline({
         }
         const indicatorX = (indicatorTime / totalDur) * totalPx;
         setClipDropIndicator({ xPx: indicatorX, targetIndex: dropIndex });
+        const draggedClip = currentClips.find(c => c.id === clipDrag.clipId);
+        let waveSlice: number[] = [];
+        if (draggedClip) {
+          const vd = useEditorStore.getState().videoDuration;
+          const wf = waveformRef.current;
+          if (draggedClip.sourceId === MAIN_SOURCE_ID && vd > 0 && wf.length > 0) {
+            const startFrac = draggedClip.sourceStart / vd;
+            const endFrac = (draggedClip.sourceStart + draggedClip.sourceDuration) / vd;
+            const startBar = Math.floor(startFrac * wf.length);
+            const endBar = Math.ceil(endFrac * wf.length);
+            waveSlice = wf.slice(startBar, endBar);
+          } else {
+            waveSlice = Array.from({ length: 12 }, (_, i) => 0.35 + (i % 5) / 10);
+          }
+        }
         setDragGhost({
           clipId: clipDrag.clipId,
           clientX: e.clientX,
           clientY: e.clientY,
           width: clipDrag.clipWidth,
           height: clipDrag.clipHeight,
+          waveformSlice: waveSlice,
         });
         return;
       }
@@ -1112,7 +1168,7 @@ export default function Timeline({
                   isTagged={false}
                   isDragging={clipDropIndicator !== null && clipReorderDragRef.current?.clipId === clip.id}
                   index={index}
-                  title={`Clip ${index + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
+                  title={`Clip ${clip.displayNumber ?? (index + 1)} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onPointerDown={e => beginClipReorderDrag(e, clip.id, index, layout.displayWidth, BASE_TRACK_HEIGHT - 12)}
                 />
               );
@@ -1211,7 +1267,7 @@ export default function Timeline({
                     boxShadow: isClipSelected ? '0 0 0 1px rgba(96,165,250,0.45), inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none',
                     opacity: isClipDragging ? 0.4 : isClipSelected ? 1 : 0.92,
                   }}
-                  title={`Clip ${schedule.findIndex((item) => item.clipId === clip.id) + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
+                  title={`Clip ${clip.displayNumber ?? ''} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onPointerDown={e => {
                     if (e.button !== 0) return;
                     beginClipReorderDrag(e, clip.id, clips.findIndex(c => c.id === clip.id), layout.displayWidth, BASE_TRACK_HEIGHT - 12);
@@ -1654,30 +1710,53 @@ export default function Timeline({
             left: dragGhost.clientX - dragGhost.width / 2,
             top: dragGhost.clientY - dragGhost.height / 2,
             width: dragGhost.width,
+            pointerEvents: 'none',
+            zIndex: 9999,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}
+        >
+          {/* Video clip block */}
+          <div style={{
             height: dragGhost.height,
             background: 'rgba(59,130,246,0.45)',
             border: '1.5px solid rgba(96,165,250,0.9)',
             borderRadius: 4,
             opacity: 0.9,
-            pointerEvents: 'none',
-            zIndex: 9999,
             boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
             display: 'flex',
             alignItems: 'center',
             paddingLeft: 10,
-          }}
-        >
-          <span style={{
-            fontSize: 10,
-            fontWeight: 500,
-            color: 'rgba(255,255,255,0.9)',
-            fontFamily: 'var(--font-serif)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
           }}>
-            {`Clip ${(schedule.findIndex(e => e.clipId === dragGhost.clipId) + 1) || ''}`}
-          </span>
+            <span style={{
+              fontSize: 10,
+              fontWeight: 500,
+              color: 'rgba(255,255,255,0.9)',
+              fontFamily: 'var(--font-serif)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}>
+              {`Clip ${clips.find(c => c.id === dragGhost.clipId)?.displayNumber ?? ''}`}
+            </span>
+          </div>
+          {/* Audio waveform block */}
+          <div style={{
+            height: dragGhost.height,
+            border: '1px solid rgba(255,255,255,0.06)',
+            borderRadius: 4,
+            overflow: 'hidden',
+            opacity: 0.9,
+            background: 'rgba(96,165,250,0.12)',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '2px 0',
+          }}>
+            {dragGhost.waveformSlice.map((h, i) => (
+              <div key={i} className="waveform-bar" style={{ flex: 1, minWidth: 1, height: `${h * 90}%`, opacity: 0.6 }} />
+            ))}
+          </div>
         </div>
       )}
     </div>

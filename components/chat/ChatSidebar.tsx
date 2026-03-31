@@ -2844,7 +2844,16 @@ export default function ChatSidebar() {
             note: marker.note ?? null,
           })),
           textOverlayCount: freshState.textOverlays.length,
-          imageOverlayCount: freshState.imageOverlays.length,
+          imageOverlays: freshState.imageOverlays.map(o => ({
+            id: o.id,
+            sourceId: o.sourceId,
+            startTime: o.startTime,
+            endTime: o.endTime,
+            positionX: o.positionX,
+            positionY: o.positionY,
+            widthPercent: o.widthPercent,
+            opacity: o.opacity,
+          })),
           imageSources: freshState.sources
             .filter((s) => s.mediaType === 'image')
             .map((s) => ({
