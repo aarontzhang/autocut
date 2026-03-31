@@ -22,7 +22,7 @@ function isProtectedApi(pathname: string) {
   return PROTECTED_API_PREFIXES.some(p => pathname === p || pathname.startsWith(p + '/'));
 }
 
-export async function proxy(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Skip static assets, Next.js internals, and public paths
