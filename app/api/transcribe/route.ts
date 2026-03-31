@@ -4,7 +4,6 @@ import { CaptionEntry } from '@/lib/types';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { buildBetaLimitExceededResponse, consumeBetaUsage } from '@/lib/server/betaLimits';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
-import { getSubscriptionStatus, subscriptionRequiredResponse } from '@/lib/server/subscription';
 import { buildSourceIndex } from '@/lib/indexer/sourceIndex';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 
@@ -27,9 +26,6 @@ export async function POST(req: NextRequest) {
     const supabase = await getSupabaseServer();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const sub = await getSubscriptionStatus(user.id);
-    if (!sub.isActive) return subscriptionRequiredResponse();
 
     const rateLimitError = enforceRateLimit({
       key: `transcribe:${getRateLimitIdentity(req.headers, user.id)}`,

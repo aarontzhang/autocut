@@ -22,7 +22,6 @@ import {
   validateEditAction,
 } from '@/lib/server/llmGuardrails';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
-import { getSubscriptionStatus, subscriptionRequiredResponse } from '@/lib/server/subscription';
 
 const client = new Anthropic();
 const MIN_CHAT_CLIP_DURATION_SECONDS = 0.05;
@@ -1484,9 +1483,6 @@ export async function POST(req: NextRequest) {
     const supabase = await getSupabaseServer();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const sub = await getSubscriptionStatus(user.id);
-    if (!sub.isActive) return subscriptionRequiredResponse();
 
     const rateLimitError = enforceRateLimit({
       key: `chat:${getRateLimitIdentity(req.headers, user.id)}`,

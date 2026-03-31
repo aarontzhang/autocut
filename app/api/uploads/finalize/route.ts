@@ -22,7 +22,6 @@ import {
   type ManagedUploadKind,
 } from '@/lib/storageQuota';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
-import { getSubscriptionStatus, subscriptionRequiredResponse } from '@/lib/server/subscription';
 import { MAIN_SOURCE_ID, normalizeSourceId } from '@/lib/sourceUtils';
 
 function isUploadKind(value: unknown): value is ManagedUploadKind {
@@ -45,9 +44,6 @@ export async function POST(request: NextRequest) {
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const sub = await getSubscriptionStatus(user.id);
-  if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({
     key: `uploads-finalize:${getRateLimitIdentity(request.headers, user.id)}`,
