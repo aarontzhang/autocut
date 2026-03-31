@@ -5,6 +5,23 @@ const ACTIVE_STATUSES = ['active', 'trialing'];
 
 export async function getSubscriptionStatus(userId: string) {
   const supabase = getSupabaseAdmin();
+
+  // Existing users with projects are grandfathered — skip paywall
+  const { count: projectCount } = await supabase
+    .from('projects')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .limit(1);
+
+  if (projectCount && projectCount > 0) {
+    return {
+      isActive: true,
+      status: 'grandfathered' as const,
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: false,
+    };
+  }
+
   const { data } = await supabase
     .from('subscriptions')
     .select('status, current_period_end, cancel_at_period_end')
