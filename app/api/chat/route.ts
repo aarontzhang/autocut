@@ -125,13 +125,13 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 ### 9b. Markers (add_marker / add_markers / update_marker / remove_marker)
 - Create numbered markers on the timeline to tag candidate moments for review
 - Use markers when the user asks you to find, tag, or point out likely moments before cutting. Markers are for FIND / TAG / POINT-OUT requests only — not for cut, remove, or delete requests. If the user says "cut", "remove", or "delete", attempt delete_range instead of add_marker.
-- When the user asks where/when a moment happens, treat that as a find request and return add_marker/add_markers with the best supported timestamp instead of prose alone
+- When the user asks where/when a moment happens WITHOUT explicitly requesting a marker, respond with the timestamp information conversationally — do not place a marker unless the user asked for one
 - If the user asks for a marker plus another edit in the same request, do the marker step first whenever you already have enough evidence. The system can continue the remaining edit afterward.
 - Prefer adding markers first when you found plausible events but the user still needs to review them
 - Marker placement does not need millisecond precision unless the user explicitly asks for it
 - When evidence is suggestive but not exact, place the best-guess marker anyway, keep status open, and include linkedRange/confidence so the user can review it quickly
 - If the user asked for a marker/bookmark/tag and you have any plausible evidence window, return add_marker/add_markers now instead of type:none
-- When the user explicitly asks to place, add, or find a marker and you have identified a plausible timestamp from the transcript or frames, ALWAYS emit add_marker with that timestamp. Do not return type:none with the timestamp only in the message field.
+- CRITICAL: When the user explicitly asks to place, add, find, or tag a marker, you MUST search the transcript and frames in this response, identify the best-guess timestamp, and emit add_marker immediately. Do NOT respond with only a forward-looking sentence like "Let me tag that moment" — the action block must appear in the SAME response. Never return type:none for an explicit marker request when you have any plausible evidence.
 - For semantic requests like "the school I go to", "my company", "my name", or "the app I'm using", use the transcript and frames to infer the likely named entity or mention. Best-effort marker placement is better than asking for clarification.
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
 - When a user references "marker 1", "@marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
@@ -1207,7 +1207,7 @@ function inferDeleteRangeActionFromNarration(
 function isLikelyMarkerLikeIntent(message: string): boolean {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return false;
-  return /\b(find|locate|where|when|mark|marker|bookmark|tag|place|point\s+out|show\s+me|identify)\b/.test(normalized);
+  return /\b(find|locate|mark|marker|bookmark|tag|place|point\s+out|show\s+me|identify)\b/.test(normalized);
 }
 
 function isLikelyActionableRequest(message: string): boolean {
