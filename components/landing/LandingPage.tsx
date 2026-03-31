@@ -693,7 +693,7 @@ export default function LandingPage() {
             lineHeight: 1.08,
             margin: '0 0 20px',
           }}>
-            Edit your videos<br />by describing them.
+            Describe the edit.<br />Autocut makes it.
           </h1>
           <p style={{
             fontSize: 16, color: 'rgba(255,255,255,0.42)',

@@ -165,7 +165,7 @@ export default function SignUpPage() {
             margin: '0 0 20px',
             maxWidth: 480,
           }}>
-            Edit your videos<br />by describing them.
+            Describe the edit.<br />Autocut makes it.
           </p>
           <p style={{
             fontSize: 15,

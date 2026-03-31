@@ -15,153 +15,113 @@ const FEATURES = [
   'Priority support',
 ];
 
-function CheckIcon() {
+/* ── Left branding panel (shared across all states) ──────────── */
+
+function BrandingPanel() {
   return (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
-      <circle cx="7.5" cy="7.5" r="7" fill="rgba(33,212,255,0.12)" stroke="rgba(33,212,255,0.3)" strokeWidth="1" />
-      <path d="M4.5 7.7l2 2 4-4" stroke="#21d4ff" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function SuccessView() {
-  const router = useRouter();
-
-  useEffect(() => {
-    const timer = setTimeout(() => router.replace('/projects'), 3000);
-    return () => clearTimeout(timer);
-  }, [router]);
-
-  return (
-    <div style={{
+    <div className="sub-left" style={{
+      flex: 1,
       display: 'flex',
       flexDirection: 'column',
-      alignItems: 'center',
-      gap: 20,
-      padding: '48px 32px',
-      textAlign: 'center',
+      justifyContent: 'space-between',
+      padding: '40px 56px',
+      borderRight: '1px solid rgba(255,255,255,0.07)',
+      position: 'relative',
+      overflow: 'hidden',
     }}>
+      {/* Subtle glow */}
       <div style={{
-        width: 72,
-        height: 72,
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: 600,
+        height: 400,
         borderRadius: '50%',
-        background: 'rgba(33,212,255,0.08)',
-        border: '2px solid rgba(33,212,255,0.35)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        boxShadow: '0 0 40px rgba(33,212,255,0.12), inset 0 0 20px rgba(33,212,255,0.06)',
-      }}>
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <path d="M9 16.5l5 5 9-10" stroke="#21d4ff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        background: 'radial-gradient(ellipse, rgba(33,212,255,0.07) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Logo */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <AutocutMark size={32} withTile />
+        <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.025em', color: 'rgba(255,255,255,0.92)' }}>
+          Autocut
+        </span>
       </div>
 
+      {/* Headline + features as typography */}
       <div>
-        <h1 style={{
-          fontSize: 28,
-          fontWeight: 700,
-          letterSpacing: '-0.03em',
-          color: 'rgba(255,255,255,0.95)',
-          margin: '0 0 8px',
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '5px 12px',
+          borderRadius: 999,
+          background: 'rgba(33,212,255,0.08)',
+          border: '1px solid rgba(33,212,255,0.18)',
+          marginBottom: 24,
         }}>
-          You&apos;re all set!
-        </h1>
-        <p style={{
-          fontSize: 14,
-          color: 'rgba(255,255,255,0.42)',
-          margin: 0,
-          lineHeight: 1.6,
-        }}>
-          Your subscription is active. Redirecting to your projects&hellip;
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function SubscribedView({ hideManage }: { hideManage?: boolean }) {
-  const [loading, setLoading] = useState(false);
-
-  const handleManage = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/stripe/portal', { method: 'POST' });
-      const { url } = await res.json();
-      if (url) window.location.href = url;
-    } catch {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      gap: 20,
-      padding: '48px 32px',
-      textAlign: 'center',
-    }}>
-      <div style={{
-        width: 56,
-        height: 56,
-        borderRadius: '50%',
-        background: 'rgba(33,212,255,0.08)',
-        border: '1.5px solid rgba(33,212,255,0.25)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}>
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M9 12l2 2 4-4" stroke="#21d4ff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          <circle cx="12" cy="12" r="9" stroke="#21d4ff" strokeWidth="1.5" opacity="0.4" />
-        </svg>
-      </div>
-
-      <div>
-        <h1 style={{
-          fontSize: 24,
-          fontWeight: 700,
-          letterSpacing: '-0.03em',
-          color: 'rgba(255,255,255,0.95)',
-          margin: '0 0 6px',
-        }}>
-          You&apos;re subscribed
-        </h1>
-        <p style={{
-          fontSize: 14,
-          color: 'rgba(255,255,255,0.42)',
-          margin: 0,
-        }}>
-          Autocut Pro is active on your account.
-        </p>
-      </div>
-
-      {!hideManage && (
-        <button
-          onClick={handleManage}
-          disabled={loading}
-          className="iridescent-button"
-          style={{
-            padding: '11px 28px',
-            borderRadius: 10,
-            fontSize: 14,
+          <div style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: '#21d4ff',
+            boxShadow: '0 0 8px rgba(33,212,255,0.5)',
+          }} />
+          <span style={{
+            fontSize: 11.5,
             fontWeight: 600,
-            cursor: loading ? 'default' : 'pointer',
-            fontFamily: 'inherit',
-            transition: 'filter 0.15s, box-shadow 0.15s',
-            marginTop: 4,
-          }}
-        >
-          {loading ? 'Please wait\u2026' : 'Manage Subscription'}
-        </button>
-      )}
+            color: '#21d4ff',
+            letterSpacing: '0.02em',
+            textTransform: 'uppercase',
+          }}>
+            Autocut Pro
+          </span>
+        </div>
+
+        <p style={{
+          fontSize: 'clamp(32px, 3vw, 48px)',
+          fontWeight: 700,
+          letterSpacing: '-0.035em',
+          lineHeight: 1.1,
+          color: 'rgba(255,255,255,0.92)',
+          margin: '0 0 32px',
+          maxWidth: 480,
+        }}>
+          Everything you need<br />to edit with AI.
+        </p>
+
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+        }}>
+          {FEATURES.map(feature => (
+            <span key={feature} style={{
+              fontSize: 'clamp(16px, 1.6vw, 20px)',
+              fontWeight: 500,
+              color: 'rgba(255,255,255,0.52)',
+              lineHeight: 1.4,
+              letterSpacing: '-0.01em',
+            }}>
+              {feature}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Bottom */}
+      <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.18)', margin: 0 }}>
+        &copy; 2025 Autocut
+      </p>
     </div>
   );
 }
 
-function PricingCard() {
+/* ── Right panel: pricing ────────────────────────────────────── */
+
+function PricingPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const searchParams = useSearchParams();
@@ -187,19 +147,19 @@ function PricingCard() {
   }, []);
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      gap: 0,
-      width: '100%',
-      maxWidth: 420,
-    }}>
+    <div style={{ width: '100%', maxWidth: 380 }}>
+      <Link href="/" className="sub-back" style={{ marginBottom: 40, display: 'inline-flex' }}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M9 11L5 7l4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Back to home
+      </Link>
+
       {showCanceled && (
         <div style={{
           width: '100%',
           padding: '10px 14px',
-          marginBottom: 16,
+          marginBottom: 20,
           background: 'rgba(248,113,113,0.06)',
           border: '1px solid rgba(248,113,113,0.18)',
           borderRadius: 9,
@@ -230,148 +190,199 @@ function PricingCard() {
         </div>
       )}
 
-      <div
-        className="panel-sheen"
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, marginBottom: 10 }}>
+        <span style={{
+          fontSize: 48,
+          fontWeight: 700,
+          letterSpacing: '-0.04em',
+          color: 'rgba(255,255,255,0.95)',
+          lineHeight: 1,
+        }}>
+          $19.99
+        </span>
+        <span style={{
+          fontSize: 15,
+          color: 'rgba(255,255,255,0.3)',
+          fontWeight: 500,
+        }}>
+          /month
+        </span>
+      </div>
+
+      <p style={{
+        fontSize: 14,
+        color: 'rgba(255,255,255,0.38)',
+        margin: '0 0 32px',
+        lineHeight: 1.5,
+      }}>
+        Everything you need to edit videos with AI. Cancel anytime.
+      </p>
+
+      <button
+        onClick={handleSubscribe}
+        disabled={loading}
+        className="iridescent-button"
         style={{
           width: '100%',
-          borderRadius: 16,
-          border: '1px solid rgba(33,212,255,0.12)',
-          overflow: 'hidden',
-          position: 'relative',
+          padding: '13px 20px',
+          borderRadius: 10,
+          fontSize: 15,
+          fontWeight: 600,
+          cursor: loading ? 'default' : 'pointer',
+          fontFamily: 'inherit',
+          transition: 'filter 0.15s, box-shadow 0.15s',
+          letterSpacing: '-0.01em',
         }}
       >
-        <div style={{
-          position: 'absolute',
-          top: 0,
-          left: '15%',
-          right: '15%',
-          height: 1,
-          background: 'linear-gradient(90deg, transparent, rgba(33,212,255,0.4), transparent)',
-        }} />
+        {loading ? 'Redirecting\u2026' : 'Subscribe'}
+      </button>
 
-        <div style={{ padding: '36px 32px 32px' }}>
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '5px 12px',
-            borderRadius: 999,
-            background: 'rgba(33,212,255,0.08)',
-            border: '1px solid rgba(33,212,255,0.18)',
-            marginBottom: 24,
-          }}>
-            <div style={{
-              width: 6,
-              height: 6,
-              borderRadius: '50%',
-              background: '#21d4ff',
-              boxShadow: '0 0 8px rgba(33,212,255,0.5)',
-            }} />
-            <span style={{
-              fontSize: 11.5,
-              fontWeight: 600,
-              color: '#21d4ff',
-              letterSpacing: '0.02em',
-              textTransform: 'uppercase',
-            }}>
-              Autocut Pro
-            </span>
-          </div>
-
-          <div style={{ marginBottom: 28 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 3 }}>
-              <span style={{
-                fontSize: 48,
-                fontWeight: 700,
-                letterSpacing: '-0.04em',
-                color: 'rgba(255,255,255,0.95)',
-                lineHeight: 1,
-              }}>
-                $19.99
-              </span>
-              <span style={{
-                fontSize: 15,
-                color: 'rgba(255,255,255,0.3)',
-                fontWeight: 500,
-              }}>
-                /month
-              </span>
-            </div>
-            <p style={{
-              fontSize: 14,
-              color: 'rgba(255,255,255,0.38)',
-              margin: '10px 0 0',
-              lineHeight: 1.5,
-            }}>
-              Everything you need to edit videos with AI. Cancel anytime.
-            </p>
-          </div>
-
-          <div style={{
-            height: 1,
-            background: 'rgba(255,255,255,0.06)',
-            marginBottom: 24,
-          }} />
-
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 14,
-            marginBottom: 32,
-          }}>
-            {FEATURES.map(feature => (
-              <div key={feature} style={{
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: 10,
-              }}>
-                <CheckIcon />
-                <span style={{
-                  fontSize: 14,
-                  color: 'rgba(255,255,255,0.72)',
-                  lineHeight: 1.4,
-                }}>
-                  {feature}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <button
-            onClick={handleSubscribe}
-            disabled={loading}
-            className="iridescent-button"
-            style={{
-              width: '100%',
-              padding: '13px 20px',
-              borderRadius: 10,
-              fontSize: 15,
-              fontWeight: 600,
-              cursor: loading ? 'default' : 'pointer',
-              fontFamily: 'inherit',
-              transition: 'filter 0.15s, box-shadow 0.15s',
-              letterSpacing: '-0.01em',
-            }}
-          >
-            {loading ? 'Redirecting\u2026' : 'Subscribe'}
-          </button>
-
-          {error && (
-            <p style={{
-              fontSize: 13,
-              color: '#f87171',
-              margin: '12px 0 0',
-              textAlign: 'center',
-              lineHeight: 1.5,
-            }}>
-              {error}
-            </p>
-          )}
-        </div>
-      </div>
+      {error && (
+        <p style={{
+          fontSize: 13,
+          color: '#f87171',
+          margin: '12px 0 0',
+          lineHeight: 1.5,
+        }}>
+          {error}
+        </p>
+      )}
     </div>
   );
 }
+
+/* ── Right panel: success ────────────────────────────────────── */
+
+function SuccessPanel() {
+  const router = useRouter();
+
+  useEffect(() => {
+    const timer = setTimeout(() => router.replace('/projects'), 3000);
+    return () => clearTimeout(timer);
+  }, [router]);
+
+  return (
+    <div style={{ width: '100%', maxWidth: 380 }}>
+      <div style={{
+        width: 72,
+        height: 72,
+        borderRadius: '50%',
+        background: 'rgba(33,212,255,0.08)',
+        border: '2px solid rgba(33,212,255,0.35)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        boxShadow: '0 0 40px rgba(33,212,255,0.12), inset 0 0 20px rgba(33,212,255,0.06)',
+        marginBottom: 24,
+      }}>
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <path d="M9 16.5l5 5 9-10" stroke="#21d4ff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+
+      <h1 style={{
+        fontSize: 28,
+        fontWeight: 700,
+        letterSpacing: '-0.03em',
+        color: 'rgba(255,255,255,0.95)',
+        margin: '0 0 8px',
+      }}>
+        You&apos;re all set!
+      </h1>
+      <p style={{
+        fontSize: 14,
+        color: 'rgba(255,255,255,0.42)',
+        margin: 0,
+        lineHeight: 1.6,
+      }}>
+        Your subscription is active. Redirecting to your projects&hellip;
+      </p>
+    </div>
+  );
+}
+
+/* ── Right panel: already subscribed ─────────────────────────── */
+
+function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
+  const [loading, setLoading] = useState(false);
+
+  const handleManage = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/stripe/portal', { method: 'POST' });
+      const { url } = await res.json();
+      if (url) window.location.href = url;
+    } catch {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ width: '100%', maxWidth: 380 }}>
+      <Link href="/" className="sub-back" style={{ marginBottom: 40, display: 'inline-flex' }}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M9 11L5 7l4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Back to home
+      </Link>
+
+      <div style={{
+        width: 56,
+        height: 56,
+        borderRadius: '50%',
+        background: 'rgba(33,212,255,0.08)',
+        border: '1.5px solid rgba(33,212,255,0.25)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 24,
+      }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <path d="M9 12l2 2 4-4" stroke="#21d4ff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="12" cy="12" r="9" stroke="#21d4ff" strokeWidth="1.5" opacity="0.4" />
+        </svg>
+      </div>
+
+      <h1 style={{
+        fontSize: 26,
+        fontWeight: 700,
+        letterSpacing: '-0.03em',
+        color: 'rgba(255,255,255,0.95)',
+        margin: '0 0 6px',
+      }}>
+        You&apos;re subscribed
+      </h1>
+      <p style={{
+        fontSize: 14,
+        color: 'rgba(255,255,255,0.42)',
+        margin: '0 0 28px',
+      }}>
+        Autocut Pro is active on your account.
+      </p>
+
+      {!hideManage && (
+        <button
+          onClick={handleManage}
+          disabled={loading}
+          className="iridescent-button"
+          style={{
+            padding: '11px 28px',
+            borderRadius: 10,
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: loading ? 'default' : 'pointer',
+            fontFamily: 'inherit',
+            transition: 'filter 0.15s, box-shadow 0.15s',
+          }}
+        >
+          {loading ? 'Please wait\u2026' : 'Manage Subscription'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ── Main subscribe page ─────────────────────────────────────── */
 
 function SubscribeContent() {
   const { user, initialized } = useAuth();
@@ -386,6 +397,7 @@ function SubscribeContent() {
         alignItems: 'center',
         justifyContent: 'center',
         minHeight: '100vh',
+        background: '#111111',
       }}>
         <AutocutMark size={36} withTile />
       </div>
@@ -399,106 +411,47 @@ function SubscribeContent() {
     <div style={{
       minHeight: '100vh',
       display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
       fontFamily: 'var(--font-serif), system-ui, sans-serif',
       background: '#111111',
-      position: 'relative',
-      overflow: 'hidden',
-      padding: '48px 24px',
     }}>
       <style>{`
-        @keyframes subscribeGlow {
-          0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
-          50% { opacity: 0.8; transform: translate(-50%, -50%) scale(1.05); }
+        .sub-back {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          font-size: 13px;
+          color: rgba(255,255,255,0.35);
+          text-decoration: none;
+          transition: color 0.15s;
         }
-        @keyframes cardReveal {
-          from { opacity: 0; transform: translateY(12px); }
-          to { opacity: 1; transform: translateY(0); }
+        .sub-back:hover { color: rgba(255,255,255,0.65); }
+
+        @media (max-width: 768px) {
+          .sub-left { display: none !important; }
+          .sub-right { border-left: none !important; }
         }
       `}</style>
 
-      <div style={{
-        position: 'absolute',
-        top: '45%',
-        left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: 700,
-        height: 500,
-        borderRadius: '50%',
-        background: 'radial-gradient(ellipse, rgba(33,212,255,0.05) 0%, rgba(33,212,255,0.02) 40%, transparent 70%)',
-        pointerEvents: 'none',
-        animation: 'subscribeGlow 8s ease-in-out infinite',
-      }} />
+      <BrandingPanel />
 
-      <div style={{
-        position: 'absolute',
-        top: '60%',
-        left: '35%',
-        transform: 'translate(-50%, -50%)',
-        width: 400,
-        height: 400,
-        borderRadius: '50%',
-        background: 'radial-gradient(ellipse, rgba(64,122,255,0.03) 0%, transparent 60%)',
-        pointerEvents: 'none',
-      }} />
-
-      <div style={{
-        position: 'relative',
-        zIndex: 1,
+      <div className="sub-right" style={{
+        width: '100%',
+        maxWidth: 520,
+        flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        width: '100%',
-        maxWidth: 480,
-        animation: 'cardReveal 0.4s ease-out',
+        justifyContent: 'center',
+        padding: '48px 48px',
+        borderLeft: '1px solid rgba(255,255,255,0.07)',
       }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 9,
-          marginBottom: showSuccess || showSubscribed ? 40 : 36,
-        }}>
-          <AutocutMark size={28} withTile />
-          <span style={{
-            fontSize: 16,
-            fontWeight: 700,
-            letterSpacing: '-0.02em',
-            color: 'rgba(255,255,255,0.82)',
-          }}>
-            Autocut
-          </span>
-        </div>
-
         {showSuccess ? (
-          <SuccessView />
+          <SuccessPanel />
         ) : showSubscribed ? (
-          <SubscribedView hideManage={isManual} />
+          <SubscribedPanel hideManage={isManual} />
         ) : (
-          <PricingCard />
+          <PricingPanel />
         )}
-
-        <Link
-          href="/"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 5,
-            marginTop: 32,
-            fontSize: 13,
-            color: 'rgba(255,255,255,0.28)',
-            textDecoration: 'none',
-            transition: 'color 0.15s',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.55)'; }}
-          onMouseLeave={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.28)'; }}
-        >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-            <path d="M9 11L5 7l4-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          Back to home
-        </Link>
       </div>
     </div>
   );
