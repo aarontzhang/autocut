@@ -1,45 +1,38 @@
-import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
+import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
-const ACTIVE_STATUSES = ['active', 'trialing'];
+const ACTIVE_STATUSES = new Set(['active', 'trialing']);
 
-export async function getSubscriptionStatus(userId: string) {
-  const supabase = getSupabaseAdmin();
+export type SubscriptionStatus = {
+  isActive: boolean;
+  status: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  stripeCustomerId: string | null;
+};
 
-  // Existing users with projects are grandfathered — skip paywall
-  const { data: existingProject } = await supabase
-    .from('projects')
-    .select('id')
-    .eq('user_id', userId)
-    .limit(1)
-    .maybeSingle();
-
-  if (existingProject) {
-    return {
-      isActive: true,
-      status: 'grandfathered' as const,
-      currentPeriodEnd: null,
-      cancelAtPeriodEnd: false,
-    };
-  }
-
-  const { data } = await supabase
+export async function getSubscriptionStatus(userId: string): Promise<SubscriptionStatus> {
+  const { data } = await getSupabaseAdmin()
     .from('subscriptions')
-    .select('status, current_period_end, cancel_at_period_end')
+    .select('status, current_period_end, cancel_at_period_end, stripe_customer_id')
     .eq('user_id', userId)
-    .in('status', ACTIVE_STATUSES)
+    .in('status', ['active', 'trialing'])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   return {
-    isActive: Boolean(data),
+    isActive: Boolean(data) && ACTIVE_STATUSES.has(data?.status ?? ''),
     status: data?.status ?? null,
     currentPeriodEnd: data?.current_period_end ?? null,
     cancelAtPeriodEnd: data?.cancel_at_period_end ?? false,
+    stripeCustomerId: data?.stripe_customer_id ?? null,
   };
 }
 
 export function subscriptionRequiredResponse() {
-  return NextResponse.json({ error: 'Active subscription required' }, { status: 403 });
+  return NextResponse.json(
+    { error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' },
+    { status: 403 },
+  );
 }

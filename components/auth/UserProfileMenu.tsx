@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { useSubscription } from './SubscriptionProvider';
 
 const AVATAR_COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#06b6d4'];
 
@@ -29,6 +30,7 @@ export default function UserProfileMenu({
   const [open, setOpen] = useState(false);
   const [imgError, setImgError] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const { isSubscribed } = useSubscription();
 
   useEffect(() => {
     if (!open) return;
@@ -215,41 +217,43 @@ export default function UserProfileMenu({
             {dashboardLabel}
           </button>
 
-          <button
-            onClick={async () => {
-              setOpen(false);
-              const res = await fetch('/api/stripe/portal', { method: 'POST' });
-              const { url } = await res.json();
-              if (url) window.location.href = url;
-            }}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              width: '100%',
-              padding: '10px 14px',
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--fg-secondary)',
-              fontSize: 12,
-              textAlign: 'left',
-            }}
-            onMouseEnter={event => {
-              event.currentTarget.style.background = 'var(--bg-elevated)';
-              event.currentTarget.style.color = 'var(--fg-primary)';
-            }}
-            onMouseLeave={event => {
-              event.currentTarget.style.background = 'none';
-              event.currentTarget.style.color = 'var(--fg-secondary)';
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <rect x="1" y="4" width="22" height="16" rx="2" />
-              <path d="M1 10h22" />
-            </svg>
-            Manage subscription
-          </button>
+          {isSubscribed && (
+            <button
+              onClick={async () => {
+                setOpen(false);
+                const res = await fetch('/api/stripe/portal', { method: 'POST' });
+                const { url } = await res.json();
+                if (url) window.location.href = url;
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                width: '100%',
+                padding: '10px 14px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'var(--fg-secondary)',
+                fontSize: 12,
+                textAlign: 'left',
+              }}
+              onMouseEnter={event => {
+                event.currentTarget.style.background = 'var(--bg-elevated)';
+                event.currentTarget.style.color = 'var(--fg-primary)';
+              }}
+              onMouseLeave={event => {
+                event.currentTarget.style.background = 'none';
+                event.currentTarget.style.color = 'var(--fg-secondary)';
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <rect x="1" y="4" width="22" height="16" rx="2" />
+                <path d="M1 10h22" />
+              </svg>
+              Manage subscription
+            </button>
+          )}
 
           <button
             onClick={handleSignOut}

@@ -73,6 +73,21 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // Subscription gating — redirect to /subscribe if no active subscription
+  if (isProtectedPage(pathname)) {
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('status')
+      .eq('user_id', user.id)
+      .in('status', ['active', 'trialing'])
+      .limit(1)
+      .maybeSingle();
+
+    if (!sub) {
+      return NextResponse.redirect(new URL('/subscribe', req.url));
+    }
+  }
+
   return response;
 }
 

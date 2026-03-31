@@ -4,6 +4,7 @@ import { readStoredVideoDurationSeconds } from '@/lib/server/videoDuration';
 import { removeProjectStorageObjects } from '@/lib/server/storageQuota';
 import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit, enforceSameOrigin, getRateLimitIdentity } from '@/lib/server/requestSecurity';
+import { getSubscriptionStatus, subscriptionRequiredResponse } from '@/lib/server/subscription';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
 import {
   buildProjectSources,
@@ -57,6 +58,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const sub = await getSubscriptionStatus(user.id);
+  if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({
     key: `projects-update:${getRateLimitIdentity(request.headers, user.id)}`,
@@ -153,6 +157,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const sub = await getSubscriptionStatus(user.id);
+  if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({
     key: `projects-delete:${getRateLimitIdentity(req.headers, user.id)}`,

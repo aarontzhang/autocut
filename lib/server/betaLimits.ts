@@ -33,7 +33,7 @@ const LIMITS: Record<BetaUsageMetric, BetaLimitConfig> = {
   },
   transcribe_seconds: {
     envName: 'BETA_MAX_TRANSCRIBE_SECONDS_PER_DAY',
-    defaultLimit: 3600,
+    defaultLimit: 7200,
     label: 'transcription',
   },
 };
