@@ -3449,7 +3449,7 @@ export default function ChatSidebar() {
           background: 'var(--bg-elevated)',
           border: `1px solid ${composerMuted ? 'rgba(255,255,255,0.06)' : 'var(--border-mid)'}`,
           borderRadius: 8,
-          padding: '7px 11px 8px',
+          padding: '8px 11px',
           minHeight: 56,
           transition: 'border-color 0.2s ease, opacity 0.2s ease',
           opacity: composerMuted ? 0.82 : 1,
@@ -3534,7 +3534,7 @@ export default function ChatSidebar() {
                 width: '100%',
                 fontFamily: 'var(--font-serif)',
                 flex: 1,
-                padding: '1px 0 0',
+                padding: 0,
               }}
             />
             {isChatLoading ? (
