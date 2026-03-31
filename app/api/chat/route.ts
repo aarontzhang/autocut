@@ -241,6 +241,8 @@ No action:
 - clipIndex is 0-based (0 = first clip)
 - Be concise in your explanation (1-2 sentences max)
 - For time references: "1:20" = 80s, "2:00" = 120s
+- If the user asks you to revert, undo, or roll back a previous edit, emit {"type": "undo_last", "final": false} to undo the last applied action. The editor will restore the previous timeline state and you will receive updated context to propose a corrected edit. Do not attempt to manually reverse edits by emitting opposing cuts — always use undo_last.
+- You can undo multiple steps by emitting undo_last multiple times in a chain (each with "final": false until the last step).
 - ALWAYS express times in M:SS format in your messages (e.g., "4:03", "1:20") — never use plain seconds like "243 seconds" or "80s"
 - Never use markdown formatting (no **bold**, no *italic*, no bullet points). Plain text only.
 - If the user's latest request includes "@clip N", use the token-keyed clip reference data in context to resolve that clip for the operation.

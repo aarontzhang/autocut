@@ -399,7 +399,8 @@ export function applyActionToSnapshot(
   if (
     resolvedAction.type === 'none' ||
     resolvedAction.type === 'transcribe_request' ||
-    resolvedAction.type === 'request_frames'
+    resolvedAction.type === 'request_frames' ||
+    resolvedAction.type === 'undo_last'
   ) return snapshot;
 
   if (resolvedAction.type === 'split_clip') {

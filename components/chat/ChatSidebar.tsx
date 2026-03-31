@@ -1819,7 +1819,8 @@ function AssistantMessage({
     || liveActionState.actionStatus === 'rejected';
   const reviewableAction = !!action
     && action.type !== 'none'
-    && action.type !== 'transcribe_request';
+    && action.type !== 'transcribe_request'
+    && action.type !== 'undo_last';
   const batchReviewActive = !!reviewSessionForMessage && reviewableAction;
   const meta = activeReviewAction ? getActionMeta(activeReviewAction) : null;
   const reviewableItemCount = getReviewItemCount(action);
@@ -2915,6 +2916,55 @@ export default function ChatSidebar() {
           ];
           continue;
         }
+      }
+
+      const undoAction = action?.type === 'undo_last';
+
+      if (undoAction && action && round < MAX_CHAIN_CHAT_ROUNDS - 1) {
+        useEditorStore.getState().undo();
+        recordCompletedChainAction(requestChainId, action);
+
+        const undoMessageProps = {
+          role: 'assistant' as const,
+          content: assistantMessage,
+          requestChainId,
+          action,
+          actionType: action.type,
+          actionMessage: action.message,
+          actionStatus: 'completed' as const,
+          autoApplied: true,
+          actionResult: 'Undo applied.',
+          final: isFinal,
+          isStreaming: false,
+        };
+        if (streamingMessageId) {
+          updateMessage(streamingMessageId, undoMessageProps);
+        } else {
+          addMessage(undoMessageProps);
+        }
+        producedVisibleResponse = true;
+        streamingMessageId = null;
+
+        if (isFinal) return;
+
+        const updatedChainState = requestChainId ? requestChainStateRef.current[requestChainId] ?? null : null;
+        if (updatedChainState) {
+          nextHistory = [
+            ...nextHistory,
+            { role: 'assistant' as const, content: assistantMessage, requestChainId },
+            {
+              role: 'user' as const,
+              content: buildContinuationPayload(
+                updatedChainState,
+                'action_resolved',
+                'Previous edit was undone. The timeline has been restored to its previous state. Continue with the corrected edit.',
+              ),
+              requestChainId,
+            },
+          ];
+          continue;
+        }
+        return;
       }
 
       const markerActionPreviouslyApplied = markerAction && action

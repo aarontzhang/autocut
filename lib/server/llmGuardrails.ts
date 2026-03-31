@@ -347,6 +347,8 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
 
   if (type === 'none') return { type: 'none', message };
 
+  if (type === 'undo_last') return { type: 'undo_last', message };
+
   if (type === 'split_clip') {
     const splitTime = sanitizeTime(action.splitTime, safeDuration);
     if (splitTime === null || splitTime <= 0 || splitTime >= safeDuration) return null;

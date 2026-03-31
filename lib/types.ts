@@ -273,6 +273,7 @@ export interface AIEditingSettings {
 
 export interface EditAction {
   type:
+    | 'undo_last'
     | 'split_clip'
     | 'delete_clip'
     | 'delete_range'
