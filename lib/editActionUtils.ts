@@ -227,7 +227,7 @@ function remapCaptionAfterDelete(
   };
 }
 
-function remapCaptionsAfterDelete(
+export function remapCaptionsAfterDelete(
   captions: CaptionEntry[],
   startTime: number,
   endTime: number,
@@ -235,6 +235,55 @@ function remapCaptionsAfterDelete(
   return captions
     .map((caption) => remapCaptionAfterDelete(caption, startTime, endTime))
     .filter((caption): caption is CaptionEntry => !!caption);
+}
+
+function remapOverlayAfterDelete<T extends { startTime: number; endTime: number }>(
+  overlay: T,
+  startTime: number,
+  endTime: number,
+): T | null {
+  if (overlay.endTime <= startTime) return overlay;
+
+  const delta = endTime - startTime;
+  if (overlay.startTime >= endTime) {
+    return {
+      ...overlay,
+      startTime: overlay.startTime - delta,
+      endTime: overlay.endTime - delta,
+    };
+  }
+
+  const nextStart = overlay.startTime < startTime ? overlay.startTime : startTime;
+  const nextEnd = overlay.endTime > endTime
+    ? overlay.endTime - delta
+    : Math.min(overlay.endTime, startTime);
+  if (nextEnd <= nextStart) return null;
+
+  return {
+    ...overlay,
+    startTime: nextStart,
+    endTime: nextEnd,
+  };
+}
+
+export function remapImageOverlaysAfterDelete(
+  overlays: ImageOverlayEntry[],
+  startTime: number,
+  endTime: number,
+): ImageOverlayEntry[] {
+  return overlays
+    .map((overlay) => remapOverlayAfterDelete(overlay, startTime, endTime))
+    .filter((overlay): overlay is ImageOverlayEntry => !!overlay);
+}
+
+export function remapTextOverlaysAfterDelete(
+  overlays: TextOverlayEntry[],
+  startTime: number,
+  endTime: number,
+): TextOverlayEntry[] {
+  return overlays
+    .map((overlay) => remapOverlayAfterDelete(overlay, startTime, endTime))
+    .filter((overlay): overlay is TextOverlayEntry => !!overlay);
 }
 
 export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
@@ -370,6 +419,8 @@ export function applyActionToSnapshot(
     return withTimelineChanges(snapshot, {
       clips: deleteRangeFromClips(snapshot.clips, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
       captions: remapCaptionsAfterDelete(snapshot.captions, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
+      imageOverlays: remapImageOverlaysAfterDelete(snapshot.imageOverlays, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
+      textOverlays: remapTextOverlaysAfterDelete(snapshot.textOverlays, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
     });
   }
 
@@ -382,7 +433,13 @@ export function applyActionToSnapshot(
     const captions = ranges.reduce((acc, range) => (
       range.end <= range.start ? acc : remapCaptionsAfterDelete(acc, range.start, range.end)
     ), snapshot.captions);
-    return withTimelineChanges(snapshot, { clips, captions });
+    const imageOverlays = ranges.reduce((acc, range) => (
+      range.end <= range.start ? acc : remapImageOverlaysAfterDelete(acc, range.start, range.end)
+    ), snapshot.imageOverlays);
+    const textOverlays = ranges.reduce((acc, range) => (
+      range.end <= range.start ? acc : remapTextOverlaysAfterDelete(acc, range.start, range.end)
+    ), snapshot.textOverlays);
+    return withTimelineChanges(snapshot, { clips, captions, imageOverlays, textOverlays });
   }
 
   if (resolvedAction.type === 'reorder_clip') {

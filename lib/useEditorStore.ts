@@ -28,6 +28,9 @@ import {
   buildReviewPreviewSnapshot,
   deleteRangeFromClips,
   EditReviewGroup,
+  remapCaptionsAfterDelete,
+  remapImageOverlaysAfterDelete,
+  remapTextOverlaysAfterDelete,
   EditSnapshot,
   sanitizeTimelineClips,
   splitClipsAtTime,
@@ -1173,22 +1176,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (newClips === clips) return;
     const snap = (get() as EditorStoreWithSnapshot)._snapshot();
     const nextTransitions = normalizeTransitionState(newClips, get().transitions);
-    set((state) => ({
-      history: [...state.history, snap],
-      future: [],
-      clips: newClips,
-      transitions: nextTransitions,
-      markers: [],
-      taggedMarkerIds: [],
-      taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
-      ...clearReviewStatePatch(),
-      ...buildDerivedIndexState(
-        newClips,
-        nextTransitions,
-        state.sourceTranscriptCaptions,
-      ),
-    }));
+    set((state) => {
+      const nextCaptions = remapCaptionsAfterDelete(state.captions, startTime, endTime);
+      const nextImageOverlays = remapImageOverlaysAfterDelete(state.imageOverlays, startTime, endTime);
+      const nextTextOverlays = remapTextOverlaysAfterDelete(state.textOverlays, startTime, endTime);
+      return {
+        history: [...state.history, snap],
+        future: [],
+        clips: newClips,
+        transitions: nextTransitions,
+        captions: nextCaptions,
+        imageOverlays: nextImageOverlays,
+        textOverlays: nextTextOverlays,
+        markers: [],
+        taggedMarkerIds: [],
+        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
+        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, nextCaptions, nextTextOverlays, nextTransitions, nextImageOverlays),
+        ...clearReviewStatePatch(),
+        ...buildDerivedIndexState(
+          newClips,
+          nextTransitions,
+          state.sourceTranscriptCaptions,
+        ),
+      };
+    });
   },
 
   deleteClip: (clipId) => {
