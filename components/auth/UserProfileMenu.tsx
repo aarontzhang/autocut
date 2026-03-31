@@ -217,11 +217,11 @@ export default function UserProfileMenu({
             {dashboardLabel}
           </button>
 
-          {isSubscribed && !isManual && (
+          {!isManual && (
             <button
               onClick={() => {
                 setOpen(false);
-                window.location.href = '/subscription';
+                window.location.href = isSubscribed ? '/subscription' : '/subscribe';
               }}
               style={{
                 display: 'flex',
@@ -249,7 +249,7 @@ export default function UserProfileMenu({
                 <rect x="1" y="4" width="22" height="16" rx="2" />
                 <path d="M1 10h22" />
               </svg>
-              Manage subscription
+              {isSubscribed ? 'Manage subscription' : 'Subscribe'}
             </button>
           )}
 
