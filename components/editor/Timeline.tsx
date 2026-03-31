@@ -327,7 +327,9 @@ export default function Timeline({
   }, [contentDuration, totalTimelineDuration, totalW]);
 
   const mapDisplayTimeToPlaybackTime = useCallback((displayTime: number) => {
-    if (!activeReviewSession || reviewPlaybackUsesBase) {
+    const currentSession = useEditorStore.getState().activeReviewSession;
+    const usesBase = Boolean(currentSession?.items.some((item) => item.action.type === 'delete_range'));
+    if (!currentSession || usesBase) {
       return Math.max(0, Math.min(displayTime, playbackDuration || contentDuration));
     }
 
@@ -343,13 +345,11 @@ export default function Timeline({
     }
     return Math.max(0, Math.min(mappedTime, playbackDuration));
   }, [
-    activeReviewSession,
     clips,
     contentDuration,
     playbackDuration,
     playbackSnapshot.clips,
     playbackSnapshot.transitions,
-    reviewPlaybackUsesBase,
     transitions,
   ]);
   const requestDisplaySeek = useCallback((displayTime: number) => {
