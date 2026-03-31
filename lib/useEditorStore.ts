@@ -28,9 +28,9 @@ import {
   buildReviewPreviewSnapshot,
   deleteRangeFromClips,
   EditReviewGroup,
-  remapCaptionsAfterDelete,
-  remapImageOverlaysAfterDelete,
-  remapTextOverlaysAfterDelete,
+  remapCaptionsAfterTimelineChange,
+  remapImageOverlaysAfterTimelineChange,
+  remapTextOverlaysAfterTimelineChange,
   EditSnapshot,
   sanitizeTimelineClips,
   splitClipsAtTime,
@@ -82,6 +82,19 @@ export type ImportedSourceDraft = {
   assetId?: string | null;
   runtime?: Partial<NonNullable<SourceRuntimeMediaMap[string]>>;
 };
+
+function remapOverlaysAndCaptions(
+  oldClips: VideoClip[],
+  newClips: VideoClip[],
+  state: { imageOverlays: ImageOverlayEntry[]; textOverlays: TextOverlayEntry[]; captions: CaptionEntry[] },
+): Partial<{ imageOverlays: ImageOverlayEntry[]; textOverlays: TextOverlayEntry[]; captions: CaptionEntry[] }> {
+  if (oldClips === newClips) return {};
+  return {
+    imageOverlays: remapImageOverlaysAfterTimelineChange(state.imageOverlays, oldClips, newClips),
+    textOverlays: remapTextOverlaysAfterTimelineChange(state.textOverlays, oldClips, newClips),
+    captions: remapCaptionsAfterTimelineChange(state.captions, oldClips, newClips),
+  };
+}
 
 function makeClip(sourceId: string, sourceStart: number, sourceDuration: number): VideoClip {
   return {
@@ -980,15 +993,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (nextClips === state.clips) return;
     const snap = (state as EditorStoreWithSnapshot)._snapshot();
     const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(state.clips, nextClips, state);
     set((current) => ({
       history: [...current.history, snap],
       future: [],
       clips: nextClips,
       transitions: nextTransitions,
+      ...remapped,
       markers: [],
       taggedMarkerIds: [],
       taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
-      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, current.captions, current.textOverlays, nextTransitions, current.imageOverlays),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         nextClips,
@@ -1141,201 +1156,206 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   splitClipAtTime: (timelineTime) => {
-    const { clips } = get();
+    const state = get();
+    const { clips } = state;
     const newClips = splitClipsAtTime(clips, timelineTime);
     if (newClips === clips) return;
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
     const action: EditAction = {
       type: 'split_clip',
       splitTime: timelineTime,
       message: `Split clip at ${formatTimePrecise(timelineTime)}`,
     };
 
-    const nextTransitions = normalizeTransitionState(newClips, get().transitions);
-    set((state) => ({
-      history: [...state.history, snap],
+    const nextTransitions = normalizeTransitionState(newClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(clips, newClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
       future: [],
       clips: newClips,
       transitions: nextTransitions,
+      ...remapped,
       markers: [],
       taggedMarkerIds: [],
-      taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, newClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], newClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         newClips,
         nextTransitions,
-        state.sourceTranscriptCaptions,
+        current.sourceTranscriptCaptions,
       ),
       appliedActions: [
-        ...state.appliedActions.slice(-24),
+        ...current.appliedActions.slice(-24),
         { id: uuidv4(), timestamp: Date.now(), action, summary: action.message },
       ],
     }));
   },
 
   deleteRangeAtTime: (startTime, endTime) => {
-    const { clips } = get();
+    const state = get();
+    const { clips } = state;
     const newClips = deleteRangeFromClips(clips, startTime, endTime);
     if (newClips === clips) return;
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    const nextTransitions = normalizeTransitionState(newClips, get().transitions);
-    set((state) => {
-      const nextCaptions = remapCaptionsAfterDelete(state.captions, startTime, endTime);
-      const nextImageOverlays = remapImageOverlaysAfterDelete(state.imageOverlays, startTime, endTime);
-      const nextTextOverlays = remapTextOverlaysAfterDelete(state.textOverlays, startTime, endTime);
-      return {
-        history: [...state.history, snap],
-        future: [],
-        clips: newClips,
-        transitions: nextTransitions,
-        captions: nextCaptions,
-        imageOverlays: nextImageOverlays,
-        textOverlays: nextTextOverlays,
-        markers: [],
-        taggedMarkerIds: [],
-        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, newClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], newClips, nextCaptions, nextTextOverlays, nextTransitions, nextImageOverlays),
-        ...clearReviewStatePatch(),
-        ...buildDerivedIndexState(
-          newClips,
-          nextTransitions,
-          state.sourceTranscriptCaptions,
-        ),
-      };
-    });
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextTransitions = normalizeTransitionState(newClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(clips, newClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: newClips,
+      transitions: nextTransitions,
+      ...remapped,
+      markers: [],
+      taggedMarkerIds: [],
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, newClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], newClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
+      ...clearReviewStatePatch(),
+      ...buildDerivedIndexState(
+        newClips,
+        nextTransitions,
+        current.sourceTranscriptCaptions,
+      ),
+    }));
   },
 
   deleteClip: (clipId) => {
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    set((state) => {
-      const nextClips = state.clips.filter((clip) => clip.id !== clipId);
-      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
-      return {
-        history: [...state.history, snap],
-        future: [],
-        clips: nextClips,
-        transitions: nextTransitions,
-        markers: [],
-        taggedMarkerIds: [],
-        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: null,
-        ...clearReviewStatePatch(),
-        ...buildDerivedIndexState(
-          nextClips,
-          nextTransitions,
-          state.sourceTranscriptCaptions,
-        ),
-      };
-    });
+    const state = get();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextClips = state.clips.filter((clip) => clip.id !== clipId);
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(state.clips, nextClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: nextClips,
+      transitions: nextTransitions,
+      ...remapped,
+      markers: [],
+      taggedMarkerIds: [],
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
+      selectedItem: null,
+      ...clearReviewStatePatch(),
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.sourceTranscriptCaptions,
+      ),
+    }));
   },
 
   reorderClip: (clipId, newIndex) => {
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    const { clips } = get();
+    const state = get();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const { clips } = state;
     const idx = clips.findIndex((clip) => clip.id === clipId);
     if (idx === -1) return;
     const nextClips = [...clips];
     const [removed] = nextClips.splice(idx, 1);
     nextClips.splice(Math.max(0, Math.min(nextClips.length, newIndex)), 0, removed);
-    const nextTransitions = normalizeTransitionState(nextClips, get().transitions);
-    set((state) => ({
-      history: [...state.history, snap],
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(clips, nextClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
       future: [],
       clips: nextClips,
       transitions: nextTransitions,
+      ...remapped,
       markers: [],
       taggedMarkerIds: [],
-      taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-      selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
       ...clearReviewStatePatch(),
       ...buildDerivedIndexState(
         nextClips,
         nextTransitions,
-        state.sourceTranscriptCaptions,
+        current.sourceTranscriptCaptions,
       ),
     }));
   },
 
   trimClip: (clipId, newSourceStart, newSourceDuration) => {
-    set((state) => {
-      const nextClips = state.clips.map((clip) => (
-        clip.id === clipId
-          ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
-          : clip
-      ));
-      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
-      return {
-        clips: nextClips,
-        transitions: nextTransitions,
-        markers: [],
-        taggedMarkerIds: [],
-        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
-        ...clearReviewStatePatch(),
-        ...buildDerivedIndexState(
-          nextClips,
-          nextTransitions,
-          state.sourceTranscriptCaptions,
-        ),
-      };
-    });
+    const state = get();
+    const nextClips = state.clips.map((clip) => (
+      clip.id === clipId
+        ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
+        : clip
+    ));
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(state.clips, nextClips, state);
+    set((current) => ({
+      clips: nextClips,
+      transitions: nextTransitions,
+      ...remapped,
+      markers: [],
+      taggedMarkerIds: [],
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
+      ...clearReviewStatePatch(),
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.sourceTranscriptCaptions,
+      ),
+    }));
   },
 
   trimClipWithHistory: (clipId, newSourceStart, newSourceDuration) => {
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    set((state) => {
-      const nextClips = state.clips.map((clip) => (
-        clip.id === clipId
-          ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
-          : clip
-      ));
-      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
-      return {
-        history: [...state.history, snap],
-        future: [],
-        clips: nextClips,
-        transitions: nextTransitions,
-        markers: [],
-        taggedMarkerIds: [],
-        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
-        ...clearReviewStatePatch(),
-        ...buildDerivedIndexState(
-          nextClips,
-          nextTransitions,
-          state.sourceTranscriptCaptions,
-        ),
-      };
-    });
+    const state = get();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextClips = state.clips.map((clip) => (
+      clip.id === clipId
+        ? { ...clip, sourceStart: newSourceStart, sourceDuration: newSourceDuration }
+        : clip
+    ));
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(state.clips, nextClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: nextClips,
+      transitions: nextTransitions,
+      ...remapped,
+      markers: [],
+      taggedMarkerIds: [],
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
+      ...clearReviewStatePatch(),
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.sourceTranscriptCaptions,
+      ),
+    }));
   },
 
   setClipSpeed: (clipId, speed) => {
-    const snap = (get() as EditorStoreWithSnapshot)._snapshot();
-    set((state) => {
-      const nextClips = state.clips.map((clip) => (
-        clip.id === clipId
-          ? { ...clip, speed: Math.max(0.1, Math.min(10, speed)) }
-          : clip
-      ));
-      const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
-      return {
-        history: [...state.history, snap],
-        future: [],
-        clips: nextClips,
-        transitions: nextTransitions,
-        markers: [],
-        taggedMarkerIds: [],
-        taggedClipIds: filterTaggedClipIds(state.taggedClipIds, nextClips),
-        selectedItem: normalizeSelectedItem(state.selectedItem?.type === 'marker' ? null : state.selectedItem, [], nextClips, state.captions, state.textOverlays, nextTransitions, state.imageOverlays),
-        ...clearReviewStatePatch(),
-        ...buildDerivedIndexState(
-          nextClips,
-          nextTransitions,
-          state.sourceTranscriptCaptions,
-        ),
-      };
-    });
+    const state = get();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const nextClips = state.clips.map((clip) => (
+      clip.id === clipId
+        ? { ...clip, speed: Math.max(0.1, Math.min(10, speed)) }
+        : clip
+    ));
+    const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
+    const remapped = remapOverlaysAndCaptions(state.clips, nextClips, state);
+    set((current) => ({
+      history: [...current.history, snap],
+      future: [],
+      clips: nextClips,
+      transitions: nextTransitions,
+      ...remapped,
+      markers: [],
+      taggedMarkerIds: [],
+      taggedClipIds: filterTaggedClipIds(current.taggedClipIds, nextClips),
+      selectedItem: normalizeSelectedItem(current.selectedItem?.type === 'marker' ? null : current.selectedItem, [], nextClips, remapped.captions ?? current.captions, remapped.textOverlays ?? current.textOverlays, nextTransitions, remapped.imageOverlays ?? current.imageOverlays),
+      ...clearReviewStatePatch(),
+      ...buildDerivedIndexState(
+        nextClips,
+        nextTransitions,
+        current.sourceTranscriptCaptions,
+      ),
+    }));
   },
 
   setClipVolume: (clipId, volume, fadeIn, fadeOut) => {

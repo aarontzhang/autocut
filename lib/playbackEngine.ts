@@ -58,7 +58,7 @@ function getBoundaryIndexForTransition(
   return bestMatch?.index ?? -1;
 }
 
-function buildPlainSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
+export function buildPlainSchedule(clips: VideoClip[]): ClipScheduleEntry[] {
   const schedule: ClipScheduleEntry[] = [];
   let cursor = 0;
 

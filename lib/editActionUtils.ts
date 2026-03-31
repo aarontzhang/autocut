@@ -1,10 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { buildClipSchedule, normalizeTransitionEntries } from './playbackEngine';
+import { buildClipSchedule, buildPlainSchedule, normalizeTransitionEntries } from './playbackEngine';
 import { normalizeTextOverlayEntry } from './textOverlays';
 import { buildCaptionEntriesFromWords, projectCaptionWordsToTimeline } from './timelineUtils';
 import type {
   AppliedActionRecord,
   CaptionEntry,
+  ClipScheduleEntry,
   EditAction,
   ImageOverlayEntry,
   MarkerEntry,
@@ -151,139 +152,119 @@ function buildResolvedCaptionAction(
   };
 }
 
-function remapWordAfterDelete(
-  word: NonNullable<CaptionEntry['words']>[number],
-  startTime: number,
-  endTime: number,
-) {
-  if (word.endTime <= startTime) return { ...word };
+// ---------------------------------------------------------------------------
+// Generic schedule-diff overlay/caption remapping
+// ---------------------------------------------------------------------------
+// Maps any { startTime, endTime } entity through source-time coordinates so
+// that overlays (and captions) stay anchored to the same clip content when
+// clips are reordered, deleted, trimmed, speed-changed, split, or inserted.
+// ---------------------------------------------------------------------------
 
-  const delta = endTime - startTime;
-  if (word.startTime >= endTime) {
-    return {
-      ...word,
-      startTime: word.startTime - delta,
-      endTime: word.endTime - delta,
-    };
-  }
-
-  const nextStart = word.startTime < startTime ? word.startTime : null;
-  const nextEnd = word.endTime > endTime
-    ? word.endTime - delta
-    : word.endTime <= startTime
-      ? word.endTime
-      : null;
-  if (nextStart === null || nextEnd === null || nextEnd <= nextStart) {
-    return null;
-  }
-
-  return {
-    ...word,
-    startTime: nextStart,
-    endTime: nextEnd,
-  };
-}
-
-function remapCaptionAfterDelete(
-  caption: CaptionEntry,
-  startTime: number,
-  endTime: number,
-): CaptionEntry | null {
-  if (caption.words && caption.words.length > 0) {
-    const nextWords = caption.words
-      .map((word) => remapWordAfterDelete(word, startTime, endTime))
-      .filter((word): word is NonNullable<CaptionEntry['words']>[number] => !!word);
-    if (nextWords.length === 0) return null;
-    return {
-      ...caption,
-      startTime: nextWords[0].startTime,
-      endTime: nextWords[nextWords.length - 1].endTime,
-      text: nextWords.map((word) => word.text).join(' '),
-      words: nextWords,
-    };
-  }
-
-  if (caption.endTime <= startTime) return caption;
-
-  const delta = endTime - startTime;
-  if (caption.startTime >= endTime) {
-    return {
-      ...caption,
-      startTime: caption.startTime - delta,
-      endTime: caption.endTime - delta,
-    };
-  }
-
-  const nextStart = caption.startTime < startTime ? caption.startTime : startTime;
-  const nextEnd = caption.endTime > endTime
-    ? caption.endTime - delta
-    : Math.min(caption.endTime, startTime);
-  if (nextEnd <= nextStart) return null;
-
-  return {
-    ...caption,
-    startTime: nextStart,
-    endTime: nextEnd,
-  };
-}
-
-export function remapCaptionsAfterDelete(
-  captions: CaptionEntry[],
-  startTime: number,
-  endTime: number,
-): CaptionEntry[] {
-  return captions
-    .map((caption) => remapCaptionAfterDelete(caption, startTime, endTime))
-    .filter((caption): caption is CaptionEntry => !!caption);
-}
-
-function remapOverlayAfterDelete<T extends { startTime: number; endTime: number }>(
+function remapOverlayAfterTimelineChange<T extends { startTime: number; endTime: number }>(
   overlay: T,
-  startTime: number,
-  endTime: number,
+  oldSchedule: ClipScheduleEntry[],
+  newScheduleByClipId: Map<string, ClipScheduleEntry>,
 ): T | null {
-  if (overlay.endTime <= startTime) return overlay;
+  let earliestNew = Infinity;
+  let latestNew = -Infinity;
 
-  const delta = endTime - startTime;
-  if (overlay.startTime >= endTime) {
-    return {
-      ...overlay,
-      startTime: overlay.startTime - delta,
-      endTime: overlay.endTime - delta,
-    };
+  for (const oldEntry of oldSchedule) {
+    // Find the portion of this overlay that overlaps with this old clip
+    const overlapStart = Math.max(overlay.startTime, oldEntry.timelineStart);
+    const overlapEnd = Math.min(overlay.endTime, oldEntry.timelineEnd);
+    if (overlapEnd <= overlapStart) continue;
+
+    const newEntry = newScheduleByClipId.get(oldEntry.clipId);
+    if (!newEntry) continue; // clip was deleted — this portion is lost
+
+    // Convert overlap range to source-time coordinates
+    const speed = oldEntry.speed > 0 ? oldEntry.speed : 1;
+    const sourceStart = oldEntry.sourceStart + (overlapStart - oldEntry.timelineStart) * speed;
+    const sourceEnd = oldEntry.sourceStart + (overlapEnd - oldEntry.timelineStart) * speed;
+
+    // Clamp to new clip's source range (handles trims)
+    const newSpeed = newEntry.speed > 0 ? newEntry.speed : 1;
+    const newSourceEnd = newEntry.sourceStart + newEntry.sourceDuration;
+    const clampedSourceStart = Math.max(sourceStart, newEntry.sourceStart);
+    const clampedSourceEnd = Math.min(sourceEnd, newSourceEnd);
+    if (clampedSourceEnd <= clampedSourceStart) continue;
+
+    // Map back to new timeline coordinates
+    const newTimeStart = newEntry.timelineStart + (clampedSourceStart - newEntry.sourceStart) / newSpeed;
+    const newTimeEnd = newEntry.timelineStart + (clampedSourceEnd - newEntry.sourceStart) / newSpeed;
+
+    earliestNew = Math.min(earliestNew, newTimeStart);
+    latestNew = Math.max(latestNew, newTimeEnd);
   }
 
-  const nextStart = overlay.startTime < startTime ? overlay.startTime : startTime;
-  const nextEnd = overlay.endTime > endTime
-    ? overlay.endTime - delta
-    : Math.min(overlay.endTime, startTime);
-  if (nextEnd <= nextStart) return null;
+  if (latestNew <= earliestNew) return null;
 
   return {
     ...overlay,
-    startTime: nextStart,
-    endTime: nextEnd,
+    startTime: earliestNew,
+    endTime: latestNew,
   };
 }
 
-export function remapImageOverlaysAfterDelete(
+function buildScheduleLookup(clips: VideoClip[]): {
+  schedule: ClipScheduleEntry[];
+  byClipId: Map<string, ClipScheduleEntry>;
+} {
+  const schedule = buildPlainSchedule(clips);
+  const byClipId = new Map(schedule.map((entry) => [entry.clipId, entry]));
+  return { schedule, byClipId };
+}
+
+export function remapImageOverlaysAfterTimelineChange(
   overlays: ImageOverlayEntry[],
-  startTime: number,
-  endTime: number,
+  oldClips: VideoClip[],
+  newClips: VideoClip[],
 ): ImageOverlayEntry[] {
+  const { schedule: oldSchedule } = buildScheduleLookup(oldClips);
+  const { byClipId: newByClipId } = buildScheduleLookup(newClips);
   return overlays
-    .map((overlay) => remapOverlayAfterDelete(overlay, startTime, endTime))
+    .map((overlay) => remapOverlayAfterTimelineChange(overlay, oldSchedule, newByClipId))
     .filter((overlay): overlay is ImageOverlayEntry => !!overlay);
 }
 
-export function remapTextOverlaysAfterDelete(
+export function remapTextOverlaysAfterTimelineChange(
   overlays: TextOverlayEntry[],
-  startTime: number,
-  endTime: number,
+  oldClips: VideoClip[],
+  newClips: VideoClip[],
 ): TextOverlayEntry[] {
+  const { schedule: oldSchedule } = buildScheduleLookup(oldClips);
+  const { byClipId: newByClipId } = buildScheduleLookup(newClips);
   return overlays
-    .map((overlay) => remapOverlayAfterDelete(overlay, startTime, endTime))
+    .map((overlay) => remapOverlayAfterTimelineChange(overlay, oldSchedule, newByClipId))
     .filter((overlay): overlay is TextOverlayEntry => !!overlay);
+}
+
+export function remapCaptionsAfterTimelineChange(
+  captions: CaptionEntry[],
+  oldClips: VideoClip[],
+  newClips: VideoClip[],
+): CaptionEntry[] {
+  const { schedule: oldSchedule } = buildScheduleLookup(oldClips);
+  const { byClipId: newByClipId } = buildScheduleLookup(newClips);
+
+  return captions
+    .map((caption) => {
+      if (caption.words && caption.words.length > 0) {
+        const nextWords = caption.words
+          .map((word) => remapOverlayAfterTimelineChange(word, oldSchedule, newByClipId))
+          .filter((word): word is NonNullable<CaptionEntry['words']>[number] => !!word);
+        if (nextWords.length === 0) return null;
+        return {
+          ...caption,
+          startTime: nextWords[0].startTime,
+          endTime: nextWords[nextWords.length - 1].endTime,
+          text: nextWords.map((word) => word.text).join(' '),
+          words: nextWords,
+        };
+      }
+      return remapOverlayAfterTimelineChange(caption, oldSchedule, newByClipId);
+    })
+    .filter((caption): caption is CaptionEntry => !!caption);
 }
 
 export function splitClipsAtTime(clips: VideoClip[], timelineTime: number): VideoClip[] {
@@ -387,10 +368,20 @@ function withClearedMarkers(snapshot: EditSnapshot, patch: Partial<EditSnapshot>
 function withTimelineChanges(snapshot: EditSnapshot, patch: Partial<EditSnapshot>): EditSnapshot {
   const nextClips = patch.clips ?? snapshot.clips;
   const nextTransitions = normalizeTransitionEntries(nextClips, patch.transitions ?? snapshot.transitions);
+  const clipsChanged = nextClips !== snapshot.clips;
   return withClearedMarkers(snapshot, {
     ...patch,
     clips: nextClips,
     transitions: nextTransitions,
+    imageOverlays: patch.imageOverlays ?? (clipsChanged
+      ? remapImageOverlaysAfterTimelineChange(snapshot.imageOverlays, snapshot.clips, nextClips)
+      : snapshot.imageOverlays),
+    textOverlays: patch.textOverlays ?? (clipsChanged
+      ? remapTextOverlaysAfterTimelineChange(snapshot.textOverlays, snapshot.clips, nextClips)
+      : snapshot.textOverlays),
+    captions: patch.captions ?? (clipsChanged
+      ? remapCaptionsAfterTimelineChange(snapshot.captions, snapshot.clips, nextClips)
+      : snapshot.captions),
   });
 }
 
@@ -418,9 +409,6 @@ export function applyActionToSnapshot(
     if (resolvedAction.deleteStartTime === undefined || resolvedAction.deleteEndTime === undefined) return snapshot;
     return withTimelineChanges(snapshot, {
       clips: deleteRangeFromClips(snapshot.clips, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
-      captions: remapCaptionsAfterDelete(snapshot.captions, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
-      imageOverlays: remapImageOverlaysAfterDelete(snapshot.imageOverlays, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
-      textOverlays: remapTextOverlaysAfterDelete(snapshot.textOverlays, resolvedAction.deleteStartTime, resolvedAction.deleteEndTime),
     });
   }
 
@@ -430,16 +418,7 @@ export function applyActionToSnapshot(
       if (range.end <= range.start) return acc;
       return deleteRangeFromClips(acc, range.start, range.end);
     }, snapshot.clips);
-    const captions = ranges.reduce((acc, range) => (
-      range.end <= range.start ? acc : remapCaptionsAfterDelete(acc, range.start, range.end)
-    ), snapshot.captions);
-    const imageOverlays = ranges.reduce((acc, range) => (
-      range.end <= range.start ? acc : remapImageOverlaysAfterDelete(acc, range.start, range.end)
-    ), snapshot.imageOverlays);
-    const textOverlays = ranges.reduce((acc, range) => (
-      range.end <= range.start ? acc : remapTextOverlaysAfterDelete(acc, range.start, range.end)
-    ), snapshot.textOverlays);
-    return withTimelineChanges(snapshot, { clips, captions, imageOverlays, textOverlays });
+    return withTimelineChanges(snapshot, { clips });
   }
 
   if (resolvedAction.type === 'reorder_clip') {
