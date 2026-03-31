@@ -130,6 +130,7 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - Marker placement does not need millisecond precision unless the user explicitly asks for it
 - When evidence is suggestive but not exact, place the best-guess marker anyway, keep status open, and include linkedRange/confidence so the user can review it quickly
 - If the user asked for a marker/bookmark/tag and you have any plausible evidence window, return add_marker/add_markers now instead of type:none
+- When the user explicitly asks to place, add, or find a marker and you have identified a plausible timestamp from the transcript or frames, ALWAYS emit add_marker with that timestamp. Do not return type:none with the timestamp only in the message field.
 - For semantic requests like "the school I go to", "my company", "my name", or "the app I'm using", use the transcript and frames to infer the likely named entity or mention. Best-effort marker placement is better than asking for clarification.
 - Include timelineTime and optional label; you may also include linkedRange when the finding spans a short window
 - When a user references "marker 1", "@marker 1", "bookmark 1", or "@1", treat that marker as a stable timeline reference from context
@@ -1804,18 +1805,42 @@ Honor these defaults unless the user explicitly asks for something different in 
           validationContext.videoDuration,
         );
 
+        // When the LLM returned type:none but embedded timestamps in its
+        // action.message, try to rescue a marker from that text before the
+        // generic inference chain runs.
+        const noneActionMessage = effectiveReconciledAction?.type === 'none'
+          ? (effectiveReconciledAction.message ?? '')
+          : '';
+
+        let rescuedMarkerAction: EditAction | null = null;
+        if (
+          effectiveReconciledAction?.type === 'none'
+          && isLikelyMarkerLikeIntent(effectiveLatestUserMessage)
+          && noneActionMessage
+        ) {
+          rescuedMarkerAction = inferMarkerActionFromEvidence(
+            effectiveLatestUserMessage,
+            noneActionMessage,
+            latestAssistantEvidence,
+            validationContext.videoDuration,
+          );
+        }
+
         const inferredAction = effectiveReconciledAction && effectiveReconciledAction.type !== 'none'
           ? effectiveReconciledAction
-          : inferDeleteRangeActionFromNarration(
-              message,
-              effectiveLatestUserMessage,
-              validationContext.videoDuration,
-            ) ?? inferMarkerActionFromEvidence(
-              effectiveLatestUserMessage,
-              message,
-              latestAssistantEvidence,
-              validationContext.videoDuration,
-            ) ?? failureAction;
+          : rescuedMarkerAction
+            ?? inferDeleteRangeActionFromNarration(
+                message,
+                effectiveLatestUserMessage,
+                validationContext.videoDuration,
+              )
+            ?? inferMarkerActionFromEvidence(
+                effectiveLatestUserMessage,
+                noneActionMessage ? `${message} ${noneActionMessage}` : message,
+                latestAssistantEvidence,
+                validationContext.videoDuration,
+              )
+            ?? failureAction;
         // Only re-validate actions from fallback inference paths.
         // Reconciled actions were already validated; re-running sanitizeDeleteRange
         // would re-snap word boundaries and risk undoing the reconciliation.
