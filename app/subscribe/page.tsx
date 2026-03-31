@@ -7,14 +7,6 @@ import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { useSubscription } from '@/components/auth/SubscriptionProvider';
 
-const FEATURES = [
-  'AI chat editing',
-  'Transcription up to 2 hours / day',
-  'Multi-source timeline',
-  'Unlimited projects',
-  'Priority support',
-];
-
 /* ── Left branding panel (shared across all states) ──────────── */
 
 function BrandingPanel() {
@@ -50,7 +42,7 @@ function BrandingPanel() {
         </span>
       </div>
 
-      {/* Headline + features as typography */}
+      {/* Headline */}
       <div>
         <p style={{
           fontSize: 'clamp(32px, 3vw, 48px)',
@@ -58,29 +50,20 @@ function BrandingPanel() {
           letterSpacing: '-0.035em',
           lineHeight: 1.1,
           color: 'rgba(255,255,255,0.92)',
-          margin: '0 0 32px',
+          margin: '0 0 20px',
           maxWidth: 480,
         }}>
-          Everything you need<br />to edit with AI.
+          Describe the edit.<br />Autocut makes it.
         </p>
-
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 10,
+        <p style={{
+          fontSize: 15,
+          color: 'rgba(255,255,255,0.38)',
+          lineHeight: 1.65,
+          margin: 0,
+          maxWidth: 400,
         }}>
-          {FEATURES.map(feature => (
-            <span key={feature} style={{
-              fontSize: 'clamp(16px, 1.6vw, 20px)',
-              fontWeight: 500,
-              color: 'rgba(255,255,255,0.52)',
-              lineHeight: 1.4,
-              letterSpacing: '-0.01em',
-            }}>
-              {feature}
-            </span>
-          ))}
-        </div>
+          Tell Autocut what to cut. It finds the moments and applies every edit directly to your timeline.
+        </p>
       </div>
 
       {/* Bottom */}
