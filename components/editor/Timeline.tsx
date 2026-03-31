@@ -45,6 +45,8 @@ type ClipReorderDragInfo = {
   startClientY: number;
   isDragging: boolean;
   currentDropIndex: number | null;
+  clipWidth: number;
+  clipHeight: number;
 };
 
 type ClipVisualLayout = {
@@ -122,6 +124,7 @@ export default function Timeline({
 
   const [trackWidth, setTrackWidth] = useState(800);
   const [clipDropIndicator, setClipDropIndicator] = useState<{ xPx: number; targetIndex: number } | null>(null);
+  const [dragGhost, setDragGhost] = useState<{ clipId: string; clientX: number; clientY: number; width: number; height: number } | null>(null);
 
   const videoDuration = useEditorStore(s => s.videoDuration);
   const zoom = useEditorStore(s => s.zoom);
@@ -550,6 +553,8 @@ export default function Timeline({
     e: React.PointerEvent,
     clipId: string,
     clipIndex: number,
+    clipWidth: number,
+    clipHeight: number,
   ) => {
     if (e.button !== 0) return;
     if (activeReviewSession) return;
@@ -563,6 +568,8 @@ export default function Timeline({
       startClientY: e.clientY,
       isDragging: false,
       currentDropIndex: null,
+      clipWidth,
+      clipHeight,
     };
   }, [activeReviewSession]);
 
@@ -607,6 +614,7 @@ export default function Timeline({
       }
       clipReorderDragRef.current = null;
       setClipDropIndicator(null);
+      setDragGhost(null);
     }
 
     if (!playheadDragRef.current && !panRef.current && !cutEdgeDragRef.current && !imageEdgeDragRef.current && !imageMoveDragRef.current && !clipReorderDragRef.current) {
@@ -693,6 +701,13 @@ export default function Timeline({
         }
         const indicatorX = (indicatorTime / totalDur) * totalPx;
         setClipDropIndicator({ xPx: indicatorX, targetIndex: dropIndex });
+        setDragGhost({
+          clipId: clipDrag.clipId,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          width: clipDrag.clipWidth,
+          height: clipDrag.clipHeight,
+        });
         return;
       }
 
@@ -1098,7 +1113,7 @@ export default function Timeline({
                   isDragging={clipDropIndicator !== null && clipReorderDragRef.current?.clipId === clip.id}
                   index={index}
                   title={`Clip ${index + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
-                  onPointerDown={e => beginClipReorderDrag(e, clip.id, index)}
+                  onPointerDown={e => beginClipReorderDrag(e, clip.id, index, layout.displayWidth, BASE_TRACK_HEIGHT - 12)}
                 />
               );
             })}
@@ -1199,8 +1214,9 @@ export default function Timeline({
                   title={`Clip ${schedule.findIndex((item) => item.clipId === clip.id) + 1} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onPointerDown={e => {
                     if (e.button !== 0) return;
-                    beginClipReorderDrag(e, clip.id, clips.findIndex(c => c.id === clip.id));
+                    beginClipReorderDrag(e, clip.id, clips.findIndex(c => c.id === clip.id), layout.displayWidth, BASE_TRACK_HEIGHT - 12);
                   }}
+                  onClick={(e) => e.stopPropagation()}
                 >
                   <div
                     style={{
@@ -1631,6 +1647,39 @@ export default function Timeline({
           }
         }}
       />
+      {dragGhost && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragGhost.clientX - dragGhost.width / 2,
+            top: dragGhost.clientY - dragGhost.height / 2,
+            width: dragGhost.width,
+            height: dragGhost.height,
+            background: 'rgba(59,130,246,0.45)',
+            border: '1.5px solid rgba(96,165,250,0.9)',
+            borderRadius: 4,
+            opacity: 0.9,
+            pointerEvents: 'none',
+            zIndex: 9999,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            paddingLeft: 10,
+          }}
+        >
+          <span style={{
+            fontSize: 10,
+            fontWeight: 500,
+            color: 'rgba(255,255,255,0.9)',
+            fontFamily: 'var(--font-serif)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {`Clip ${(schedule.findIndex(e => e.clipId === dragGhost.clipId) + 1) || ''}`}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

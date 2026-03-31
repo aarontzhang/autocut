@@ -58,6 +58,7 @@ export default function ClipBlock({
         boxShadow: isTagged ? '0 0 0 1px rgba(125,211,252,0.3)' : 'none',
       }}
       onPointerDown={onPointerDown}
+      onClick={(e) => e.stopPropagation()}
     >
       {isMicroClip && (
         <div
