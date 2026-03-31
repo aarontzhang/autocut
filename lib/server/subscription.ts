@@ -7,13 +7,14 @@ export async function getSubscriptionStatus(userId: string) {
   const supabase = getSupabaseAdmin();
 
   // Existing users with projects are grandfathered — skip paywall
-  const { count: projectCount } = await supabase
+  const { data: existingProject } = await supabase
     .from('projects')
-    .select('id', { count: 'exact', head: true })
+    .select('id')
     .eq('user_id', userId)
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
 
-  if (projectCount && projectCount > 0) {
+  if (existingProject) {
     return {
       isActive: true,
       status: 'grandfathered' as const,

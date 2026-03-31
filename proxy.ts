@@ -74,13 +74,14 @@ export async function proxy(req: NextRequest) {
   }
 
   // Skip paywall for existing users (already have projects in the system)
-  const { count: projectCount } = await supabase
+  const { data: existingProject } = await supabase
     .from('projects')
-    .select('id', { count: 'exact', head: true })
+    .select('id')
     .eq('user_id', user.id)
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
 
-  if (!projectCount) {
+  if (!existingProject) {
     // New user — require active subscription
     const { data: subscription } = await supabase
       .from('subscriptions')
