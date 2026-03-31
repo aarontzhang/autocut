@@ -59,7 +59,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const sub = await getSubscriptionStatus(user.id, user.app_metadata?.manually_subscribed === true);
+  const sub = await getSubscriptionStatus(user.id);
   if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({
@@ -158,7 +158,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const sub = await getSubscriptionStatus(user.id, user.app_metadata?.manually_subscribed === true);
+  const sub = await getSubscriptionStatus(user.id);
   if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({

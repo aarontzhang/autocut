@@ -258,7 +258,7 @@ function SuccessPanel() {
 
 /* ── Right panel: already subscribed ─────────────────────────── */
 
-function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
+function SubscribedPanel() {
   return (
     <div style={{ width: '100%', maxWidth: 380 }}>
       <Link href="/" className="sub-back" style={{ marginBottom: 40, display: 'inline-flex' }}>
@@ -302,8 +302,7 @@ function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
         Autocut Pro is active on your account.
       </p>
 
-      {!hideManage && (
-        <Link
+      <Link
           href="/subscription"
           className="iridescent-button"
           style={{
@@ -319,7 +318,6 @@ function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
         >
           Manage Subscription
         </Link>
-      )}
     </div>
   );
 }
@@ -328,7 +326,7 @@ function SubscribedPanel({ hideManage }: { hideManage?: boolean }) {
 
 function SubscribeContent() {
   const { user, initialized } = useAuth();
-  const { isSubscribed, isManual, loading: subLoading } = useSubscription();
+  const { isSubscribed, loading: subLoading } = useSubscription();
   const searchParams = useSearchParams();
   const success = searchParams.get('success') === 'true';
 
@@ -389,7 +387,7 @@ function SubscribeContent() {
         {showSuccess ? (
           <SuccessPanel />
         ) : showSubscribed ? (
-          <SubscribedPanel hideManage={isManual} />
+          <SubscribedPanel />
         ) : (
           <PricingPanel />
         )}

@@ -11,17 +11,7 @@ export type SubscriptionStatus = {
   stripeCustomerId: string | null;
 };
 
-export async function getSubscriptionStatus(userId: string, manuallySubscribed?: boolean): Promise<SubscriptionStatus> {
-  if (manuallySubscribed) {
-    return {
-      isActive: true,
-      status: 'active',
-      currentPeriodEnd: null,
-      cancelAtPeriodEnd: false,
-      stripeCustomerId: null,
-    };
-  }
-
+export async function getSubscriptionStatus(userId: string): Promise<SubscriptionStatus> {
   const { data } = await getSupabaseAdmin()
     .from('subscriptions')
     .select('status, current_period_end, cancel_at_period_end, stripe_customer_id')

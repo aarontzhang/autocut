@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const sub = await getSubscriptionStatus(user.id, user.app_metadata?.manually_subscribed === true);
+  const sub = await getSubscriptionStatus(user.id);
   if (!sub.isActive) return subscriptionRequiredResponse();
 
   const rateLimitError = enforceRateLimit({

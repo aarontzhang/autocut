@@ -10,7 +10,7 @@ export default async function Home() {
   } = await supabase.auth.getUser();
 
   if (user) {
-    const { isActive } = await getSubscriptionStatus(user.id, user.app_metadata?.manually_subscribed);
+    const { isActive } = await getSubscriptionStatus(user.id);
     redirect(isActive ? '/projects' : '/subscribe');
   }
 

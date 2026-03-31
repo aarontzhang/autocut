@@ -76,6 +76,7 @@ type SubDetails = {
   currentPeriodEnd: string | null;
   cancelAtPeriodEnd: boolean;
   priceId: string | null;
+  isGrandfathered: boolean;
 };
 
 function ManagePanel() {
@@ -314,7 +315,7 @@ function ManagePanel() {
       </div>
 
       {/* Action buttons */}
-      {isActive && !isCanceling && (
+      {isActive && !isCanceling && !details.isGrandfathered && (
         <button
           onClick={() => handleAction('cancel')}
           disabled={actionLoading}
@@ -347,7 +348,7 @@ function ManagePanel() {
         </button>
       )}
 
-      {isActive && isCanceling && (
+      {isActive && isCanceling && !details.isGrandfathered && (
         <button
           onClick={() => handleAction('reactivate')}
           disabled={actionLoading}

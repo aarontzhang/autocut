@@ -74,7 +74,7 @@ export async function middleware(req: NextRequest) {
   }
 
   // Subscription gating — redirect to /subscribe if no active subscription
-  if (isProtectedPage(pathname) && !user.app_metadata?.manually_subscribed) {
+  if (isProtectedPage(pathname)) {
     const { data: sub } = await supabase
       .from('subscriptions')
       .select('status')

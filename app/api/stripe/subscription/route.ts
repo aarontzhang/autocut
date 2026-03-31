@@ -21,11 +21,14 @@ export async function GET() {
     return NextResponse.json({ error: 'No subscription found' }, { status: 404 });
   }
 
+  const isGrandfathered = sub.stripe_subscription_id.startsWith('grandfathered_');
+
   return NextResponse.json({
     status: sub.status,
     currentPeriodEnd: sub.current_period_end,
     cancelAtPeriodEnd: sub.cancel_at_period_end,
     priceId: sub.price_id,
+    isGrandfathered,
   });
 }
 
@@ -50,6 +53,10 @@ export async function PATCH(req: NextRequest) {
 
   if (!sub?.stripe_subscription_id) {
     return NextResponse.json({ error: 'No subscription found' }, { status: 404 });
+  }
+
+  if (sub.stripe_subscription_id.startsWith('grandfathered_')) {
+    return NextResponse.json({ error: 'Grandfathered subscriptions cannot be modified' }, { status: 400 });
   }
 
   const stripe = getStripe();
