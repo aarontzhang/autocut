@@ -52,34 +52,6 @@ function BrandingPanel() {
 
       {/* Headline + features as typography */}
       <div>
-        <div style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '5px 12px',
-          borderRadius: 999,
-          background: 'rgba(33,212,255,0.08)',
-          border: '1px solid rgba(33,212,255,0.18)',
-          marginBottom: 24,
-        }}>
-          <div style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: '#21d4ff',
-            boxShadow: '0 0 8px rgba(33,212,255,0.5)',
-          }} />
-          <span style={{
-            fontSize: 11.5,
-            fontWeight: 600,
-            color: '#21d4ff',
-            letterSpacing: '0.02em',
-            textTransform: 'uppercase',
-          }}>
-            Autocut Pro
-          </span>
-        </div>
-
         <p style={{
           fontSize: 'clamp(32px, 3vw, 48px)',
           fontWeight: 700,
@@ -398,7 +370,6 @@ function SubscribeContent() {
     <div style={{
       minHeight: '100vh',
       display: 'flex',
-      fontFamily: 'var(--font-serif), system-ui, sans-serif',
       background: '#111111',
     }}>
       <style>{`

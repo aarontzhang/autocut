@@ -61,7 +61,6 @@ export default function SignUpPage() {
     <div style={{
       minHeight: '100vh',
       display: 'flex',
-      fontFamily: 'var(--font-serif), system-ui, sans-serif',
       background: '#111111',
     }}>
       <style>{`
