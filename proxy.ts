@@ -73,32 +73,6 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Skip paywall for existing users (already have projects in the system)
-  const { data: existingProject } = await supabase
-    .from('projects')
-    .select('id')
-    .eq('user_id', user.id)
-    .limit(1)
-    .maybeSingle();
-
-  if (!existingProject) {
-    // New user — require active subscription
-    const { data: subscription } = await supabase
-      .from('subscriptions')
-      .select('status')
-      .eq('user_id', user.id)
-      .in('status', ['active', 'trialing'])
-      .limit(1)
-      .maybeSingle();
-
-    if (!subscription) {
-      if (isProtectedApi(pathname)) {
-        return NextResponse.json({ error: 'Active subscription required' }, { status: 403 });
-      }
-      return NextResponse.redirect(new URL('/subscribe', req.url));
-    }
-  }
-
   return response;
 }
 
