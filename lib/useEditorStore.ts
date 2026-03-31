@@ -529,6 +529,7 @@ function buildBaseEditorState(input?: {
   | 'sourceIndex'
   | 'sourceIndexAnalysis'
   | 'sourceIndexAnalysisBySourceId'
+  | 'imageDescriptionsBySourceId'
 > {
   return {
     videoFile: input?.videoFile ?? null,
@@ -576,6 +577,7 @@ function buildBaseEditorState(input?: {
     sourceIndex: null,
     sourceIndexAnalysis: null,
     sourceIndexAnalysisBySourceId: {},
+    imageDescriptionsBySourceId: {},
   };
 }
 
@@ -626,6 +628,7 @@ interface EditorState {
   sourceIndex: SourceIndex | null;
   sourceIndexAnalysis: SourceIndexAnalysisState | null;
   sourceIndexAnalysisBySourceId: SourceIndexAnalysisStateMap;
+  imageDescriptionsBySourceId: Record<string, string>;
   importSources: (
     sources: ImportedSourceDraft[],
     options?: { insertAtTime?: number; shouldAppendClips?: boolean },
@@ -749,6 +752,7 @@ interface EditorState {
   addImageOverlay: (overlay: Omit<ImageOverlayEntry, 'id'>) => string;
   updateImageOverlay: (id: string, patch: Partial<ImageOverlayEntry>) => void;
   removeImageOverlay: (id: string) => void;
+  setImageDescription: (sourceId: string, description: string) => void;
   addTextOverlayAtTime: (time: number, text: string, duration: number) => string;
   createImageOverlayAtTime: (sourceId: string, timelineTime: number) => string;
 }
@@ -1954,6 +1958,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...clearReviewStatePatch(),
     }));
   },
+
+  setImageDescription: (sourceId: string, description: string) => set((state) => ({
+    imageDescriptionsBySourceId: { ...state.imageDescriptionsBySourceId, [sourceId]: description },
+  })),
 
   addTextOverlayAtTime: (time: number, text: string, duration: number) => {
     const id = uuidv4();

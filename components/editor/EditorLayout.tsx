@@ -512,7 +512,32 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
           runtime: { file, objectUrl, playerUrl: objectUrl, processingUrl: objectUrl },
         }], { shouldAppendClips: false });
         if (addedSources.length > 0) {
-          store.updateSource(addedSources[0].id, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+          const sourceId = addedSources[0].id;
+          store.updateSource(sourceId, { mediaType: 'image' } as Partial<import('@/lib/types').ProjectSource>);
+          // Fire-and-forget: get AI description of the image
+          void (async () => {
+            try {
+              const blob = await fetch(objectUrl).then((r) => r.blob());
+              const buffer = await blob.arrayBuffer();
+              const bytes = new Uint8Array(buffer);
+              let binary = '';
+              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+              const imageBase64 = btoa(binary);
+              const res = await fetch('/api/describe-image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imageBase64, mimeType: file.type }),
+              });
+              if (res.ok) {
+                const { description } = await res.json();
+                if (description) {
+                  useEditorStore.getState().setImageDescription(sourceId, description);
+                }
+              }
+            } catch {
+              // Image description is best-effort; skip on failure
+            }
+          })();
         }
       }
     }

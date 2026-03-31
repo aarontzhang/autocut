@@ -2847,7 +2847,11 @@ export default function ChatSidebar() {
           imageOverlayCount: freshState.imageOverlays.length,
           imageSources: freshState.sources
             .filter((s) => s.mediaType === 'image')
-            .map((s) => ({ id: s.id, fileName: s.fileName })),
+            .map((s) => ({
+              id: s.id,
+              fileName: s.fileName,
+              description: freshState.imageDescriptionsBySourceId[s.id] ?? null,
+            })),
           transcript: currentTranscript,
           transcriptAvailability,
           silenceCandidates,

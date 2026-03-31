@@ -154,6 +154,9 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 - widthPercent: size as percentage of frame width (5-100, default 25)
 - opacity: 0.0 to 1.0 (default 1.0)
 - Use when user says: "add the logo", "put an image here", "overlay the watermark", "add image at 5 seconds", etc.
+- Image sources in context may include a description of what the image shows. Use these descriptions to match user requests to the right image (e.g., "add the logo" → find the source described as a logo).
+- When the user asks for smart or automatic image placement, cross-reference image descriptions with the transcript to find contextually relevant timestamps. For example, if an image shows a product and the speaker mentions that product at a specific time, suggest placing the overlay there.
+- When suggesting placements, pick a reasonable duration (3-10 seconds) based on context and position the image appropriately (e.g., corner for logos, center for feature images).
 
 ## Response format
 
@@ -1673,6 +1676,23 @@ Honor these defaults unless the user explicitly asks for something different in 
         `\nTranscript readiness: canonical=${availability.canonicalAvailable === true ? 'yes' : 'no'}, requested_during_chain=${availability.requestedDuringChain === true ? 'yes' : 'no'}, missing=${availability.missing === true ? 'yes' : 'no'}.`
       );
     }
+    if (Array.isArray(context?.imageSources) && context.imageSources.length > 0) {
+      const imageSourceEntries = (context.imageSources as Array<{
+        id?: string;
+        fileName?: string;
+        description?: string | null;
+      }>).filter((s) => s.id && s.fileName);
+      if (imageSourceEntries.length > 0) {
+        contextLines.push(
+          `\nImage sources available for overlays:\n` +
+          imageSourceEntries.map((s) => {
+            const desc = s.description ? ` — ${s.description}` : '';
+            return `- sourceId: "${s.id}", file: "${s.fileName}"${desc}`;
+          }).join('\n')
+        );
+      }
+    }
+
     contextLines.push(
       `\nCurrent AI defaults:\n` +
       `- Silence padding: ${settings.silenceRemoval.paddingSeconds}s\n` +
