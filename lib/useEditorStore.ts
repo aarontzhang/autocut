@@ -8,6 +8,7 @@ import {
   CaptionEntry,
   ChatMessage,
   ColorFilter,
+  DEFAULT_TRACK,
   EditAction,
   MarkerEntry,
   ProjectSource,
@@ -18,6 +19,7 @@ import {
   SourceIndexState,
   ImageOverlayEntry,
   TextOverlayEntry,
+  Track,
   TransitionEntry,
   VideoClip,
 } from './types';
@@ -101,9 +103,10 @@ function deriveNextDisplayNumber(clips: VideoClip[]): number {
   return Math.max(...clips.map(c => c.displayNumber ?? 0)) + 1;
 }
 
-function makeClip(sourceId: string, sourceStart: number, sourceDuration: number, displayNumber: number): VideoClip {
+function makeClip(sourceId: string, sourceStart: number, sourceDuration: number, displayNumber: number, trackId: string = 'default'): VideoClip {
   return {
     id: uuidv4(),
+    trackId,
     sourceId,
     sourceStart,
     sourceDuration,
@@ -163,6 +166,7 @@ function normalizeLoadedClip(
 
   return {
     id: clip.id,
+    trackId: typeof clip.trackId === 'string' ? clip.trackId : 'default',
     sourceId,
     sourceStart: clip.sourceStart!,
     sourceDuration: clip.sourceDuration!,
@@ -217,6 +221,26 @@ function normalizeCaptionEntry(
     positionX: Number.isFinite(entry.positionX) ? entry.positionX : undefined,
     positionY: Number.isFinite(entry.positionY) ? entry.positionY : undefined,
   };
+}
+
+function normalizeLoadedTracks(raw: unknown[] | null | undefined): Track[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [DEFAULT_TRACK];
+  const tracks: Track[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const t = entry as Partial<Track>;
+    if (typeof t.id !== 'string') continue;
+    tracks.push({
+      id: t.id,
+      name: typeof t.name === 'string' ? t.name : 'Track',
+      type: t.type === 'audio' ? 'audio' : 'video',
+      volume: Number.isFinite(t.volume) ? t.volume! : 1,
+      muted: t.muted === true,
+      locked: t.locked === true,
+      order: Number.isFinite(t.order) ? t.order! : 0,
+    });
+  }
+  return tracks.length > 0 ? tracks : [DEFAULT_TRACK];
 }
 
 function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEntry | null {
@@ -550,6 +574,7 @@ function buildBaseEditorState(input?: {
   | 'sourceIndex'
   | 'sourceIndexAnalysis'
   | 'sourceIndexAnalysisBySourceId'
+  | 'tracks'
   | 'imageDescriptionsBySourceId'
 > {
   return {
@@ -565,6 +590,7 @@ function buildBaseEditorState(input?: {
     requestedSeekTime: null,
     pendingAction: null,
     clips: [],
+    tracks: [DEFAULT_TRACK],
     nextClipDisplayNumber: 1,
     captions: [],
     transitions: [],
@@ -616,6 +642,7 @@ interface EditorState {
   requestedSeekTime: number | null;
   pendingAction: EditAction | null;
   clips: VideoClip[];
+  tracks: Track[];
   nextClipDisplayNumber: number;
   captions: CaptionEntry[];
   transitions: TransitionEntry[];
@@ -656,7 +683,7 @@ interface EditorState {
     sources: ImportedSourceDraft[],
     options?: { insertAtTime?: number; shouldAppendClips?: boolean },
   ) => ProjectSource[];
-  appendClipFromSource: (sourceId: string) => void;
+  appendClipFromSource: (sourceId: string, trackId?: string) => void;
   insertClipFromSource: (sourceId: string, timelineTime: number) => void;
   insertClipsFromSources: (sourceIds: string[], timelineTime: number) => void;
   updateSource: (sourceId: string, patch: Partial<ProjectSource>) => void;
@@ -682,6 +709,9 @@ interface EditorState {
   setClipFilter: (clipId: string, filter: ColorFilter | null) => void;
   setClipFade: (clipId: string, fadeIn: number, fadeOut: number) => void;
   applyAction: (action: EditAction) => void;
+  addTrack: (type: 'video' | 'audio', name?: string) => void;
+  removeTrack: (trackId: string) => void;
+  updateTrack: (trackId: string, patch: Partial<Track>) => void;
   undo: () => void;
   redo: () => void;
   pushHistory: (snap: EditSnapshot) => void;
@@ -722,6 +752,7 @@ interface EditorState {
       videoDuration?: number;
       sourceIndex?: unknown;
       sources?: unknown[];
+      tracks?: unknown[];
     },
     project: {
       projectId: string;
@@ -880,6 +911,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       markers: s.markers,
       textOverlays: s.textOverlays,
       imageOverlays: s.imageOverlays,
+      tracks: s.tracks,
       appliedActions: s.appliedActions,
     };
   },
@@ -971,13 +1003,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return addedSources;
   },
 
-  appendClipFromSource: (sourceId) => {
+  appendClipFromSource: (sourceId, trackId) => {
     const state = get();
     const source = state.sources.find((entry) => entry.id === sourceId);
     if (!source || source.duration <= 0) return;
     const snap = (state as EditorStoreWithSnapshot)._snapshot();
     const dn = deriveNextDisplayNumber(state.clips);
-    const nextClips = [...state.clips, makeClip(source.id, 0, source.duration, dn)];
+    const effectiveTrackId = trackId ?? 'default';
+    const nextClips = [...state.clips, makeClip(source.id, 0, source.duration, dn, effectiveTrackId)];
     const nextTransitions = normalizeTransitionState(nextClips, state.transitions);
     set((current) => ({
       history: [...current.history, snap],
@@ -1457,6 +1490,49 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }));
   },
 
+  addTrack: (type, name) => {
+    const state = get();
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    const existingOfType = state.tracks.filter((t) => t.type === type);
+    const trackName = name ?? `${type === 'video' ? 'Video' : 'Audio'} ${existingOfType.length + 1}`;
+    const maxOrder = state.tracks.length > 0 ? Math.max(...state.tracks.map((t) => t.order)) : -1;
+    const track: Track = {
+      id: uuidv4(),
+      name: trackName,
+      type,
+      volume: 1,
+      muted: false,
+      locked: false,
+      order: maxOrder + 1,
+    };
+    set({
+      history: [...state.history, snap],
+      future: [],
+      tracks: [...state.tracks, track],
+    });
+  },
+
+  removeTrack: (trackId) => {
+    const state = get();
+    if (trackId === 'default' || state.tracks.length <= 1) return;
+    if (!state.tracks.some((t) => t.id === trackId)) return;
+    const snap = (state as EditorStoreWithSnapshot)._snapshot();
+    set({
+      history: [...state.history, snap],
+      future: [],
+      tracks: state.tracks.filter((t) => t.id !== trackId),
+      clips: state.clips.filter((c) => c.trackId !== trackId),
+    });
+  },
+
+  updateTrack: (trackId, patch) => {
+    const state = get();
+    if (!state.tracks.some((t) => t.id === trackId)) return;
+    set({
+      tracks: state.tracks.map((t) => (t.id === trackId ? { ...t, ...patch } : t)),
+    });
+  },
+
   undo: () => {
     const { history, future } = get();
     if (history.length === 0) return;
@@ -1464,6 +1540,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const prev = history[history.length - 1];
     set({
       ...prev,
+      tracks: prev.tracks ?? get().tracks,
       history: history.slice(0, -1),
       future: [snap, ...future],
       nextClipDisplayNumber: deriveNextDisplayNumber(prev.clips),
@@ -1494,6 +1571,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const next = future[0];
     set({
       ...next,
+      tracks: next.tracks ?? get().tracks,
       history: [...history, snap],
       future: future.slice(1),
       nextClipDisplayNumber: deriveNextDisplayNumber(next.clips),
@@ -1784,6 +1862,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...primaryMirror,
       }),
       clips: hydratedClips,
+      tracks: normalizeLoadedTracks(editState.tracks),
       nextClipDisplayNumber: deriveNextDisplayNumber(hydratedClips),
       captions: ((editState.captions as Partial<CaptionEntry>[] | undefined) ?? [])
         .map((entry) => normalizeCaptionEntry(entry, validSourceIds, sourceIdAliases))

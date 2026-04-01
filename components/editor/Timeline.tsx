@@ -11,7 +11,8 @@ import {
   generateWaveform,
   mapTimelineTimeAcrossSnapshots,
 } from '@/lib/timelineUtils';
-import { buildClipSchedule, findTimelineEntryAtTime, getTimelineDuration } from '@/lib/playbackEngine';
+import { buildClipSchedule, buildPlainSchedule, findTimelineEntryAtTime, getTimelineDuration } from '@/lib/playbackEngine';
+import type { Track } from '@/lib/types';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getReviewOverlayDescriptors, buildReviewGroupWithUpdatedItems, updateReviewItemAction, MIN_CLIP_DURATION_SECONDS } from '@/lib/editActionUtils';
 import ClipBlock from './ClipBlock';
@@ -149,6 +150,10 @@ export default function Timeline({
   const reorderClip = useEditorStore(s => s.reorderClip);
   const liveImageOverlays = useEditorStore(s => s.imageOverlays);
   const sources = useEditorStore(s => s.sources);
+  const tracks = useEditorStore(s => s.tracks);
+  const addTrack = useEditorStore(s => s.addTrack);
+  const removeTrack = useEditorStore(s => s.removeTrack);
+  const updateTrack = useEditorStore(s => s.updateTrack);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const reviewPlaybackUsesBase = Boolean(
     activeReviewSession?.items.some((item) => item.action.type === 'delete_range'),
@@ -193,6 +198,18 @@ export default function Timeline({
   }, [createMarkerAtTime, splitClipAtTime]);
 
   const schedule = buildClipSchedule(clips, transitions);
+  const audioTracks = useMemo(
+    () => tracks.filter((t) => t.type === 'audio').sort((a, b) => a.order - b.order),
+    [tracks],
+  );
+  const audioTrackSchedules = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof buildPlainSchedule>>();
+    for (const track of audioTracks) {
+      const trackClips = clips.filter((c) => c.trackId === track.id);
+      map.set(track.id, buildPlainSchedule(trackClips));
+    }
+    return map;
+  }, [audioTracks, clips]);
   const playbackDuration = useMemo(
     () => Math.max(0, getTimelineDuration(playbackSnapshot.clips, playbackSnapshot.transitions)),
     [playbackSnapshot.clips, playbackSnapshot.transitions],
@@ -323,6 +340,14 @@ export default function Timeline({
   }, [totalTimelineDuration, totalW]);
   const clipVisualLayout = useMemo(() => buildClipVisualLayouts(schedule, tPx), [schedule, tPx]);
   const TRACK_HEIGHT = BASE_TRACK_HEIGHT + (clipVisualLayout.laneCount - 1) * CLIP_LANE_STEP;
+  const audioTrackLayouts = useMemo(() => {
+    const map = new Map<string, Map<string, ClipVisualLayout>>();
+    for (const [trackId, trackSchedule] of audioTrackSchedules) {
+      const { layouts } = buildClipVisualLayouts(trackSchedule, tPx);
+      map.set(trackId, new Map(layouts.map((l) => [l.clipId, l])));
+    }
+    return map;
+  }, [audioTrackSchedules, tPx]);
 
   const pxToTimelineTime = useCallback((clientX: number, containerEl: HTMLDivElement) => {
     const rect = containerEl.getBoundingClientRect();
@@ -907,6 +932,33 @@ export default function Timeline({
           <div style={{ height: RULER_H, borderBottom: '1px solid var(--border)' }} />
           <TrackHeader icon={<VideoIcon />} height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
           <TrackHeader icon={<AudioIcon />} height={TRACK_HEIGHT} color="var(--blue-clip-hi)" />
+          {audioTracks.map((track) => (
+            <AudioTrackHeader
+              key={track.id}
+              track={track}
+              height={BASE_TRACK_HEIGHT}
+              onToggleMute={() => updateTrack(track.id, { muted: !track.muted })}
+              onToggleLock={() => updateTrack(track.id, { locked: !track.locked })}
+              onRemove={() => removeTrack(track.id)}
+            />
+          ))}
+          <div
+            style={{
+              height: 28,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderBottom: '1px solid var(--border)',
+              cursor: 'pointer',
+              color: 'var(--fg-muted)',
+              fontSize: 10,
+              fontFamily: 'var(--font-serif)',
+            }}
+            onClick={() => addTrack('audio')}
+            title="Add audio track"
+          >
+            <span style={{ opacity: 0.6 }}>+ Audio</span>
+          </div>
           {hasCaptions && <EffectHeader icon={<CaptionIcon />} color="var(--caption-clip)" />}
           {hasTextOverlays && <EffectHeader icon={<TextOverlayIcon />} color="var(--text-clip)" />}
           {hasImageOverlays && <EffectHeader icon={<ImageTrackIcon />} color="rgba(34,197,94,0.8)" />}
@@ -1307,6 +1359,66 @@ export default function Timeline({
               />
             )}
           </TrackRow>
+
+          {/* Background audio tracks */}
+          {audioTracks.map((track) => {
+            const trackSchedule = audioTrackSchedules.get(track.id) ?? [];
+            const layoutMap = audioTrackLayouts.get(track.id);
+            return (
+              <TrackRow
+                key={track.id}
+                height={BASE_TRACK_HEIGHT}
+                onSeek={e => { const container = scrollRef.current; if (container) seek(e.clientX, container); }}
+              >
+                {trackSchedule.map((entry) => {
+                  const clip = clips.find((c) => c.id === entry.clipId);
+                  if (!clip) return null;
+                  const layout = layoutMap?.get(entry.clipId);
+                  if (!layout) return null;
+                  const barCount = Math.max(12, Math.floor(Math.max(24, layout.displayWidth) / 6));
+                  const isClipSelected = selectedItem?.type === 'clip' && selectedItem.id === clip.id;
+                  return (
+                    <div
+                      key={clip.id}
+                      className="clip-audio"
+                      style={{
+                        position: 'absolute',
+                        left: layout.displayLeft,
+                        top: 6,
+                        width: layout.displayWidth,
+                        height: BASE_TRACK_HEIGHT - 12,
+                        borderRadius: 4,
+                        overflow: 'hidden',
+                        background: isClipSelected ? 'rgba(96,165,250,0.18)' : 'rgba(168,85,247,0.12)',
+                        border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(168,85,247,0.25)',
+                        cursor: track.locked ? 'default' : 'pointer',
+                        opacity: track.muted ? 0.4 : 1,
+                      }}
+                      title={`${track.name} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedItem({ type: 'clip', id: clip.id });
+                      }}
+                    >
+                      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', padding: '2px 0' }}>
+                        {Array.from({ length: barCount }, (_, i) => (
+                          <div key={i} className="waveform-bar" style={{ flex: 1, minWidth: 1, height: `${(0.3 + ((i % 7) / 10)) * 90}%`, opacity: 0.5, background: 'rgba(168,85,247,0.6)' }} />
+                        ))}
+                      </div>
+                      {layout.displayWidth > 60 && (
+                        <span style={{ position: 'absolute', left: 6, top: 2, fontSize: 9, color: 'rgba(168,85,247,0.8)', fontFamily: 'var(--font-serif)', pointerEvents: 'none' }}>
+                          {sources.find((s) => s.id === clip.sourceId)?.fileName ?? 'Audio'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </TrackRow>
+            );
+          })}
+
+          {/* "+ Audio" button row in content area */}
+          <div style={{ height: 28, position: 'relative', borderBottom: '1px solid var(--border)' }} />
 
           {hasCaptions && (
             <EffectTrackRow height={EFFECT_TRACK_H}>
@@ -1926,6 +2038,56 @@ function TrackHeader({ icon, height, color }: {
       color,
     }}>
       {icon}
+    </div>
+  );
+}
+
+function AudioTrackHeader({ track, height, onToggleMute, onToggleLock, onRemove }: {
+  track: Track;
+  height: number;
+  onToggleMute: () => void;
+  onToggleLock: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div style={{
+      height,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '0 6px',
+      borderBottom: '1px solid var(--border)',
+      color: 'rgba(168,85,247,0.8)',
+      fontSize: 9,
+      fontFamily: 'var(--font-serif)',
+    }}>
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+        {track.name}
+      </span>
+      <button
+        type="button"
+        onClick={onToggleMute}
+        title={track.muted ? 'Unmute' : 'Mute'}
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+          color: track.muted ? 'rgba(248,113,113,0.8)' : 'rgba(255,255,255,0.4)',
+          fontSize: 10,
+        }}
+      >
+        {track.muted ? '🔇' : '🔊'}
+      </button>
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove track"
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer', padding: 2,
+          color: 'rgba(255,255,255,0.3)',
+          fontSize: 9,
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 }

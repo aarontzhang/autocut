@@ -6,8 +6,29 @@ export interface CaptionWordTiming {
   text: string;
 }
 
+export interface Track {
+  id: string;
+  name: string;
+  type: 'video' | 'audio';
+  volume: number;    // 0.0–2.0, default 1.0
+  muted: boolean;
+  locked: boolean;
+  order: number;     // vertical position in timeline
+}
+
+export const DEFAULT_TRACK: Track = {
+  id: 'default',
+  name: 'Video 1',
+  type: 'video',
+  volume: 1,
+  muted: false,
+  locked: false,
+  order: 0,
+};
+
 export interface VideoClip {
   id: string;
+  trackId: string;   // which track this clip belongs to
   sourceId: string;
   sourceStart: number;   // seconds into original video
   sourceDuration: number; // duration in source
@@ -175,7 +196,7 @@ export interface ProjectSource {
   duration: number;
   status: MediaAssetStatus;
   isPrimary: boolean;
-  mediaType?: 'video' | 'image';
+  mediaType?: 'video' | 'image' | 'audio';
 }
 
 export interface MediaAsset {
@@ -295,6 +316,9 @@ export interface EditAction {
     | 'add_image_overlay'
     | 'update_image_overlay'
     | 'remove_image_overlay'
+    | 'add_track'
+    | 'remove_track'
+    | 'update_track'
     | 'none';
   // split_clip
   splitTime?: number;
@@ -337,6 +361,10 @@ export interface EditAction {
   imageOverlays?: ImageOverlayEntry[];
   imageOverlayId?: string;
   imageOverlayPatch?: Partial<ImageOverlayEntry>;
+  // tracks
+  track?: Track;
+  trackId?: string;
+  trackPatch?: Partial<Track>;
   message: string;
 }
 

@@ -33,6 +33,8 @@ export default function MediaPanel({
   const appendClipFromSource = useEditorStore((s) => s.appendClipFromSource);
   const createImageOverlayAtTime = useEditorStore((s) => s.createImageOverlayAtTime);
   const currentTime = useEditorStore((s) => s.currentTime);
+  const tracks = useEditorStore((s) => s.tracks);
+  const addTrack = useEditorStore((s) => s.addTrack);
 
   const sourceCards = useMemo(() => (
     sources.map((source) => {
@@ -117,6 +119,14 @@ export default function MediaPanel({
                     style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
                     alt={source.fileName}
                   />
+                ) : source.mediaType === 'audio' ? (
+                  <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(168,85,247,0.08)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 3, opacity: 0.5 }}>
+                      {Array.from({ length: 24 }, (_, i) => (
+                        <div key={i} style={{ width: 3, height: `${20 + ((i % 7) * 8)}%`, background: 'rgba(168,85,247,0.6)', borderRadius: 2 }} />
+                      ))}
+                    </div>
+                  </div>
                 ) : (
                   <video
                     src={source.previewUrl}
@@ -150,6 +160,17 @@ export default function MediaPanel({
                   event.stopPropagation();
                   if (source.mediaType === 'image') {
                     createImageOverlayAtTime(source.id, currentTime);
+                  } else if (source.mediaType === 'audio') {
+                    // Ensure an audio track exists
+                    let audioTrack = tracks.find((t) => t.type === 'audio');
+                    if (!audioTrack) {
+                      addTrack('audio');
+                      // Re-read tracks after adding
+                      audioTrack = useEditorStore.getState().tracks.find((t) => t.type === 'audio');
+                    }
+                    if (audioTrack) {
+                      appendClipFromSource(source.id, audioTrack.id);
+                    }
                   } else {
                     appendClipFromSource(source.id);
                   }
@@ -219,14 +240,14 @@ export default function MediaPanel({
             fontSize: 12,
             textAlign: 'center',
           }}>
-            Import videos or images to build your source library.
+            Import videos, images, or audio to build your source library.
           </div>
         )}
 
         <input
           ref={inputRef}
           type="file"
-          accept="video/*,image/png,image/jpeg,image/gif,image/webp"
+          accept="video/*,image/png,image/jpeg,image/gif,image/webp,audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/aac,audio/m4a,audio/x-m4a,audio/*"
           multiple
           className="hidden"
           onChange={(event) => {

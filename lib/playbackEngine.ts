@@ -2,6 +2,7 @@ import type {
   ClipScheduleEntry,
   RenderTimelineEntry,
   ResolvedTransitionBoundary,
+  Track,
   TransitionEntry,
   VideoClip,
 } from './types';
@@ -263,4 +264,43 @@ export function sourceTimeToTimeline(
   if (!entry) return 0;
   const offsetInSource = sourceTime - entry.sourceStart;
   return entry.timelineStart + offsetInSource / entry.speed;
+}
+
+// ─── Multi-Track Helpers ────────────────────────────────────────────────────
+
+export function buildMultiTrackSchedule(
+  clips: VideoClip[],
+  tracks: Track[],
+): Map<string, ClipScheduleEntry[]> {
+  const result = new Map<string, ClipScheduleEntry[]>();
+  for (const track of tracks) {
+    const trackClips = clips.filter((c) => c.trackId === track.id);
+    result.set(track.id, buildPlainSchedule(trackClips));
+  }
+  return result;
+}
+
+export function getMultiTrackDuration(
+  clips: VideoClip[],
+  tracks: Track[],
+): number {
+  const schedule = buildMultiTrackSchedule(clips, tracks);
+  let maxDuration = 0;
+  for (const entries of schedule.values()) {
+    if (entries.length > 0) {
+      maxDuration = Math.max(maxDuration, entries[entries.length - 1].timelineEnd);
+    }
+  }
+  return maxDuration;
+}
+
+export function findMultiTrackEntriesAtTime(
+  multiSchedule: Map<string, ClipScheduleEntry[]>,
+  timelineTime: number,
+): Map<string, ClipScheduleEntry | null> {
+  const result = new Map<string, ClipScheduleEntry | null>();
+  for (const [trackId, schedule] of multiSchedule) {
+    result.set(trackId, findTimelineEntryAtTime(schedule, timelineTime));
+  }
+  return result;
 }

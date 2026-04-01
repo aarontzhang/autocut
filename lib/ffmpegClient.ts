@@ -4,7 +4,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 import { buildCaptionRenderWindows, invertSegments } from './timelineUtils';
 import { normalizeTransitionEntries, resolveTransitions } from './playbackEngine';
-import { CaptionEntry, TextOverlayEntry, TransitionEntry, VideoClip } from './types';
+import { CaptionEntry, TextOverlayEntry, Track, TransitionEntry, VideoClip } from './types';
 import { MAIN_SOURCE_ID } from './sourceUtils';
 import { getTextOverlayExportY, getTextOverlayFontSize, normalizeTextOverlayEntry } from './textOverlays';
 
@@ -325,6 +325,126 @@ async function createExportObjectUrl(
   const outputUrl = URL.createObjectURL(blob);
   reportOverallProgress(100);
   return outputUrl;
+}
+
+async function mixAudioTracks(
+  ffmpeg: FFmpeg,
+  videoFileName: string,
+  clips: VideoClip[],
+  tracks: Track[],
+  sourcesById: Record<string, Uint8Array | File | string | null | undefined>,
+  onStage?: (stage: string) => void,
+): Promise<string> {
+  const audioTracks = tracks.filter((t) => t.type === 'audio' && !t.muted);
+  const audioTrackClips = audioTracks.flatMap((track) =>
+    clips.filter((c) => c.trackId === track.id).map((c) => ({ clip: c, track })),
+  );
+  if (audioTrackClips.length === 0) return videoFileName;
+
+  onStage?.('Mixing audio tracks…');
+
+  // Write each audio source and build a concat file per track
+  for (let ti = 0; ti < audioTracks.length; ti++) {
+    const track = audioTracks[ti];
+    const trackClips = clips.filter((c) => c.trackId === track.id);
+    if (trackClips.length === 0) continue;
+
+    // Render each clip's audio segment
+    const segmentNames: string[] = [];
+    let cursor = 0;
+    for (let ci = 0; ci < trackClips.length; ci++) {
+      const clip = trackClips[ci];
+      const source = sourcesById[clip.sourceId];
+      if (!source) continue;
+
+      const inputName = `audio_track_${ti}_src_${ci}.mp4`;
+      const inputData = await readMediaInput(source as Uint8Array | File | string);
+      await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+
+      const speed = clip.speed > 0 ? clip.speed : 1;
+      const duration = clip.sourceDuration / speed;
+      const segName = `audio_track_${ti}_seg_${ci}.mp3`;
+
+      // Build audio filter chain
+      const filters: string[] = ['asetpts=PTS-STARTPTS'];
+      if (speed !== 1) {
+        let remaining = speed;
+        while (remaining > 2.0) { filters.push('atempo=2.0'); remaining /= 2.0; }
+        while (remaining < 0.5) { filters.push('atempo=0.5'); remaining /= 0.5; }
+        filters.push(`atempo=${remaining.toFixed(6)}`);
+      }
+      const effectiveVolume = Math.max(0, Math.min(2, clip.volume * track.volume));
+      if (effectiveVolume !== 1) filters.push(`volume=${effectiveVolume.toFixed(4)}`);
+
+      await ffmpeg.exec([
+        '-ss', clip.sourceStart.toFixed(6),
+        '-t', clip.sourceDuration.toFixed(6),
+        '-i', inputName,
+        '-vn',
+        '-af', filters.join(','),
+        '-t', duration.toFixed(6),
+        '-ar', '48000', '-ac', '2',
+        segName,
+      ]);
+
+      // If there's a gap before this clip, insert silence
+      if (cursor < ci) {
+        // Simplified: we don't handle gaps for now — clips are sequential within a track
+      }
+      segmentNames.push(segName);
+      cursor++;
+
+      try { await ffmpeg.deleteFile(inputName); } catch {}
+    }
+
+    if (segmentNames.length === 0) continue;
+
+    // Concat all segments for this track
+    const concatList = segmentNames.map((name) => `file '${name}'`).join('\n');
+    await ffmpeg.writeFile(`audio_track_${ti}_list.txt`, concatList);
+    await ffmpeg.exec([
+      '-f', 'concat', '-safe', '0',
+      '-i', `audio_track_${ti}_list.txt`,
+      '-c', 'copy',
+      `audio_track_${ti}.mp3`,
+    ]);
+
+    for (const name of segmentNames) {
+      try { await ffmpeg.deleteFile(name); } catch {}
+    }
+    try { await ffmpeg.deleteFile(`audio_track_${ti}_list.txt`); } catch {}
+  }
+
+  // Mix all audio tracks with the video
+  const inputs = ['-i', videoFileName];
+  const audioInputs: string[] = [];
+  for (let ti = 0; ti < audioTracks.length; ti++) {
+    const trackClips = clips.filter((c) => c.trackId === audioTracks[ti].id);
+    if (trackClips.length === 0) continue;
+    inputs.push('-i', `audio_track_${ti}.mp3`);
+    audioInputs.push(`audio_track_${ti}.mp3`);
+  }
+
+  if (audioInputs.length === 0) return videoFileName;
+
+  const mixedOutput = 'export_mixed.mp4';
+  const totalAudioInputs = 1 + audioInputs.length; // video audio + audio tracks
+  const filterComplex = `amix=inputs=${totalAudioInputs}:duration=longest:dropout_transition=0`;
+
+  await ffmpeg.exec([
+    ...inputs,
+    '-filter_complex', filterComplex,
+    '-c:v', 'copy',
+    '-c:a', 'aac', '-b:a', '192k',
+    '-movflags', '+faststart',
+    mixedOutput,
+  ]);
+
+  for (const name of audioInputs) {
+    try { await ffmpeg.deleteFile(name); } catch {}
+  }
+
+  return mixedOutput;
 }
 
 function getClipExportState(clip: VideoClip) {
@@ -798,27 +918,43 @@ export interface ExportClipsOptions {
   captions?: CaptionEntry[];
   textOverlays?: TextOverlayEntry[];
   transitions?: TransitionEntry[];
+  tracks?: Track[];
   signal?: AbortSignal;
   onStage?: (stage: string) => void;
   onProgress?: (progress: number) => void;
 }
 
-export async function exportClips({
-  sourcesById,
-  clips,
-  captions = [],
-  textOverlays = [],
-  transitions = [],
-  signal,
-  onStage,
-  onProgress,
-}: ExportClipsOptions): Promise<string> {
+export async function exportClips(options: ExportClipsOptions): Promise<string> {
+  const {
+    sourcesById,
+    captions = [],
+    textOverlays = [],
+    transitions = [],
+    tracks = [],
+    signal,
+    onStage,
+    onProgress,
+  } = options;
+  // Keep all clips for audio mixing, use only video track clips for the main pipeline
+  const allClips = options.clips;
+  const clips = allClips.filter((c) => c.trackId === 'default' || !tracks.some((t) => t.id === c.trackId && t.type === 'audio'));
   if (clips.length === 0) throw new Error('No clips to export');
+
+  const hasAudioTracks = tracks.some((t) => t.type === 'audio' && !t.muted)
+    && allClips.some((c) => tracks.some((t) => t.id === c.trackId && t.type === 'audio'));
 
   const job = createFFmpegJobHandle(signal);
   const reportOverallProgress = createOverallProgressReporter(onProgress);
   let phaseStart = 0;
   let phaseSpan = 5;
+
+  const finalizeExport = async (ffmpeg: FFmpeg, videoFileName: string) => {
+    if (hasAudioTracks) {
+      const mixedFile = await mixAudioTracks(ffmpeg, videoFileName, allClips, tracks, sourcesById, onStage);
+      return createExportObjectUrl(ffmpeg, mixedFile, reportOverallProgress, onStage);
+    }
+    return createExportObjectUrl(ffmpeg, videoFileName, reportOverallProgress, onStage);
+  };
   const normalizedTransitions = normalizeTransitionEntries(clips, transitions);
   const captionWindows = buildExportCaptionWindows({
     clips,
@@ -892,7 +1028,7 @@ export async function exportClips({
       }
 
       if (segFiles.length === 1) {
-        return createExportObjectUrl(ffmpeg, segFiles[0], reportOverallProgress, onStage);
+        return finalizeExport(ffmpeg, segFiles[0]);
       }
 
       phaseStart = 90;
@@ -910,7 +1046,7 @@ export async function exportClips({
         'export_output.mp4',
       ]);
 
-      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+      return finalizeExport(ffmpeg, 'export_output.mp4');
     }
 
     onStage?.('Reading source media…');
@@ -1035,14 +1171,14 @@ export async function exportClips({
         '-movflags', '+faststart',
         'export_output.mp4',
       ]);
-      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+      return finalizeExport(ffmpeg, 'export_output.mp4');
     }
 
     if (stitchedOutputName === 'export_output.mp4') {
-      return createExportObjectUrl(ffmpeg, 'export_output.mp4', reportOverallProgress, onStage);
+      return finalizeExport(ffmpeg, 'export_output.mp4');
     }
 
-    return createExportObjectUrl(ffmpeg, stitchedOutputName, reportOverallProgress, onStage);
+    return finalizeExport(ffmpeg, stitchedOutputName);
   } catch (error) {
     if (isFFmpegAbortError(error)) {
       throw createAbortError();

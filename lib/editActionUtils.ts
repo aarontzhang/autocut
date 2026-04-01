@@ -10,9 +10,11 @@ import type {
   ImageOverlayEntry,
   MarkerEntry,
   TextOverlayEntry,
+  Track,
   TransitionEntry,
   VideoClip,
 } from './types';
+import { DEFAULT_TRACK } from './types';
 import { normalizeImageOverlayEntry } from './imageOverlays';
 
 export interface EditSnapshot {
@@ -22,6 +24,7 @@ export interface EditSnapshot {
   markers: MarkerEntry[];
   textOverlays: TextOverlayEntry[];
   imageOverlays: ImageOverlayEntry[];
+  tracks: Track[];
   appliedActions?: AppliedActionRecord[];
 }
 
@@ -624,6 +627,38 @@ export function applyActionToSnapshot(
     return {
       ...snapshot,
       imageOverlays: snapshot.imageOverlays.filter((overlay) => overlay.id !== resolvedAction.imageOverlayId),
+    };
+  }
+
+  if (resolvedAction.type === 'add_track') {
+    const track = resolvedAction.track;
+    if (!track) return snapshot;
+    return {
+      ...snapshot,
+      tracks: [...snapshot.tracks, track],
+    };
+  }
+
+  if (resolvedAction.type === 'remove_track') {
+    const trackId = resolvedAction.trackId;
+    if (!trackId) return snapshot;
+    // Can't remove the last track or the default video track
+    if (snapshot.tracks.length <= 1 || trackId === 'default') return snapshot;
+    return {
+      ...snapshot,
+      tracks: snapshot.tracks.filter((t) => t.id !== trackId),
+      clips: snapshot.clips.filter((c) => c.trackId !== trackId),
+    };
+  }
+
+  if (resolvedAction.type === 'update_track') {
+    const trackId = resolvedAction.trackId;
+    if (!trackId || !resolvedAction.trackPatch) return snapshot;
+    return {
+      ...snapshot,
+      tracks: snapshot.tracks.map((t) => (
+        t.id === trackId ? { ...t, ...resolvedAction.trackPatch } : t
+      )),
     };
   }
 

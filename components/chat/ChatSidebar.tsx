@@ -1866,6 +1866,7 @@ function AssistantMessage({
       markers: state.markers,
       textOverlays: state.textOverlays,
       imageOverlays: state.imageOverlays,
+      tracks: state.tracks,
     };
     const nextReviewGroup = createReviewGroup(msg.id, action, baseSnapshot, {
       sourceTranscriptCaptions: existingSourceTranscriptCaptions,

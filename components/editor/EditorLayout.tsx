@@ -524,6 +524,46 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
   ) => {
     const videoFiles = files.filter((file) => file.type.startsWith('video/'));
     const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+    const audioFiles = files.filter((file) => file.type.startsWith('audio/'));
+
+    // Handle audio imports — add as audio sources, create clips on an audio track
+    if (audioFiles.length > 0) {
+      const store = useEditorStore.getState();
+      for (const file of audioFiles) {
+        const objectUrl = URL.createObjectURL(file);
+        // Get audio duration
+        const duration = await new Promise<number>((resolve) => {
+          const audio = document.createElement('audio');
+          audio.preload = 'metadata';
+          audio.onloadedmetadata = () => {
+            resolve(audio.duration > 0 && Number.isFinite(audio.duration) ? audio.duration : 30);
+            audio.src = '';
+          };
+          audio.onerror = () => { resolve(30); audio.src = ''; };
+          audio.src = objectUrl;
+        });
+        const addedSources = store.importSources([{
+          fileName: file.name,
+          duration,
+          isPrimary: false,
+          status: 'ready',
+          runtime: { file, objectUrl, playerUrl: objectUrl, processingUrl: objectUrl },
+        }], { shouldAppendClips: false });
+        if (addedSources.length > 0) {
+          const sourceId = addedSources[0].id;
+          store.updateSource(sourceId, { mediaType: 'audio' } as Partial<import('@/lib/types').ProjectSource>);
+          // Ensure an audio track exists
+          let audioTrack = store.tracks.find((t) => t.type === 'audio');
+          if (!audioTrack) {
+            store.addTrack('audio');
+            audioTrack = useEditorStore.getState().tracks.find((t) => t.type === 'audio');
+          }
+          if (audioTrack) {
+            store.appendClipFromSource(sourceId, audioTrack.id);
+          }
+        }
+      }
+    }
 
     // Handle image imports — add as image sources without creating clips
     if (imageFiles.length > 0) {

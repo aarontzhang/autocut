@@ -4,11 +4,13 @@ import { forwardRef, useImperativeHandle, useCallback, useRef, useEffect, useMem
 import { useEditorStore } from '@/lib/useEditorStore';
 import {
   buildRenderTimeline,
+  buildPlainSchedule,
   findRenderEntriesAtTime,
+  findTimelineEntryAtTime,
   shouldUseSeparateVideoLayerForPlaybackHandoff,
 } from '@/lib/playbackEngine';
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
-import type { RenderTimelineEntry, VideoClip } from '@/lib/types';
+import type { RenderTimelineEntry, Track, VideoClip } from '@/lib/types';
 import { describeSourceResolutionFailure, resolveProjectSources } from '@/lib/sourceMedia';
 import { getTextOverlayPreviewPositionStyle } from '@/lib/textOverlays';
 
@@ -1063,6 +1065,79 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
 
   const primaryLayerOpacity = leadLayer === 'primary' ? 1 : 0;
   const secondaryLayerOpacity = leadLayer === 'secondary' ? 1 : 0;
+
+  // ─── Audio Track Playback ─────────────────────────────────────────────────
+  const tracks = useEditorStore((s) => s.tracks);
+  const allClips = useEditorStore((s) => s.clips);
+  const playbackActive = useEditorStore((s) => s.playbackActive);
+  const audioTrackElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+
+  useEffect(() => {
+    const audioTracks = tracks.filter((t) => t.type === 'audio');
+    const existingElements = audioTrackElementsRef.current;
+    const activeClipIds = new Set<string>();
+
+    for (const track of audioTracks) {
+      const trackClips = allClips.filter((c) => c.trackId === track.id);
+      const trackSchedule = buildPlainSchedule(trackClips);
+      const entry = findTimelineEntryAtTime(trackSchedule, currentTime);
+      if (!entry) continue;
+
+      const clip = trackClips.find((c) => c.id === entry.clipId);
+      if (!clip) continue;
+      activeClipIds.add(clip.id);
+
+      const sourceRuntime = sourceById.get(clip.sourceId);
+      const url = sourceRuntime?.playerUrl || sourceRuntime?.processingUrl || '';
+      if (!url) continue;
+
+      let audio = existingElements.get(clip.id);
+      if (!audio) {
+        audio = document.createElement('audio');
+        audio.preload = 'auto';
+        existingElements.set(clip.id, audio);
+      }
+
+      if (audio.src !== url && !audio.src.endsWith(url)) {
+        audio.src = url;
+      }
+
+      const speed = clip.speed > 0 ? clip.speed : 1;
+      const sourceTime = entry.sourceStart + (currentTime - entry.timelineStart) * speed;
+      audio.volume = track.muted ? 0 : Math.max(0, Math.min(1, clip.volume * track.volume));
+      audio.playbackRate = speed;
+
+      if (Math.abs(audio.currentTime - sourceTime) > 0.3) {
+        audio.currentTime = sourceTime;
+      }
+
+      if (playbackActive && audio.paused) {
+        audio.play().catch(() => {});
+      } else if (!playbackActive && !audio.paused) {
+        audio.pause();
+      }
+    }
+
+    // Cleanup audio elements for clips that are no longer active
+    for (const [clipId, audio] of existingElements) {
+      if (!activeClipIds.has(clipId)) {
+        audio.pause();
+        audio.src = '';
+        existingElements.delete(clipId);
+      }
+    }
+  }, [tracks, allClips, currentTime, playbackActive, sourceById]);
+
+  // Clean up all audio track elements on unmount
+  useEffect(() => {
+    return () => {
+      for (const audio of audioTrackElementsRef.current.values()) {
+        audio.pause();
+        audio.src = '';
+      }
+      audioTrackElementsRef.current.clear();
+    };
+  }, []);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
