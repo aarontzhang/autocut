@@ -56,7 +56,13 @@ export async function PATCH(req: NextRequest) {
   }
 
   if (sub.stripe_subscription_id.startsWith('grandfathered_')) {
-    return NextResponse.json({ error: 'Grandfathered subscriptions cannot be modified' }, { status: 400 });
+    await admin
+      .from('subscriptions')
+      .update({ cancel_at_period_end: action === 'cancel' })
+      .eq('user_id', user.id)
+      .eq('stripe_subscription_id', sub.stripe_subscription_id);
+
+    return NextResponse.json({ ok: true });
   }
 
   const stripe = getStripe();
