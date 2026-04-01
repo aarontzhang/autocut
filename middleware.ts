@@ -12,6 +12,7 @@ const PROTECTED_API_PREFIXES = [
   '/api/frame-descriptions',
   '/api/visual-search',
   '/api/visual-verify',
+  '/api/extract-audio',
 ];
 
 function isProtectedPage(pathname: string) {

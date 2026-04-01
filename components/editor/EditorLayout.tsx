@@ -286,6 +286,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
       // File objects can become stale during long processing (browser sandbox
       // permissions expire), causing NotReadableError on large videos.
       source: (entry.processingUrl || entry.source)!,
+      storagePath: entry.storagePath ?? null,
       ranges: buildOverlappingRanges(0, entry.duration),
     }));
     const totalRanges = workPlan.reduce((total, entry) => total + Math.max(entry.ranges.length, 1), 0);
@@ -304,6 +305,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             DEFAULT_AI_EDITING_SETTINGS.captions.wordsPerCaption,
             {
               sourceId: entry.sourceId,
+              storagePath: entry.storagePath,
               onProgress: (progress) => {
                 setTranscriptProgress({
                   completed: Math.min(totalRanges, completedRanges + progress.completed),

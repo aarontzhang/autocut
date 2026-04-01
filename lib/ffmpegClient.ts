@@ -134,7 +134,7 @@ async function readMediaInput(fileOrUrl: Uint8Array | File | string): Promise<Ui
 
   const pendingBytes = (async () => {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 300_000);
     try {
       const response = await fetch(fileOrUrl, {
         signal: controller.signal,

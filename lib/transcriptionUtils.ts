@@ -14,11 +14,13 @@ type TranscriptionResponse = {
 type TranscriptionProgressOptions = {
   onProgress?: (progress: { completed: number; total: number }) => void;
   sourceId?: string;
+  storagePath?: string | null;
 };
 
 const MAX_TRANSCRIPTION_REQUEST_RETRIES = 3;
 const TRANSCRIPTION_REQUEST_TIMEOUT_MS = 120_000;
 const TRANSCRIPTION_RETRY_BASE_DELAY_MS = 1_500;
+const SERVER_EXTRACT_TIMEOUT_MS = 60_000;
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -89,6 +91,37 @@ async function requestTranscriptionChunk(params: {
   throw lastError ?? new Error('Transcription failed');
 }
 
+async function extractAudioSegmentViaServer(params: {
+  storagePath: string;
+  startTime: number;
+  endTime: number;
+}): Promise<Blob> {
+  const ctrl = new AbortController();
+  const timeoutId = window.setTimeout(() => ctrl.abort(), SERVER_EXTRACT_TIMEOUT_MS);
+
+  try {
+    const res = await fetch('/api/extract-audio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        storagePath: params.storagePath,
+        startTime: params.startTime,
+        endTime: params.endTime,
+      }),
+      signal: ctrl.signal,
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data?.error ?? `Server audio extraction failed (${res.status})`);
+    }
+
+    return await res.blob();
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 export function buildOverlappingRanges(
   startTime: number,
   endTime: number,
@@ -156,7 +189,9 @@ export async function transcribeSourceRanges(
 
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index];
-    const audioBlob = await extractAudioSegment(source, range.startTime, range.endTime);
+    const audioBlob = options.storagePath
+      ? await extractAudioSegmentViaServer({ storagePath: options.storagePath, startTime: range.startTime, endTime: range.endTime })
+      : await extractAudioSegment(source, range.startTime, range.endTime);
     const data = await requestTranscriptionChunk({ audioBlob, range, wordsPerCaption });
     const entries = ((data.words as CaptionEntry[]) ?? (data.captions as CaptionEntry[]) ?? [])
       .map((entry) => ({
