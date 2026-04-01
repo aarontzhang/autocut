@@ -376,7 +376,7 @@ async function mixAudioTracks(
       const effectiveVolume = Math.max(0, Math.min(2, clip.volume * track.volume));
       if (effectiveVolume !== 1) filters.push(`volume=${effectiveVolume.toFixed(4)}`);
 
-      await ffmpeg.exec([
+      await execOrThrow(ffmpeg, [
         '-ss', clip.sourceStart.toFixed(6),
         '-t', clip.sourceDuration.toFixed(6),
         '-i', inputName,
@@ -402,7 +402,7 @@ async function mixAudioTracks(
     // Concat all segments for this track
     const concatList = segmentNames.map((name) => `file '${name}'`).join('\n');
     await ffmpeg.writeFile(`audio_track_${ti}_list.txt`, concatList);
-    await ffmpeg.exec([
+    await execOrThrow(ffmpeg, [
       '-f', 'concat', '-safe', '0',
       '-i', `audio_track_${ti}_list.txt`,
       '-c', 'copy',
@@ -431,7 +431,7 @@ async function mixAudioTracks(
   const totalAudioInputs = 1 + audioInputs.length; // video audio + audio tracks
   const filterComplex = `amix=inputs=${totalAudioInputs}:duration=longest:dropout_transition=0`;
 
-  await ffmpeg.exec([
+  await execOrThrow(ffmpeg, [
     ...inputs,
     '-filter_complex', filterComplex,
     '-c:v', 'copy',

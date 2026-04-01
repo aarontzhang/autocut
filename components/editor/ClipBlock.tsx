@@ -15,6 +15,7 @@ interface ClipBlockProps {
   isDragging?: boolean;
   index: number;
   title: string;
+  label?: string;
 }
 
 const CLIP_COLOR = {
@@ -25,9 +26,10 @@ const CLIP_COLOR = {
 
 export default function ClipBlock({
   clip, left, width, height, top, isSelected, isTagged,
-  onPointerDown, isDragging, index, title,
+  onPointerDown, isDragging, index, title, label,
 }: ClipBlockProps) {
   const clipNumber = clip.displayNumber ?? (index + 1);
+  const displayLabel = label ?? `Clip ${clipNumber}`;
   const color = CLIP_COLOR;
 
   // Timeline duration = sourceDuration / speed
@@ -104,7 +106,7 @@ export default function ClipBlock({
           textOverflow: 'ellipsis',
           flexShrink: 1,
         }}>
-          {isMicroClip ? clipNumber : `Clip ${clipNumber}`}
+          {isMicroClip ? (label ? label.slice(0, 4) : clipNumber) : displayLabel}
         </span>
 
         {/* Speed badge */}

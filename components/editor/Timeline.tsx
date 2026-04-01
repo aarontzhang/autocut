@@ -197,7 +197,8 @@ export default function Timeline({
     return () => window.removeEventListener('keydown', onKey);
   }, [createMarkerAtTime, splitClipAtTime]);
 
-  const schedule = buildClipSchedule(clips, transitions);
+  const videoClips = useMemo(() => clips.filter((c) => c.trackId === 'default'), [clips]);
+  const schedule = buildClipSchedule(videoClips, transitions);
   const audioTracks = useMemo(
     () => tracks.filter((t) => t.type === 'audio').sort((a, b) => a.order - b.order),
     [tracks],
@@ -942,23 +943,25 @@ export default function Timeline({
               onRemove={() => removeTrack(track.id)}
             />
           ))}
-          <div
-            style={{
-              height: 28,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderBottom: '1px solid var(--border)',
-              cursor: 'pointer',
-              color: 'var(--fg-muted)',
-              fontSize: 10,
-              fontFamily: 'var(--font-serif)',
-            }}
-            onClick={() => addTrack('audio')}
-            title="Add audio track"
-          >
-            <span style={{ opacity: 0.6 }}>+ Audio</span>
-          </div>
+          {audioTracks.length === 0 && (
+            <div
+              style={{
+                height: 28,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderBottom: '1px solid var(--border)',
+                cursor: 'pointer',
+                color: 'var(--fg-muted)',
+                fontSize: 10,
+                fontFamily: 'var(--font-serif)',
+              }}
+              onClick={() => addTrack('audio')}
+              title="Add audio track"
+            >
+              <span style={{ opacity: 0.6 }}>+ Audio</span>
+            </div>
+          )}
           {hasCaptions && <EffectHeader icon={<CaptionIcon />} color="var(--caption-clip)" />}
           {hasTextOverlays && <EffectHeader icon={<TextOverlayIcon />} color="var(--text-clip)" />}
           {hasImageOverlays && <EffectHeader icon={<ImageTrackIcon />} color="rgba(34,197,94,0.8)" />}
@@ -1208,6 +1211,8 @@ export default function Timeline({
               if (!clip) return null;
               const layout = clipLayoutById.get(entry.clipId);
               if (!layout) return null;
+              const sourceFileName = sources.find((s) => s.id === clip.sourceId)?.fileName;
+              const clipLabel = sourceFileName ? sourceFileName.replace(/\.[^.]+$/, '') : undefined;
               return (
                 <ClipBlock
                   key={clip.id}
@@ -1220,7 +1225,8 @@ export default function Timeline({
                   isTagged={false}
                   isDragging={clipDropIndicator !== null && clipReorderDragRef.current?.clipId === clip.id}
                   index={index}
-                  title={`Clip ${clip.displayNumber ?? (index + 1)} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
+                  label={clipLabel}
+                  title={`${clipLabel ?? `Clip ${clip.displayNumber ?? (index + 1)}`} • ${formatTime(entry.timelineStart)} - ${formatTime(entry.timelineEnd)}`}
                   onPointerDown={e => beginClipReorderDrag(e, clip.id, index, layout.displayWidth, BASE_TRACK_HEIGHT - 12)}
                 />
               );
@@ -1389,8 +1395,8 @@ export default function Timeline({
                         height: BASE_TRACK_HEIGHT - 12,
                         borderRadius: 4,
                         overflow: 'hidden',
-                        background: isClipSelected ? 'rgba(96,165,250,0.18)' : 'rgba(168,85,247,0.12)',
-                        border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(168,85,247,0.25)',
+                        background: isClipSelected ? 'rgba(96,165,250,0.18)' : 'rgba(24,172,255,0.12)',
+                        border: isClipSelected ? '2px solid var(--accent)' : '1px solid rgba(24,172,255,0.25)',
                         cursor: track.locked ? 'default' : 'pointer',
                         opacity: track.muted ? 0.4 : 1,
                       }}
@@ -1402,12 +1408,12 @@ export default function Timeline({
                     >
                       <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', padding: '2px 0' }}>
                         {Array.from({ length: barCount }, (_, i) => (
-                          <div key={i} className="waveform-bar" style={{ flex: 1, minWidth: 1, height: `${(0.3 + ((i % 7) / 10)) * 90}%`, opacity: 0.5, background: 'rgba(168,85,247,0.6)' }} />
+                          <div key={i} className="waveform-bar" style={{ flex: 1, minWidth: 1, height: `${(0.3 + ((i % 7) / 10)) * 90}%`, opacity: 0.5, background: 'rgba(24,172,255,0.6)' }} />
                         ))}
                       </div>
                       {layout.displayWidth > 60 && (
-                        <span style={{ position: 'absolute', left: 6, top: 2, fontSize: 9, color: 'rgba(168,85,247,0.8)', fontFamily: 'var(--font-serif)', pointerEvents: 'none' }}>
-                          {sources.find((s) => s.id === clip.sourceId)?.fileName ?? 'Audio'}
+                        <span style={{ position: 'absolute', left: 6, top: 2, fontSize: 9, color: 'var(--audio-clip)', fontFamily: 'var(--font-serif)', pointerEvents: 'none' }}>
+                          {(sources.find((s) => s.id === clip.sourceId)?.fileName ?? 'Audio').replace(/\.[^.]+$/, '')}
                         </span>
                       )}
                     </div>
@@ -1418,7 +1424,9 @@ export default function Timeline({
           })}
 
           {/* "+ Audio" button row in content area */}
-          <div style={{ height: 28, position: 'relative', borderBottom: '1px solid var(--border)' }} />
+          {audioTracks.length === 0 && (
+            <div style={{ height: 28, position: 'relative', borderBottom: '1px solid var(--border)' }} />
+          )}
 
           {hasCaptions && (
             <EffectTrackRow height={EFFECT_TRACK_H}>
@@ -2057,7 +2065,7 @@ function AudioTrackHeader({ track, height, onToggleMute, onToggleLock, onRemove 
       gap: 4,
       padding: '0 6px',
       borderBottom: '1px solid var(--border)',
-      color: 'rgba(168,85,247,0.8)',
+      color: 'var(--audio-clip)',
       fontSize: 9,
       fontFamily: 'var(--font-serif)',
     }}>

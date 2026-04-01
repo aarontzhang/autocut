@@ -1492,6 +1492,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   addTrack: (type, name) => {
     const state = get();
+    if (type === 'audio' && state.tracks.some((t) => t.type === 'audio')) return;
     const snap = (state as EditorStoreWithSnapshot)._snapshot();
     const existingOfType = state.tracks.filter((t) => t.type === type);
     const trackName = name ?? `${type === 'video' ? 'Video' : 'Audio'} ${existingOfType.length + 1}`;
@@ -1500,7 +1501,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       id: uuidv4(),
       name: trackName,
       type,
-      volume: 1,
+      volume: type === 'audio' ? 0.5 : 1,
       muted: false,
       locked: false,
       order: maxOrder + 1,
