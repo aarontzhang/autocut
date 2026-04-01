@@ -148,7 +148,7 @@ export default function TopBar() {
       <div style={{ width: 1, height: 16, background: 'var(--border-mid)' }} />
 
       <button
-        onClick={undo}
+        onClick={() => { undo(); capture('manual_undo', {}); }}
         disabled={!canUndo}
         title="Undo (⌘Z)"
         style={{
@@ -181,7 +181,7 @@ export default function TopBar() {
         </svg>
       </button>
       <button
-        onClick={redo}
+        onClick={() => { redo(); capture('manual_redo', {}); }}
         disabled={!canRedo}
         title="Redo (⌘⇧Z)"
         style={{

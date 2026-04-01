@@ -5,6 +5,7 @@ import Link from 'next/link';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { useSubscription } from '@/components/auth/SubscriptionProvider';
+import { capture } from '@/lib/analytics';
 
 /* ── Left branding panel ───────────────────────────────────── */
 
@@ -118,6 +119,7 @@ function ManagePanel() {
         const data = await res.json();
         setError(data.error ?? 'Something went wrong');
       } else {
+        capture(action === 'cancel' ? 'subscription_canceled' : 'subscription_reactivated', {});
         await fetchDetails();
         await refresh();
       }
@@ -131,6 +133,7 @@ function ManagePanel() {
   const openPortal = async () => {
     setPortalLoading(true);
     setError('');
+    capture('billing_portal_opened', {});
     try {
       const res = await fetch('/api/stripe/portal', { method: 'POST' });
       if (!res.ok) {

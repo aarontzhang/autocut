@@ -6,6 +6,7 @@ import Link from 'next/link';
 import AutocutMark from '@/components/branding/AutocutMark';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { useSubscription } from '@/components/auth/SubscriptionProvider';
+import { capture } from '@/lib/analytics';
 
 /* ── Left branding panel (shared across all states) ──────────── */
 
@@ -83,9 +84,14 @@ function PricingPanel() {
   const canceled = searchParams.get('canceled') === 'true';
   const [showCanceled, setShowCanceled] = useState(canceled);
 
+  useEffect(() => {
+    if (canceled) capture('subscription_checkout_canceled', {});
+  }, [canceled]);
+
   const handleSubscribe = useCallback(async () => {
     setLoading(true);
     setError('');
+    capture('subscription_checkout_started', {});
     try {
       const res = await fetch('/api/stripe/checkout', { method: 'POST' });
       const data = await res.json();
@@ -212,6 +218,7 @@ function SuccessPanel() {
   const router = useRouter();
 
   useEffect(() => {
+    capture('subscription_activated', {});
     const timer = setTimeout(() => router.replace('/projects'), 3000);
     return () => clearTimeout(timer);
   }, [router]);

@@ -17,7 +17,9 @@ type EventMap = {
   upload_failed:               { reason: string };
 
   chat_message_sent:           { message_length: number; has_analysis: boolean; message: string };
+  chat_response_received:      { response_time_ms: number; action_type: string | null; has_action: boolean };
   chat_action_applied:         { action_count: number; action_types: string[] };
+  chat_action_rejected:        { action_type: string };
   chat_request_failed:         { reason: string };
   chat_quota_hit:              Record<string, never>;
   transcription_started:       Record<string, never>;
@@ -25,6 +27,20 @@ type EventMap = {
   transcription_failed:        { reason: string };
   frame_descriptions_started:  { frame_count: number };
   frame_descriptions_completed: { frame_count: number; duration_ms: number };
+
+  ai_action_undone:            { action_type: string };
+  manual_undo:                 Record<string, never>;
+  manual_redo:                 Record<string, never>;
+
+  editor_session_started:      { project_id: string | null };
+  editor_session_ended:        { project_id: string | null; duration_s: number };
+
+  subscription_checkout_started: Record<string, never>;
+  subscription_checkout_canceled: Record<string, never>;
+  subscription_activated:      Record<string, never>;
+  subscription_canceled:       Record<string, never>;
+  subscription_reactivated:    Record<string, never>;
+  billing_portal_opened:       Record<string, never>;
 
   export_started:              { clip_count: number; total_duration_s: number; has_filters: boolean; has_captions: boolean };
   export_completed:            { duration_ms: number };

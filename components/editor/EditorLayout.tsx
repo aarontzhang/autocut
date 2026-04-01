@@ -205,7 +205,8 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
         e.preventDefault();
-        if (e.shiftKey) redo(); else undo();
+        if (e.shiftKey) { redo(); capture('manual_redo', {}); }
+        else { undo(); capture('manual_undo', {}); }
         return;
       }
       if (
@@ -244,6 +245,18 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [deleteSelectedItem, redo, undo]);
+
+  useEffect(() => {
+    const sessionStart = Date.now();
+    capture('editor_session_started', { project_id: projectId ?? null });
+    return () => {
+      capture('editor_session_ended', {
+        project_id: projectId ?? null,
+        duration_s: Math.round((Date.now() - sessionStart) / 1000),
+      });
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const availableSources = resolveProjectSources({

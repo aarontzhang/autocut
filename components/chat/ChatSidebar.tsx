@@ -2822,6 +2822,7 @@ export default function ChatSidebar() {
         }
       };
 
+      const chatRequestStartTime = performance.now();
       const { message = '', action, final: isFinal } = await postChatRequest({
         messages: nextHistory,
         context: {
@@ -2870,6 +2871,12 @@ export default function ChatSidebar() {
           appliedActions: freshState.appliedActions,
         },
       }, ctrl, onChunk);
+
+      capture('chat_response_received', {
+        response_time_ms: Math.round(performance.now() - chatRequestStartTime),
+        action_type: action?.type ?? null,
+        has_action: Boolean(action && action.type !== 'none'),
+      });
 
       const markerAction = isMarkerMutationAction(action);
       const assistantMessage = streamingAccumulated.trim() || message.trim() || getAssistantFallbackMessage(action);
@@ -2923,6 +2930,7 @@ export default function ChatSidebar() {
 
       if (undoAction && action && round < MAX_CHAIN_CHAT_ROUNDS - 1) {
         useEditorStore.getState().undo();
+        capture('ai_action_undone', { action_type: 'undo_last' });
         recordCompletedChainAction(requestChainId, action);
 
         const undoMessageProps = {
