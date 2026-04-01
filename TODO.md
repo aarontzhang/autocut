@@ -2,10 +2,14 @@
 
 ## High Priority
 
-- [ ] **Multi-track timeline** — video + audio layers, drag clips between tracks
-- [ ] **Background music audio track** — import and layer audio independently
-- [ ] **Audio mixing** — per-track volume control, mute/solo
-- [ ] **Audio detach** — unlink audio from video clip
+- [ ] **Background audio track** — add audio-only tracks for music/SFX below the video track; per-track volume & mute; mixed in export via FFmpeg `amix`
+  - Track data model (`Track` type, `trackId` on clips)
+  - Timeline UI: multi-row rendering, track headers (name, mute, lock)
+  - Playback: hidden `<audio>` elements for audio tracks
+  - Export: render audio tracks + mix with video audio
+  - Media panel: import audio files (MP3, WAV, AAC, OGG)
+  - Migration: old projects auto-get default video track
+  - **No** audio detach, no moving clips between tracks, no transcript/AI changes
 - [ ] **Visual effects** — blur, sharpen, vignette, glitch, etc.
 - [ ] **Audio effects** — EQ, noise reduction, compression
 - [ ] **More transition types** — crossfade/dissolve, wipe, slide, zoom, dip-to-white
