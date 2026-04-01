@@ -706,6 +706,7 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
             message={storageNotice}
             compact
             showUsageSummary={!storageNotice}
+            onDismiss={storageNotice ? () => setStorageNotice(null) : null}
           />
         </div>
       )}

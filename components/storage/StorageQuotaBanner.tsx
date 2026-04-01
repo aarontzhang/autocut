@@ -13,6 +13,7 @@ interface StorageQuotaBannerProps {
   message?: string | null;
   compact?: boolean;
   showUsageSummary?: boolean;
+  onDismiss?: (() => void) | null;
 }
 
 function getColors(warningLevel: StorageQuotaSnapshot['warningLevel'] | undefined) {
@@ -59,6 +60,7 @@ export default function StorageQuotaBanner({
   message = null,
   compact = false,
   showUsageSummary = true,
+  onDismiss = null,
 }: StorageQuotaBannerProps) {
   if (!quota && !message) return null;
 
@@ -78,7 +80,7 @@ export default function StorageQuotaBanner({
       }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-        <div>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <p style={{ margin: 0, fontSize: compact ? 12 : 13, fontWeight: 600, color: colors.text }}>
             {title}
           </p>
@@ -94,6 +96,25 @@ export default function StorageQuotaBanner({
           <p style={{ margin: 0, fontSize: compact ? 11 : 12, color: colors.subtext }}>
             {Math.round(quota.usageRatio * 100)}%
           </p>
+        )}
+        {onDismiss && (
+          <button
+            onClick={onDismiss}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: colors.subtext,
+              fontSize: compact ? 14 : 16,
+              lineHeight: 1,
+              padding: '0 2px',
+              flexShrink: 0,
+              alignSelf: 'flex-start',
+            }}
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
         )}
       </div>
 

@@ -42,6 +42,7 @@ export async function POST(request: NextRequest) {
   const csrfError = enforceSameOrigin(request);
   if (csrfError) return csrfError;
 
+  try {
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -270,4 +271,11 @@ export async function POST(request: NextRequest) {
     uploadedSize,
     assetId,
   });
+  } catch (error) {
+    console.error('[uploads.finalize] unhandled error', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Upload finalization failed' },
+      { status: 500 },
+    );
+  }
 }
