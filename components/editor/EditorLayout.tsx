@@ -18,7 +18,7 @@ import StorageQuotaBanner from '@/components/storage/StorageQuotaBanner';
 import { useStorageQuota } from '@/lib/useStorageQuota';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAX_UPLOAD_VIDEO_DURATION_SECONDS, getVideoDurationLimitErrorMessage } from '@/lib/storageQuota';
-import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
+import { getInitialIndexingReady } from '@/lib/sourceIndexGate';
 import { capture } from '@/lib/analytics';
 
 const SIGNED_MEDIA_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
@@ -257,20 +257,18 @@ export default function EditorLayout({ projectId }: { projectId?: string | null 
         videoDuration,
       },
     }).filter((entry) => entry.source && entry.duration > 0);
-    const shouldUseServerIndex = Boolean(
-      currentProjectId
-      && sources.some((source) => (
-        isServerBackedSource(source)
-        || Boolean(sourceIndexAnalysisBySourceId[source.id])
-      )),
-    );
     const sourcesToTranscribe = availableSources.filter((entry) => (
       !sourceIndexFreshBySourceId[entry.sourceId]?.transcript
-      && !isServerBackedSource(entry)
-      && !sourceIndexAnalysisBySourceId[entry.sourceId]?.audio
+      && sourceIndexAnalysisBySourceId[entry.sourceId]?.audio?.status !== 'running'
+      && sourceIndexAnalysisBySourceId[entry.sourceId]?.audio?.status !== 'completed'
+      && sourceIndexAnalysisBySourceId[entry.sourceId]?.audio?.status !== 'paused'
     ));
+    const hasPendingProjectUpload = Boolean(
+      currentProjectId
+      && sourcesToTranscribe.some((entry) => entry.status === 'pending' && !entry.storagePath),
+    );
     if (
-      shouldUseServerIndex
+      hasPendingProjectUpload
       || sourcesToTranscribe.length === 0
       || transcriptStatus === 'loading'
       || transcriptStatus === 'error'

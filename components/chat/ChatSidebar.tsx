@@ -2003,6 +2003,7 @@ function AssistantMessage({
           DEFAULT_AI_EDITING_SETTINGS.captions.wordsPerCaption,
           {
             sourceId,
+            storagePath: sourceEntry.storagePath,
             onProgress: ({ completed }) => {
               setTranscriptProgress({ completed: completedChunks + completed, total: totalChunks });
             },
