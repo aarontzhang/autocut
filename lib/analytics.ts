@@ -16,7 +16,7 @@ type EventMap = {
   upload_completed:            { upload_time_ms: number };
   upload_failed:               { reason: string };
 
-  chat_message_sent:           { message_length: number; has_analysis: boolean };
+  chat_message_sent:           { message_length: number; has_analysis: boolean; message: string };
   chat_action_applied:         { action_count: number; action_types: string[] };
   chat_request_failed:         { reason: string };
   chat_quota_hit:              Record<string, never>;

@@ -3100,7 +3100,7 @@ export default function ChatSidebar() {
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
     addMessage({ role: 'user', content: text, requestChainId });
-    capture('chat_message_sent', { message_length: text.length, has_analysis: useServerSourceIndex });
+    capture('chat_message_sent', { message_length: text.length, has_analysis: useServerSourceIndex, message: text });
     setIsChatLoading(true);
     setLoadingStatus('');
     setLoadingPhaseId(null);
