@@ -25,6 +25,7 @@ import {
 } from '@/lib/editActionUtils';
 import { buildOverlappingRanges, dedupeCaptionEntries, transcribeSourceRanges } from '@/lib/transcriptionUtils';
 import { buildClipSchedule, timelineTimeToSource } from '@/lib/playbackEngine';
+import { analyzeClipLoudness, dBToLinear } from '@/lib/ffmpegClient';
 import { resolveProjectSources } from '@/lib/sourceMedia';
 import { MAIN_SOURCE_ID } from '@/lib/sourceUtils';
 import { getInitialIndexingReady, isServerBackedSource } from '@/lib/sourceIndexGate';
@@ -2980,12 +2981,15 @@ export default function ChatSidebar() {
       const markerActionPreviouslyApplied = markerAction && action
         ? freshState.appliedActions.some((record) => actionsMatch(record.action, action))
         : false;
+      const isNormalizeAudio = action?.type === 'normalize_audio';
       const hasPendingAction = !!action && action.type !== 'none';
       const nextActionStatus = markerAction
         ? 'completed'
-        : hasPendingAction
-          ? 'pending'
-          : undefined;
+        : isNormalizeAudio
+          ? 'completed'
+          : hasPendingAction
+            ? 'pending'
+            : undefined;
 
       if (markerAction && action && !markerActionPreviouslyApplied) {
         applyStoredAction(action);
@@ -2993,6 +2997,44 @@ export default function ChatSidebar() {
         recordCompletedChainAction(requestChainId, action);
         const markerSeekTime = getMarkerActionSeekTime(action, freshState.markers);
         if (markerSeekTime !== null) requestSeek(markerSeekTime);
+      }
+
+      // Auto-apply normalize_audio: analyze clips then apply volume adjustments
+      if (isNormalizeAudio && action) {
+        const currentState = useEditorStore.getState();
+        const clips = currentState.clips;
+        const runtimeSources = currentState.sourceRuntimeById ?? {};
+        const targetPeakDb = action.targetPeakDb ?? -1.0;
+        const volumeAdjustments: NonNullable<EditAction['volumeAdjustments']> = [];
+
+        try {
+          for (let i = 0; i < clips.length; i++) {
+            const clip = clips[i];
+            const runtime = runtimeSources[clip.sourceId];
+            if (!runtime) continue;
+            // Prefer File, then objectUrl/playerUrl/processingUrl
+            const sourceRef: File | string = runtime.file ?? runtime.processingUrl ?? runtime.objectUrl ?? runtime.playerUrl;
+            if (!sourceRef) continue;
+            const result = await analyzeClipLoudness(sourceRef, clip.sourceStart, clip.sourceDuration);
+            const gainDb = targetPeakDb - result.maxVolumeDb;
+            const gainLinear = dBToLinear(gainDb);
+            const newVolume = Math.max(0, Math.min(2, clip.volume * gainLinear));
+            volumeAdjustments.push({
+              clipId: clip.id,
+              clipIndex: i,
+              previousVolume: clip.volume,
+              newVolume,
+              measuredPeakDb: result.maxVolumeDb,
+            });
+          }
+
+          const enrichedAction: EditAction = { ...action, volumeAdjustments };
+          applyStoredAction(enrichedAction);
+          recordAppliedAction(enrichedAction, enrichedAction.message, { requestChainId });
+          recordCompletedChainAction(requestChainId, enrichedAction);
+        } catch (err) {
+          console.error('Audio normalization failed:', err);
+        }
       }
 
       if (requestChainId && action?.type === 'transcribe_request') {
@@ -3011,7 +3053,7 @@ export default function ChatSidebar() {
         content: assistantMessage,
         requestChainId,
         action: action ?? undefined,
-        autoApplied: markerAction && !markerActionPreviouslyApplied ? true : undefined,
+        autoApplied: (markerAction && !markerActionPreviouslyApplied) || isNormalizeAudio ? true : undefined,
         actionStatus: nextActionStatus as 'pending' | 'completed' | 'rejected' | undefined,
         actionResult: markerAction && action
           ? markerActionPreviouslyApplied

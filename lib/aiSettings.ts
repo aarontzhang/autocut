@@ -1,4 +1,4 @@
-import type { AIEditingSettings } from './types';
+import type { AIEditingSettings, TransitionType } from './types';
 
 export const DEFAULT_AI_EDITING_SETTINGS: AIEditingSettings = {
   silenceRemoval: {

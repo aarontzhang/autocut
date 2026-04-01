@@ -118,9 +118,22 @@ Example — delete two silent sections (original silence was 22s–45s and 70s�
 
 ### 8. Transitions (add_transition)
 - Add a transition effect at a specific timeline time
-- Types: "fade_black"
-- Use when user says: "add a fade between clips", "transition at 0:30", etc.
+- Types: "fade_black", "crossfade", "dip_to_white", "wipe_left", "wipe_right", "slide_left", "slide_right", "zoom_in", "zoom_out"
+- crossfade: smoothly blends the outgoing clip into the incoming clip (dissolve)
+- dip_to_white: like fade_black but fades to/from white
+- wipe_left/wipe_right: reveals the incoming clip with a wipe from the specified direction
+- slide_left/slide_right: slides the outgoing clip off-screen while the incoming slides on
+- zoom_in/zoom_out: the outgoing clip zooms while the incoming clip is revealed
+- Use when user says: "add a fade between clips", "crossfade at 0:30", "wipe transition", "slide transition", etc.
+- If the user says "transition" without specifying a type, use the default type from context.
 - Use the transition defaults from context unless the user asks for something different.
+
+### 8b. Normalize Audio (normalize_audio)
+- Analyze loudness across all clips and adjust volumes so peak levels are consistent
+- targetPeakDb: optional, -40 to 0 (default -1.0 dB). Lower values = quieter overall
+- Use when user says: "normalize audio", "make all clips the same volume", "balance the sound", "equalize audio levels", "normalize the sound across all clips", etc.
+- This analyzes each clip's peak volume and sets individual clip volumes so the loudest peak in each clip matches the target
+- This is auto-applied — the editor will analyze and adjust volumes automatically
 
 ### 9b. Markers (add_marker / add_markers / update_marker / remove_marker)
 - Create numbered markers on the timeline to tag candidate moments for review
@@ -208,8 +221,17 @@ Black and white on the first clip:
 Transcribe:
 <action>{"type":"transcribe_request","segments":[{"startTime":0,"endTime":60}],"message":"Transcribing the audio.","final":false}</action>
 
-Transition:
-<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"I found a fade to black to add at 0:30.","final":true}</action>
+Transition (fade to black):
+<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"fade_black","duration":1.0}],"message":"I added a fade to black at 0:30.","final":true}</action>
+
+Transition (crossfade):
+<action>{"type":"add_transition","transitions":[{"atTime":30,"type":"crossfade","duration":1.0}],"message":"I added a crossfade at 0:30.","final":true}</action>
+
+Transition (wipe):
+<action>{"type":"add_transition","transitions":[{"atTime":15,"type":"wipe_left","duration":0.8}],"message":"I added a left wipe at 0:15.","final":true}</action>
+
+Normalize audio:
+<action>{"type":"normalize_audio","targetPeakDb":-1.0,"message":"I'll analyze and normalize the audio levels across all clips.","final":true}</action>
 
 Markers:
 <action>{"type":"add_markers","markers":[{"timelineTime":30,"label":"Boss intro","createdBy":"ai","status":"open","linkedRange":{"startTime":29.6,"endTime":30.8}},{"timelineTime":54.2,"label":"Big hit","createdBy":"ai","status":"open","linkedRange":{"startTime":54.0,"endTime":54.8}}],"message":"Tagged two likely cut moments for review.","final":true}</action>
@@ -1069,6 +1091,8 @@ function buildReviewProposalMessage(action: EditAction): string {
     }
     case 'replace_text_overlay':
       return 'I can update the text overlay.';
+    case 'normalize_audio':
+      return 'I can normalize audio levels across all clips.';
     default:
       return action.message;
   }

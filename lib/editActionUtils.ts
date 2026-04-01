@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { buildClipSchedule, buildPlainSchedule, normalizeTransitionEntries } from './playbackEngine';
+import { buildClipSchedule, buildPlainSchedule, normalizeTransitionEntries, resolveTransitions } from './playbackEngine';
 import { normalizeTextOverlayEntry } from './textOverlays';
 import { buildCaptionEntriesFromWords, projectCaptionWordsToTimeline } from './timelineUtils';
 import type {
@@ -487,13 +487,32 @@ export function applyActionToSnapshot(
   }
 
   if (resolvedAction.type === 'add_transition') {
-    const transitions = normalizeTransitionEntries(
-      snapshot.clips,
-      [...snapshot.transitions, ...(resolvedAction.transitions ?? []).map((transition) => ({ ...transition, id: uuidv4() }))],
-    );
+    const allTransitions = [...snapshot.transitions, ...(resolvedAction.transitions ?? []).map((transition) => ({ ...transition, id: uuidv4() }))];
+    const transitions = normalizeTransitionEntries(snapshot.clips, allTransitions);
+    // Also attach transitions to clips as outTransition
+    const resolved = resolveTransitions(snapshot.clips, transitions);
+    const outTransitionByClipId = new Map(resolved.map((b) => [b.fromClipId, { id: b.id ?? uuidv4(), type: b.type, duration: b.duration }]));
+    const clips = snapshot.clips.map((clip) => {
+      const out = outTransitionByClipId.get(clip.id);
+      return out ? { ...clip, outTransition: out } : clip.outTransition ? { ...clip, outTransition: null } : clip;
+    });
     return {
       ...snapshot,
+      clips,
       transitions,
+    };
+  }
+
+  if (resolvedAction.type === 'normalize_audio') {
+    const adjustments = resolvedAction.volumeAdjustments;
+    if (!adjustments || adjustments.length === 0) return snapshot;
+    const adjustmentMap = new Map(adjustments.map((a) => [a.clipId, a.newVolume]));
+    return {
+      ...snapshot,
+      clips: snapshot.clips.map((clip) => {
+        const newVolume = adjustmentMap.get(clip.id);
+        return newVolume !== undefined ? { ...clip, volume: newVolume } : clip;
+      }),
     };
   }
 

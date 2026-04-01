@@ -4,8 +4,10 @@ import type {
   ResolvedTransitionBoundary,
   Track,
   TransitionEntry,
+  TransitionType,
   VideoClip,
 } from './types';
+import { VALID_TRANSITION_TYPES } from './types';
 
 const CONTINUOUS_SOURCE_SEQUENCE_EPSILON = 1 / 60;
 
@@ -19,8 +21,11 @@ function clampTransitionDuration(duration: number, fromClip: VideoClip, toClip: 
   return Math.max(0, Math.min(duration, maxDuration));
 }
 
-function normalizeTransitionType(type: TransitionEntry['type'] | string | undefined): TransitionEntry['type'] {
-  return type === 'fade_black' ? 'fade_black' : 'fade_black';
+function normalizeTransitionType(type: TransitionType | string | undefined): TransitionType {
+  if (type && (VALID_TRANSITION_TYPES as readonly string[]).includes(type)) {
+    return type as TransitionType;
+  }
+  return 'fade_black';
 }
 
 function getBoundaryIndexForTransition(
@@ -95,11 +100,13 @@ export function resolveTransitions(
   clips: VideoClip[],
   transitions: TransitionEntry[] = [],
 ): ResolvedTransitionBoundary[] {
-  if (clips.length < 2 || transitions.length === 0) return [];
+  if (clips.length < 2) return [];
+  if (transitions.length === 0 && !clips.some((c) => c.outTransition)) return [];
 
   const plainSchedule = buildPlainSchedule(clips);
   const resolvedByBoundary = new Map<number, Omit<ResolvedTransitionBoundary, 'atTime'>>();
 
+  // First pass: legacy TransitionEntry[] array
   for (const transition of transitions) {
     const boundaryIndex = getBoundaryIndexForTransition(clips, transition, plainSchedule);
     if (boundaryIndex < 0 || boundaryIndex >= clips.length - 1) continue;
@@ -119,6 +126,28 @@ export function resolveTransitions(
       type: normalizeTransitionType(transition.type),
       duration,
       fromClipId: fromClip.id,
+      toClipId: toClip.id,
+    });
+  }
+
+  // Second pass: clip.outTransition takes precedence over legacy entries
+  for (let i = 0; i < clips.length - 1; i++) {
+    const clip = clips[i];
+    if (!clip.outTransition) continue;
+    const toClip = clips[i + 1];
+    const duration = clampTransitionDuration(
+      Number.isFinite(clip.outTransition.duration) ? clip.outTransition.duration : 0,
+      clip,
+      toClip,
+    );
+    if (duration <= 0) continue;
+
+    resolvedByBoundary.set(i, {
+      id: clip.outTransition.id,
+      afterClipId: clip.id,
+      type: normalizeTransitionType(clip.outTransition.type),
+      duration,
+      fromClipId: clip.id,
       toClipId: toClip.id,
     });
   }

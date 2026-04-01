@@ -4,7 +4,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 import { buildCaptionRenderWindows, invertSegments } from './timelineUtils';
 import { normalizeTransitionEntries, resolveTransitions } from './playbackEngine';
-import { CaptionEntry, TextOverlayEntry, Track, TransitionEntry, VideoClip } from './types';
+import { CaptionEntry, TextOverlayEntry, Track, TransitionEntry, TransitionType, VideoClip } from './types';
 import { MAIN_SOURCE_ID } from './sourceUtils';
 import { getTextOverlayExportY, getTextOverlayFontSize, normalizeTextOverlayEntry } from './textOverlays';
 
@@ -238,6 +238,60 @@ async function execOrThrow(ffmpeg: FFmpeg, args: string[]) {
   }
 }
 
+// ─── Audio Loudness Analysis ────────────────────────────────────────────────
+
+export interface ClipLoudnessResult {
+  maxVolumeDb: number;
+  meanVolumeDb: number;
+}
+
+export async function analyzeClipLoudness(
+  fileOrUrl: Uint8Array | File | string,
+  sourceStart: number,
+  sourceDuration: number,
+): Promise<ClipLoudnessResult> {
+  const ffmpeg = await getFFmpeg();
+  const inputData = await readMediaInput(fileOrUrl);
+  const inputName = '_voldetect_input.mp4';
+  const outputName = '_voldetect_out.wav';
+
+  await ffmpeg.writeFile(inputName, cloneWritableBytes(inputData));
+
+  // Clear logs before analysis
+  const logsBefore = recentFFmpegLogs.length;
+  recentFFmpegLogs = [];
+
+  await execOrThrow(ffmpeg, [
+    '-ss', sourceStart.toFixed(6),
+    '-t', sourceDuration.toFixed(6),
+    '-i', inputName,
+    '-vn',
+    '-af', 'volumedetect',
+    '-f', 'wav',
+    outputName,
+  ]);
+
+  // Parse volumedetect output from logs
+  let maxVolumeDb = 0;
+  let meanVolumeDb = -Infinity;
+  for (const line of recentFFmpegLogs) {
+    const maxMatch = line.match(/max_volume:\s*([-\d.]+)\s*dB/);
+    if (maxMatch) maxVolumeDb = parseFloat(maxMatch[1]);
+    const meanMatch = line.match(/mean_volume:\s*([-\d.]+)\s*dB/);
+    if (meanMatch) meanVolumeDb = parseFloat(meanMatch[1]);
+  }
+
+  // Cleanup
+  try { await ffmpeg.deleteFile(inputName); } catch {}
+  try { await ffmpeg.deleteFile(outputName); } catch {}
+
+  return { maxVolumeDb, meanVolumeDb };
+}
+
+export function dBToLinear(db: number): number {
+  return Math.pow(10, db / 20);
+}
+
 async function getCaptionFontData() {
   if (!captionFontDataPromise) {
     captionFontDataPromise = (async () => {
@@ -447,6 +501,34 @@ async function mixAudioTracks(
   return mixedOutput;
 }
 
+// ─── Transition Export Helpers ───────────────────────────────────────────────
+
+/** Returns true if the transition type uses the xfade filter (composites two clips) */
+function isXfadeTransition(type: TransitionType): boolean {
+  return type === 'crossfade' || type === 'wipe_left' || type === 'wipe_right'
+    || type === 'slide_left' || type === 'slide_right'
+    || type === 'zoom_in' || type === 'zoom_out';
+}
+
+/** Returns true if the transition uses per-clip fade approach (no compositing) */
+function isFadeTransition(type: TransitionType): boolean {
+  return type === 'fade_black' || type === 'dip_to_white';
+}
+
+/** Maps our transition type to the FFmpeg xfade transition name */
+function getXfadeTransitionName(type: TransitionType): string {
+  switch (type) {
+    case 'crossfade': return 'fade';
+    case 'wipe_left': return 'wipeleft';
+    case 'wipe_right': return 'wiperight';
+    case 'slide_left': return 'slideleft';
+    case 'slide_right': return 'slideright';
+    case 'zoom_in': return 'zoomin';
+    case 'zoom_out': return 'fadeblack'; // FFmpeg doesn't have a native zoom_out, use fadeblack as fallback
+    default: return 'fade';
+  }
+}
+
 function getClipExportState(clip: VideoClip) {
   return {
     speed: Number.isFinite(clip.speed) && clip.speed > 0 ? clip.speed : 1,
@@ -465,6 +547,8 @@ function buildClipVideoFilterChain(
     durationSeconds?: number;
     extraFadeIn?: number;
     extraFadeOut?: number;
+    fadeInColor?: string;
+    fadeOutColor?: string;
   },
 ): string[] {
   const clipState = getClipExportState(clip);
@@ -494,11 +578,13 @@ function buildClipVideoFilterChain(
   }
 
   if (fadeInSeconds > 0) {
-    vFilters.push(`fade=t=in:st=0:d=${fadeInSeconds.toFixed(3)}`);
+    const colorSuffix = options?.fadeInColor ? `:color=${options.fadeInColor}` : '';
+    vFilters.push(`fade=t=in:st=0:d=${fadeInSeconds.toFixed(3)}${colorSuffix}`);
   }
   if (fadeOutSeconds > 0 && durationSeconds > 0) {
     const fadeOutStart = Math.max(0, durationSeconds - fadeOutSeconds);
-    vFilters.push(`fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutSeconds.toFixed(3)}`);
+    const colorSuffix = options?.fadeOutColor ? `:color=${options.fadeOutColor}` : '';
+    vFilters.push(`fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOutSeconds.toFixed(3)}${colorSuffix}`);
   }
 
   vFilters.push(
@@ -1082,7 +1168,7 @@ export async function exportClips(options: ExportClipsOptions): Promise<string> 
     );
 
     const segFiles: string[] = [];
-    const processingSpan = clips.length > 0 ? 75 / clips.length : 75;
+    const processingSpan = clips.length > 0 ? 65 / clips.length : 65;
     const transitionInByClipId = new Map(resolvedTransitions.map((transition) => [transition.toClipId, transition]));
     const transitionOutByClipId = new Map(resolvedTransitions.map((transition) => [transition.fromClipId, transition]));
 
@@ -1096,8 +1182,18 @@ export async function exportClips(options: ExportClipsOptions): Promise<string> 
       }
 
       const clipDurationSeconds = clip.sourceDuration / clip.speed;
-      const transitionInHalf = (transitionInByClipId.get(clip.id)?.duration ?? 0) / 2;
-      const transitionOutHalf = (transitionOutByClipId.get(clip.id)?.duration ?? 0) / 2;
+      const transitionIn = transitionInByClipId.get(clip.id);
+      const transitionOut = transitionOutByClipId.get(clip.id);
+
+      // Only apply per-clip fade for fade_black/dip_to_white transitions
+      // xfade transitions are composited later
+      const fadeInTransition = transitionIn && isFadeTransition(transitionIn.type) ? transitionIn : null;
+      const fadeOutTransition = transitionOut && isFadeTransition(transitionOut.type) ? transitionOut : null;
+      const transitionInHalf = (fadeInTransition?.duration ?? 0) / 2;
+      const transitionOutHalf = (fadeOutTransition?.duration ?? 0) / 2;
+      const fadeInColor = fadeInTransition?.type === 'dip_to_white' ? 'white' : undefined;
+      const fadeOutColor = fadeOutTransition?.type === 'dip_to_white' ? 'white' : undefined;
+
       const args: string[] = [
         '-ss', String(clip.sourceStart),
         '-t', String(clip.sourceDuration),
@@ -1106,6 +1202,8 @@ export async function exportClips(options: ExportClipsOptions): Promise<string> 
           durationSeconds: clipDurationSeconds,
           extraFadeIn: transitionInHalf,
           extraFadeOut: transitionOutHalf,
+          fadeInColor,
+          fadeOutColor,
         }).join(','),
         '-af', buildClipAudioFilterChain(clip, {
           durationSeconds: clipDurationSeconds,
@@ -1131,12 +1229,88 @@ export async function exportClips(options: ExportClipsOptions): Promise<string> 
       reportOverallProgress(phaseStart + phaseSpan);
     }
 
-    let stitchedOutputName = segFiles[0];
-    if (segFiles.length > 1) {
-      phaseStart = 90;
+    // Apply xfade transitions between consecutive clips that need compositing
+    const hasXfadeTransitions = resolvedTransitions.some((t) => isXfadeTransition(t.type));
+    let composedSegFiles = segFiles;
+
+    if (hasXfadeTransitions && segFiles.length >= 2) {
+      onStage?.('Compositing transitions…');
+      phaseStart = 80;
+      phaseSpan = 8;
+
+      // Build clip durations array (after speed adjustment)
+      const clipDurations = clips.map((clip) => clip.sourceDuration / (clip.speed > 0 ? clip.speed : 1));
+
+      // Apply xfade transitions progressively: chain [seg0, seg1] → [x0, seg2] → [x1, seg3] etc.
+      let currentFile = segFiles[0];
+      let currentDuration = clipDurations[0];
+
+      for (let i = 0; i < clips.length - 1; i++) {
+        const transition = transitionOutByClipId.get(clips[i].id);
+        const nextFile = segFiles[i + 1];
+        const nextDuration = clipDurations[i + 1];
+
+        if (transition && isXfadeTransition(transition.type)) {
+          const xfadeName = getXfadeTransitionName(transition.type);
+          const xfadeDuration = Math.min(transition.duration, currentDuration - 0.01, nextDuration - 0.01);
+          const xfadeOffset = Math.max(0, currentDuration - xfadeDuration);
+          const outputName = `export_xfade_${i}.mp4`;
+
+          await execOrThrow(ffmpeg, [
+            '-i', currentFile,
+            '-i', nextFile,
+            '-filter_complex',
+            `[0:v][1:v]xfade=transition=${xfadeName}:duration=${xfadeDuration.toFixed(3)}:offset=${xfadeOffset.toFixed(3)}[v];` +
+            `[0:a][1:a]acrossfade=d=${xfadeDuration.toFixed(3)}[a]`,
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            '-r', '30',
+            '-c:a', 'aac',
+            '-ar', '48000',
+            '-ac', '2',
+            outputName,
+          ]);
+
+          // Clean up previous intermediate file
+          if (currentFile.startsWith('export_xfade_')) {
+            try { await ffmpeg.deleteFile(currentFile); } catch {}
+          }
+          currentFile = outputName;
+          currentDuration = currentDuration + nextDuration - xfadeDuration;
+        } else {
+          // No xfade transition — these will be concat'd normally
+          // We need to concat currentFile with nextFile first
+          const concatName = `export_concat_${i}.mp4`;
+          const concatList = `file '${currentFile}'\nfile '${nextFile}'`;
+          await ffmpeg.writeFile(`concat_${i}.txt`, new TextEncoder().encode(concatList));
+          await execOrThrow(ffmpeg, [
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', `concat_${i}.txt`,
+            '-c', 'copy',
+            concatName,
+          ]);
+          if (currentFile.startsWith('export_xfade_') || currentFile.startsWith('export_concat_')) {
+            try { await ffmpeg.deleteFile(currentFile); } catch {}
+          }
+          try { await ffmpeg.deleteFile(`concat_${i}.txt`); } catch {}
+          currentFile = concatName;
+          currentDuration = currentDuration + nextDuration;
+        }
+      }
+
+      composedSegFiles = [currentFile];
+    }
+
+    let stitchedOutputName = composedSegFiles[0];
+    if (composedSegFiles.length > 1) {
+      phaseStart = 88;
       phaseSpan = (captionWindows.length > 0 || normalizedTextOverlays.length > 0) ? 3 : 8;
       onStage?.('Concatenating clips…');
-      const concatContent = segFiles.map((file) => `file '${file}'`).join('\n');
+      const concatContent = composedSegFiles.map((file) => `file '${file}'`).join('\n');
       const encoder = new TextEncoder();
       stitchedOutputName = (captionWindows.length > 0 || normalizedTextOverlays.length > 0) ? 'export_stitched.mp4' : 'export_output.mp4';
       await ffmpeg.writeFile('export_concat.txt', encoder.encode(concatContent));

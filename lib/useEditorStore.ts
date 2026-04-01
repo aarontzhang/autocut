@@ -21,6 +21,8 @@ import {
   TextOverlayEntry,
   Track,
   TransitionEntry,
+  TransitionType,
+  VALID_TRANSITION_TYPES,
   VideoClip,
 } from './types';
 import { normalizeImageOverlayEntry } from './imageOverlays';
@@ -245,12 +247,7 @@ function normalizeLoadedTracks(raw: unknown[] | null | undefined): Track[] {
 
 function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEntry | null {
   const rawType = entry.type;
-  if (
-    rawType !== 'fade_black'
-    && rawType !== 'crossfade'
-    && rawType !== 'dissolve'
-    && rawType !== 'wipe'
-  ) {
+  if (!rawType || !(VALID_TRANSITION_TYPES as readonly string[]).includes(rawType)) {
     return null;
   }
   if (!Number.isFinite(entry.duration)) return null;
@@ -259,7 +256,7 @@ function normalizeTransitionEntry(entry: Partial<TransitionEntry>): TransitionEn
     id: typeof entry.id === 'string' ? entry.id : undefined,
     afterClipId: typeof entry.afterClipId === 'string' ? entry.afterClipId : undefined,
     atTime,
-    type: 'fade_black',
+    type: rawType as TransitionType,
     duration: Math.max(0.05, entry.duration!),
   };
 }

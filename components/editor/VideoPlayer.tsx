@@ -10,7 +10,7 @@ import {
   shouldUseSeparateVideoLayerForPlaybackHandoff,
 } from '@/lib/playbackEngine';
 import { buildCaptionRenderWindows } from '@/lib/timelineUtils';
-import type { RenderTimelineEntry, Track, VideoClip } from '@/lib/types';
+import type { RenderTimelineEntry, Track, TransitionType, VideoClip } from '@/lib/types';
 import { describeSourceResolutionFailure, resolveProjectSources } from '@/lib/sourceMedia';
 import { getTextOverlayPreviewPositionStyle } from '@/lib/textOverlays';
 
@@ -74,7 +74,116 @@ function getEntrySourceTime(entry: RenderTimelineEntry, timelineTime: number) {
   return entry.sourceStart + (clampedTimelineTime - entry.timelineStart) * entry.speed;
 }
 
-function getBoundaryFadeState(entry: RenderTimelineEntry | null, timelineTime: number) {
+interface TransitionRenderState {
+  boundary: RenderTimelineEntry['transitionOut'] & {};
+  phase: 'outgoing' | 'incoming';
+  progress: number; // 0..1
+  type: TransitionType;
+  // Overlay-based transitions (fade_black, dip_to_white)
+  overlayColor: string | null; // '#000' or '#fff' or null
+  overlayOpacity: number;
+  // Volume
+  volumeMultiplier: number;
+  // Layer blending (crossfade, wipe, slide, zoom)
+  leadLayerOpacity: number;
+  spareLayerOpacity: number;
+  leadLayerTransform: string;
+  spareLayerTransform: string;
+  leadLayerClipPath: string;
+  spareLayerClipPath: string;
+}
+
+function computeTransitionVisuals(type: TransitionType, phase: 'outgoing' | 'incoming', progress: number): Omit<TransitionRenderState, 'boundary' | 'phase' | 'progress' | 'type'> {
+  // For outgoing phase: progress 0→1 means start→boundary
+  // For incoming phase: progress 0→1 means boundary→end
+  const t = phase === 'outgoing' ? progress : 1 - progress;
+  // t=0 means full outgoing, t=1 means full incoming
+
+  const base = {
+    overlayColor: null as string | null,
+    overlayOpacity: 0,
+    volumeMultiplier: phase === 'outgoing' ? 1 - progress : progress,
+    leadLayerOpacity: 1,
+    spareLayerOpacity: 0,
+    leadLayerTransform: '',
+    spareLayerTransform: '',
+    leadLayerClipPath: '',
+    spareLayerClipPath: '',
+  };
+
+  switch (type) {
+    case 'fade_black':
+      return {
+        ...base,
+        overlayColor: '#000',
+        overlayOpacity: phase === 'outgoing' ? progress : 1 - progress,
+      };
+    case 'dip_to_white':
+      return {
+        ...base,
+        overlayColor: '#fff',
+        overlayOpacity: phase === 'outgoing' ? progress : 1 - progress,
+      };
+    case 'crossfade':
+      return {
+        ...base,
+        leadLayerOpacity: phase === 'outgoing' ? 1 - progress : progress,
+        spareLayerOpacity: phase === 'outgoing' ? progress : 1 - progress,
+      };
+    case 'wipe_left':
+      return {
+        ...base,
+        leadLayerOpacity: 1,
+        spareLayerOpacity: 1,
+        spareLayerClipPath: phase === 'outgoing'
+          ? `inset(0 ${(1 - progress) * 100}% 0 0)`
+          : `inset(0 0 0 ${(1 - progress) * 100}%)`,
+      };
+    case 'wipe_right':
+      return {
+        ...base,
+        leadLayerOpacity: 1,
+        spareLayerOpacity: 1,
+        spareLayerClipPath: phase === 'outgoing'
+          ? `inset(0 0 0 ${(1 - progress) * 100}%)`
+          : `inset(0 ${(1 - progress) * 100}% 0 0)`,
+      };
+    case 'slide_left':
+      return {
+        ...base,
+        leadLayerOpacity: 1,
+        spareLayerOpacity: 1,
+        leadLayerTransform: phase === 'outgoing' ? `translateX(-${progress * 100}%)` : `translateX(${(1 - progress) * 100}%)`,
+        spareLayerTransform: phase === 'outgoing' ? `translateX(${(1 - progress) * 100}%)` : `translateX(-${progress * 100}%)`,
+      };
+    case 'slide_right':
+      return {
+        ...base,
+        leadLayerOpacity: 1,
+        spareLayerOpacity: 1,
+        leadLayerTransform: phase === 'outgoing' ? `translateX(${progress * 100}%)` : `translateX(-${(1 - progress) * 100}%)`,
+        spareLayerTransform: phase === 'outgoing' ? `translateX(-${(1 - progress) * 100}%)` : `translateX(${progress * 100}%)`,
+      };
+    case 'zoom_in':
+      return {
+        ...base,
+        leadLayerOpacity: phase === 'outgoing' ? 1 - progress : progress,
+        spareLayerOpacity: phase === 'outgoing' ? progress : 1 - progress,
+        leadLayerTransform: phase === 'outgoing' ? `scale(${1 + progress * 0.5})` : '',
+      };
+    case 'zoom_out':
+      return {
+        ...base,
+        leadLayerOpacity: phase === 'outgoing' ? 1 - progress : progress,
+        spareLayerOpacity: phase === 'outgoing' ? progress : 1 - progress,
+        leadLayerTransform: phase === 'outgoing' ? `scale(${1 - progress * 0.3})` : '',
+      };
+    default:
+      return base;
+  }
+}
+
+function getTransitionRenderState(entry: RenderTimelineEntry | null, timelineTime: number): TransitionRenderState | null {
   if (!entry) return null;
 
   if (entry.transitionOut) {
@@ -83,11 +192,13 @@ function getBoundaryFadeState(entry: RenderTimelineEntry | null, timelineTime: n
       const fadeStart = entry.transitionOut.atTime - halfDuration;
       if (timelineTime >= fadeStart && timelineTime < entry.transitionOut.atTime) {
         const progress = Math.max(0, Math.min(1, (timelineTime - fadeStart) / halfDuration));
+        const type = entry.transitionOut.type ?? 'fade_black';
         return {
           boundary: entry.transitionOut,
-          phase: 'outgoing' as const,
-          blackOpacity: progress,
-          volumeMultiplier: 1 - progress,
+          phase: 'outgoing',
+          progress,
+          type,
+          ...computeTransitionVisuals(type, 'outgoing', progress),
         };
       }
     }
@@ -99,11 +210,13 @@ function getBoundaryFadeState(entry: RenderTimelineEntry | null, timelineTime: n
       const fadeEnd = entry.transitionIn.atTime + halfDuration;
       if (timelineTime >= entry.transitionIn.atTime && timelineTime < fadeEnd) {
         const progress = Math.max(0, Math.min(1, (timelineTime - entry.transitionIn.atTime) / halfDuration));
+        const type = entry.transitionIn.type ?? 'fade_black';
         return {
           boundary: entry.transitionIn,
-          phase: 'incoming' as const,
-          blackOpacity: 1 - progress,
-          volumeMultiplier: progress,
+          phase: 'incoming',
+          progress,
+          type,
+          ...computeTransitionVisuals(type, 'incoming', progress),
         };
       }
     }
@@ -338,7 +451,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
   ), [currentTime, renderTimeline]);
   const activeEntryAtCurrentTime = activeEntriesAtCurrentTime[0] ?? null;
   const currentBoundaryFade = useMemo(
-    () => getBoundaryFadeState(activeEntryAtCurrentTime, currentTime),
+    () => getTransitionRenderState(activeEntryAtCurrentTime, currentTime),
     [activeEntryAtCurrentTime, currentTime],
   );
   const primaryLayerSourceId = activeEntryAtCurrentTime?.sourceId ?? renderTimeline[0]?.sourceId ?? null;
@@ -749,11 +862,25 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
       clearLayer(spareLayerId);
     }
 
-    const boundaryFade = getBoundaryFadeState(primaryEntry, timelineTime);
+    const boundaryFade = getTransitionRenderState(primaryEntry, timelineTime);
     applyClipEffects(primaryVideo, primaryClip, boundaryFade?.volumeMultiplier ?? 1);
 
     if (secondaryVideo) {
-      secondaryVideo.volume = 0;
+      // For crossfade/wipe/slide/zoom, the spare layer may need audio too
+      if (boundaryFade && boundaryFade.spareLayerOpacity > 0 && upcomingEntry) {
+        const upcomingClip = clipById.get(upcomingEntry.clipId);
+        if (upcomingClip) {
+          const spareVolume = Math.max(0, Math.min(1, upcomingClip.volume * (1 - boundaryFade.volumeMultiplier)));
+          secondaryVideo.volume = spareVolume;
+          if (secondaryVideo.paused && playbackIntentRef.current) {
+            secondaryVideo.play().catch(() => {});
+          }
+        } else {
+          secondaryVideo.volume = 0;
+        }
+      } else {
+        secondaryVideo.volume = 0;
+      }
     }
 
     if (options?.allowPlay && playbackIntentRef.current && primaryVideo.paused) {
@@ -854,10 +981,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     const entrySourceEnd = primaryEntry.sourceStart + primaryEntry.sourceDuration;
 
     if (sourceTime < entrySourceEnd - END_EPSILON) {
-      const timelineTime = Math.max(
+      const rawTimelineTime = Math.max(
         primaryEntry.timelineStart,
         Math.min(primaryEntry.timelineEnd, primaryEntry.timelineStart + (sourceTime - primaryEntry.sourceStart) / primaryEntry.speed),
       );
+      // Monotonic time guard: prevent timeline from going backward (prevents crossfade replay bugs)
+      const timelineTime = Math.max(currentTimeRef.current, rawTimelineTime);
       if (Math.abs(currentTimeRef.current - timelineTime) > 1 / 240) {
         currentTimeRef.current = timelineTime;
         setCurrentTime(timelineTime);
@@ -1063,8 +1192,30 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
     }
   }, [getLeadVideo, pauseInactiveVideo, syncLayers]);
 
-  const primaryLayerOpacity = leadLayer === 'primary' ? 1 : 0;
-  const secondaryLayerOpacity = leadLayer === 'secondary' ? 1 : 0;
+  const primaryLayerOpacity = (() => {
+    if (!currentBoundaryFade) return leadLayer === 'primary' ? 1 : 0;
+    return leadLayer === 'primary' ? currentBoundaryFade.leadLayerOpacity : currentBoundaryFade.spareLayerOpacity;
+  })();
+  const secondaryLayerOpacity = (() => {
+    if (!currentBoundaryFade) return leadLayer === 'secondary' ? 1 : 0;
+    return leadLayer === 'secondary' ? currentBoundaryFade.leadLayerOpacity : currentBoundaryFade.spareLayerOpacity;
+  })();
+  const primaryLayerTransform = (() => {
+    if (!currentBoundaryFade) return '';
+    return leadLayer === 'primary' ? currentBoundaryFade.leadLayerTransform : currentBoundaryFade.spareLayerTransform;
+  })();
+  const secondaryLayerTransform = (() => {
+    if (!currentBoundaryFade) return '';
+    return leadLayer === 'secondary' ? currentBoundaryFade.leadLayerTransform : currentBoundaryFade.spareLayerTransform;
+  })();
+  const primaryLayerClipPath = (() => {
+    if (!currentBoundaryFade) return '';
+    return leadLayer === 'primary' ? currentBoundaryFade.leadLayerClipPath : currentBoundaryFade.spareLayerClipPath;
+  })();
+  const secondaryLayerClipPath = (() => {
+    if (!currentBoundaryFade) return '';
+    return leadLayer === 'secondary' ? currentBoundaryFade.leadLayerClipPath : currentBoundaryFade.spareLayerClipPath;
+  })();
 
   // ─── Audio Track Playback ─────────────────────────────────────────────────
   const tracks = useEditorStore((s) => s.tracks);
@@ -1175,6 +1326,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               objectFit: 'contain',
               pointerEvents: 'none',
               opacity: primaryLayerOpacity,
+              transform: primaryLayerTransform || undefined,
+              clipPath: primaryLayerClipPath || undefined,
             }}
             onLoadedMetadata={(event) => {
               const el = event.currentTarget;
@@ -1240,6 +1393,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
               objectFit: 'contain',
               pointerEvents: 'none',
               opacity: secondaryLayerOpacity,
+              transform: secondaryLayerTransform || undefined,
+              clipPath: secondaryLayerClipPath || undefined,
             }}
             muted={false}
             playsInline
@@ -1298,13 +1453,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(({ videoRef 
             }}
           />
 
-          {currentBoundaryFade && currentBoundaryFade.blackOpacity > 0 && (
+          {currentBoundaryFade && currentBoundaryFade.overlayColor && currentBoundaryFade.overlayOpacity > 0 && (
             <div
               style={{
                 position: 'absolute',
                 inset: 0,
-                background: '#000',
-                opacity: currentBoundaryFade.blackOpacity,
+                background: currentBoundaryFade.overlayColor,
+                opacity: currentBoundaryFade.overlayOpacity,
                 pointerEvents: 'none',
               }}
             />

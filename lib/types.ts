@@ -1,5 +1,28 @@
 export type CaptionRenderStyle = 'rolling_word' | 'static';
 
+export type TransitionType =
+  | 'fade_black'
+  | 'crossfade'
+  | 'dip_to_white'
+  | 'wipe_left'
+  | 'wipe_right'
+  | 'slide_left'
+  | 'slide_right'
+  | 'zoom_in'
+  | 'zoom_out';
+
+export const VALID_TRANSITION_TYPES: readonly TransitionType[] = [
+  'fade_black', 'crossfade', 'dip_to_white',
+  'wipe_left', 'wipe_right', 'slide_left', 'slide_right',
+  'zoom_in', 'zoom_out',
+] as const;
+
+export interface ClipTransition {
+  id: string;
+  type: TransitionType;
+  duration: number;
+}
+
 export interface CaptionWordTiming {
   startTime: number;
   endTime: number;
@@ -39,6 +62,7 @@ export interface VideoClip {
   fadeIn: number;        // seconds
   fadeOut: number;       // seconds
   displayNumber: number; // stable identity number, persists across reorder
+  outTransition?: ClipTransition | null; // transition to next clip on same track
 }
 
 export interface ClipScheduleEntry {
@@ -86,7 +110,7 @@ export interface TransitionEntry {
   id?: string;
   afterClipId?: string;
   atTime: number;
-  type: 'fade_black';
+  type: TransitionType;
   duration: number;
 }
 
@@ -94,7 +118,7 @@ export interface ResolvedTransitionBoundary {
   id?: string;
   afterClipId: string;
   atTime: number;
-  type: TransitionEntry['type'];
+  type: TransitionType;
   duration: number;
   fromClipId: string;
   toClipId: string;
@@ -284,7 +308,7 @@ export interface AIEditingSettings {
   };
   transitions: {
     defaultDuration: number;
-    defaultType: 'fade_black';
+    defaultType: TransitionType;
   };
   textOverlays: {
     defaultPosition: 'top' | 'center' | 'bottom';
@@ -319,6 +343,7 @@ export interface EditAction {
     | 'add_track'
     | 'remove_track'
     | 'update_track'
+    | 'normalize_audio'
     | 'none';
   // split_clip
   splitTime?: number;
@@ -365,6 +390,15 @@ export interface EditAction {
   track?: Track;
   trackId?: string;
   trackPatch?: Partial<Track>;
+  // normalize_audio
+  targetPeakDb?: number;
+  volumeAdjustments?: Array<{
+    clipId: string;
+    clipIndex: number;
+    previousVolume: number;
+    newVolume: number;
+    measuredPeakDb: number;
+  }>;
   message: string;
 }
 

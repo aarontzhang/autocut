@@ -1,4 +1,4 @@
-import { ColorFilter, EditAction, ImageOverlayEntry, MarkerEntry, TextOverlayEntry, TransitionEntry } from '@/lib/types';
+import { ColorFilter, EditAction, ImageOverlayEntry, MarkerEntry, TextOverlayEntry, TransitionEntry, TransitionType, VALID_TRANSITION_TYPES } from '@/lib/types';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -240,14 +240,15 @@ function sanitizeTransition(transition: unknown, videoDuration: number): Transit
   const candidate = transition as Record<string, unknown>;
   const atTime = sanitizeTime(candidate.atTime, videoDuration);
   if (atTime === null) return null;
-  if (candidate.type !== 'fade_black') {
+  const rawType = candidate.type;
+  if (typeof rawType !== 'string' || !(VALID_TRANSITION_TYPES as readonly string[]).includes(rawType)) {
     return null;
   }
   if (!isFiniteNumber(candidate.duration)) return null;
 
   return {
     atTime,
-    type: 'fade_black',
+    type: rawType as TransitionType,
     duration: clamp(candidate.duration, 0.1, 10),
   };
 }
@@ -612,6 +613,13 @@ export function validateEditAction(rawAction: unknown, context: ActionValidation
   if (type === 'remove_image_overlay') {
     if (typeof action.imageOverlayId !== 'string') return null;
     return { ...base, type, imageOverlayId: action.imageOverlayId };
+  }
+
+  if (type === 'normalize_audio') {
+    const targetPeakDb = isFiniteNumber(action.targetPeakDb)
+      ? clamp(action.targetPeakDb, -40, 0)
+      : -1.0;
+    return { ...base, type, targetPeakDb };
   }
 
   return null;
