@@ -309,8 +309,7 @@ function ManagePanel() {
       </div>
 
       {/* Manage billing (Stripe portal) */}
-      {!details.isGrandfathered && (
-        <button
+      <button
           onClick={openPortal}
           disabled={portalLoading}
           style={{
@@ -341,10 +340,9 @@ function ManagePanel() {
         >
           {portalLoading ? 'Opening\u2026' : 'Manage billing'}
         </button>
-      )}
 
       {/* Cancel / Reactivate */}
-      {isActive && !isCanceling && !details.isGrandfathered && (
+      {isActive && !isCanceling && (
         <button
           onClick={() => handleAction('cancel')}
           disabled={actionLoading}
@@ -377,7 +375,7 @@ function ManagePanel() {
         </button>
       )}
 
-      {isActive && isCanceling && !details.isGrandfathered && (
+      {isActive && isCanceling && (
         <button
           onClick={() => handleAction('reactivate')}
           disabled={actionLoading}
