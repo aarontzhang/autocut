@@ -2881,7 +2881,11 @@ export default function ChatSidebar() {
       });
 
       const markerAction = isMarkerMutationAction(action);
-      const assistantMessage = streamingAccumulated.trim() || message.trim() || getAssistantFallbackMessage(action);
+      // Prefer the server-processed message over the raw streaming text.
+      // buildUserFacingAssistantMessage on the server replaces forward-looking
+      // prose (e.g. "I'll place that marker") with the actual outcome when the
+      // action is type:none, so the processed message is more accurate.
+      const assistantMessage = message.trim() || streamingAccumulated.trim() || getAssistantFallbackMessage(action);
       const duplicateCompletedAction = requestChainId && action && action.type !== 'none' && chainState
         ? chainState.completedActions.find((completedAction) => actionsMatch(completedAction, action)) ?? null
         : null;
