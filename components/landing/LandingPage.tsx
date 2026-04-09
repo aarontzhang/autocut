@@ -643,11 +643,6 @@ export default function LandingPage() {
             align-items: flex-start;
             gap: 10px;
           }
-          .lp-footer-contact {
-            margin-left: 0 !important;
-            text-align: left !important;
-            max-width: none !important;
-          }
         }
       `}</style>
 
@@ -792,28 +787,6 @@ export default function LandingPage() {
           <AutocutMark size={20} withTile />
           <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.35)' }}>Autocut</span>
         </div>
-        <p className="lp-footer-contact" style={{
-          margin: '0 0 0 auto',
-          maxWidth: 460,
-          fontSize: 14,
-          fontWeight: 500,
-          lineHeight: 1.45,
-          letterSpacing: '-0.02em',
-          textAlign: 'right',
-          color: 'rgba(255,255,255,0.52)',
-        }}>
-          Interested? Text me, the founder, personally at{' '}
-          <a
-            href="tel:5087456868"
-            style={{
-              color: 'inherit',
-              textDecoration: 'none',
-            }}
-          >
-            508-745-6868
-          </a>
-          .
-        </p>
       </footer>
     </div>
   );
